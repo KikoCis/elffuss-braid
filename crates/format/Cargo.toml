@@ -1,0 +1,19 @@
+[package]
+name = "elffuss-braid-format"
+description = "Object model and canonical on-disk format of elffuss-braid. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lib]
+name = "braid_format"
+
+[dependencies]
+blake3.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,235 @@
+# Braid format v1
+
+**Status: draft.** Sections marked *implemented* exist in code and are pinned by
+golden vectors in the tests. Everything else is the design that milestone 1
+implements. The format freezes when milestone 1 closes; after that, any change
+to hashed bytes needs a new format version.
+
+This document covers what is **hashed**: ids, trees, changesets and names. How
+the store keeps objects on disk (records, indexes, compression, deltas, chunks)
+is not part of any id and has its own, separately versioned, section at the end.
+
+## 1. Conventions
+
+- Integers are little-endian.
+- `uv` is an unsigned LEB128 integer of at most 64 bits. Encoders write the
+  shortest form; decoders reject overlong forms (such as `80 00`) and values
+  that do not fit in 64 bits.
+- `sv` is a signed integer, zigzag-mapped and then written as `uv`.
+- `bytes` is a `uv` length followed by that many raw bytes.
+- `[32]` is exactly 32 raw bytes: an object id.
+- A decoder rejects any bytes left over after the last field.
+- Names and paths are byte strings, not text. A path joins names with `/`.
+
+## 2. Object ids (implemented)
+
+An object id is BLAKE3 in key-derivation mode, with one context string per kind:
+
+| Kind | Code | Context string |
+|---|---|---|
+| blob | 1 | `elffuss-braid 2026 blob v1` |
+| tree | 2 | `elffuss-braid 2026 tree v1` |
+| changeset | 3 | `elffuss-braid 2026 changeset v1` |
+| chunklist | 4 | `elffuss-braid 2026 chunklist v1` |
+| derived | 5 | `elffuss-braid 2026 derived v1` |
+
+```
+id = BLAKE3-derive-key(context(kind), payload)        32 bytes
+```
+
+- The context separates kinds, so the payload carries no type prefix and can be
+  hashed while it streams in.
+- A **blob id is always the hash of the complete file content**, however the
+  store keeps it (whole, as a delta, or in chunks).
+- The text form is 64 lowercase hex digits; the short form is the first 12.
+  Parsers accept lowercase only, so equal ids always have equal text.
+
+Golden vectors (pinned in `crates/format/src/id.rs`):
+
+| Kind | Payload | Id |
+|---|---|---|
+| blob | empty | `ff9c212a7ef64fa38f0c411b3a68d523a20fd197ee3ba03fa4a44b7c5e99c958` |
+| blob | `hello\n` | `6acd5cdf880a325d2df716699943aae586ad77d54fb2ed0c5a3f53c76fa56f89` |
+| tree | empty | `46f1ab000b3145d2e28ff69f7570eb88065d76ef86905bb268699adb9c860c08` |
+| changeset | empty | `1be995db81f244ac5ea57f1ba45d9f9da94ad4edd6dbfa0979c16101a34d04ef` |
+| chunklist | empty | `f14231be43c0cc73e7c4850ec9d980e6952b56c57f7125d0c39d16874be2ab04` |
+| derived | empty | `6f101e23c531e6e3959878774beefb475944b2f0200e52eafb37fd80f97df172` |
+
+Anyone can check them with the reference [`b3sum`](https://github.com/BLAKE3-team/BLAKE3/tree/master/b3sum) tool:
+
+```bash
+printf 'hello\n' | b3sum --derive-key "elffuss-braid 2026 blob v1"
+```
+
+## 3. Trees
+
+A tree describes one directory. Small directories are one flat node. Large ones
+are split into a balanced tree of nodes whose boundaries depend only on the
+entry names, so the same set of entries always produces the same root id, no
+matter in which order it was edited.
+
+```
+u8   format = 1
+u8   node_type            0 flat, 1 leaf, 2 internal
+
+flat | leaf:
+  uv   n
+  n × entry               strictly ascending by name bytes
+
+entry:
+  bytes name
+  u8    kind              0 file, 1 executable, 2 symlink, 3 tree, 4 gitlink
+                          (5 is reserved for conflict entries in a later version)
+  kind 0–2:  [32] blob id, uv size in bytes
+  kind 3:    [32] tree id
+  kind 4:    u8 algorithm (1 = SHA-1, 2 = SHA-256), raw git id (20 or 32 bytes)
+
+internal:
+  u8   level              1 for the nodes just above the leaves
+  uv   n
+  n × (bytes last_name, [32] child id, uv entry_count)
+```
+
+- A symlink's target is stored as a blob.
+- File sizes live in the tree, so a listing or a virtual file system can report
+  sizes without fetching any content.
+- An empty directory is the tree with zero entries. It can be represented, but
+  checkouts never create one from scratch.
+
+**Splitting rule.** A directory with **1,024 entries or fewer must be one flat
+node.** A larger one must be split:
+
+1. Walk the sorted entries left to right, filling a leaf. After adding entry
+   `e` to a leaf that now holds `c` entries, end the leaf if
+   `c ≥ 32` and `u32le(H(0, e.name)[0..4]) < 2³² / 128`, or if `c = 512`.
+2. Build the next level the same way over the children, using each child's
+   `last_name`, with level numbers 1, 2, …, until one node remains: the root.
+
+`H(level, name) = BLAKE3-derive-key("elffuss-braid 2026 tree-split v1", u8 level ‖ name)`.
+
+Boundaries depend only on names, so changing a file's content never moves them,
+and an edit only rewrites the nodes on its path. An incremental update must
+always produce the same bytes as building the directory from scratch; the tests
+check this for random edit sequences.
+
+## 4. Changesets
+
+A changeset is one change to the repository: its parents, the root tree it
+produces, and the list of files that changed relative to its **first** parent.
+
+```
+u8    format = 1
+uv    parent_count
+parent_count × [32] changeset id      parent[0] is the base of the change list
+[32]  root tree id
+u8    changes_mode                    0 inline, 1 external
+  mode 0:  uv n, n × change
+  mode 1:  [32] blob id of the encoded change list, uv n
+author:     bytes name, bytes email, sv seconds since the Unix epoch, sv offset in minutes
+committer:  same layout
+bytes message                         raw bytes, no normalisation
+uv    extra_count
+extra_count × (bytes key, bytes value)    order and duplicates preserved
+u8    git_origin                      0 none; 1 followed by [32] blob id of the raw git commit bytes
+
+change:
+  bytes path
+  u8    op                            0 delete, 1 file, 2 executable, 3 symlink, 4 gitlink
+  op 1–3:  [32] blob id, uv size
+  op 4:    u8 algorithm, raw git id
+```
+
+Rules:
+
+- The change list is **exactly** the set of paths whose entry differs from the
+  first parent's tree (different kind or different id), sorted by path bytes,
+  without duplicates and without no-op entries. A changeset with no parents is
+  compared against the empty tree.
+- Changes are per file. A directory replaced by a file is a delete for every
+  file below it plus one set for the new file.
+- The list is stored inline when its encoding is at most 64 KiB, and as a
+  separate blob otherwise, so a huge import does not make every history walk
+  read a huge object.
+- **Admission check.** A store accepts a changeset only if applying its change
+  list to `parent[0]`'s root tree yields exactly `root_tree`, every referenced
+  object is present, and every parent was already accepted. The check costs
+  time proportional to the change, not to the repository.
+- A merge has two or more parents; its change list is still relative to
+  `parent[0]`.
+- `git_origin` points at the original commit bytes for changesets imported from
+  git, so export can reproduce the commit bit for bit. The reference is part of
+  the hash.
+
+## 5. Names
+
+The store is permissive, close to what `git fsck` accepts; checkouts are
+strict, per file system.
+
+A name in a tree is rejected if it:
+
+- is empty, longer than 4,096 bytes, or contains `/` or NUL;
+- is `.` or `..`;
+- aliases `.braid` or `.git` once these are removed or folded: the code points
+  that HFS+ ignores (U+200C–U+200F, U+202A–U+202E, U+206A–U+206F, U+FEFF),
+  trailing dots and spaces (NTFS), letter case, and Unicode normalisation (NFC);
+  this includes the 8.3 short forms `BRAID~1` and `GIT~1`;
+- is `.gitmodules`, `.gitignore`, `.gitattributes` or `.braidignore` with kind
+  symlink.
+
+When writing a working copy, braid also refuses names that would collide on
+that file system (letter case, Unicode normalisation), never follows a symlink
+while walking or writing, and never runs anything found in repository content.
+
+## 6. Git mapping
+
+- Every imported git object has a two-way mapping between its git id and its
+  braid id, stored as derived records.
+- Imported commits and tags keep their raw bytes (`git_origin`), which preserves
+  header order, signatures, encodings, unknown headers and odd author lines.
+- A git tree that cannot be regenerated exactly from the braid tree (unsorted or
+  duplicate entries, non-canonical modes such as `100664`) keeps its raw bytes as
+  well.
+- Git sorts a directory entry as if its name ended in `/`; braid sorts by raw
+  name bytes. Export reorders.
+- During import, every commit is exported again and its git id compared with
+  the original. Any difference stops the import.
+
+## 7. Storage (not hashed, versioned on its own)
+
+This section describes the planned on-disk layout of the local store. It can
+change without changing any id.
+
+```
+.braid/store/format                 object-format=blake3-dk-v1
+.braid/store/seg/<uuid>.seg         object records, append-only
+.braid/store/seg/<uuid>.jrn         live journal of a segment that is still open
+.braid/store/seg/<uuid>.idx         sorted index of a sealed segment
+.braid/store/midx/<id>.midx         merged index written by compaction
+.braid/store/oplog/                 lock, log and checkpoints for refs and operations
+.braid/ws/<name>/                   one workspace per agent
+```
+
+Object record (8-byte aligned):
+
+```
+u32 sync = 0xB7A1D5E9 | u8 kind | u8 codec (0 raw, 1 zstd, 2 zstd + dictionary, 3 zstd + reference)
+u16 flags | u32 stored_len | u64 raw_len | [32] id
+codec 2–3: [32] dictionary or reference object id
+payload | u32 crc32c over everything from sync to the end of the payload
+```
+
+Journal entry, 64 bytes, each with its own CRC:
+`[32] id, u64 offset, u32 stored_len, u8 kind, u8 codec, u16 0, u64 raw_len, u32 record crc, u32 entry crc`.
+
+Index (`.idx`, `.midx`): header, a fan-out table, sorted ids, locations, kinds,
+a binary fuse filter for fast misses, and a footer with offsets and a BLAKE3
+checksum.
+
+Storage policy (tunable at any time):
+
+- Payloads up to 64 bytes are stored raw.
+- Blobs under 4 MiB and all trees are zstd-compressed, or stored as a one-level
+  zstd delta against the same path in the first parent when that is at most half
+  the standalone size. Delta chains never exceed one level.
+- Blobs of 4 MiB or more are split with FastCDC (16/64/256 KiB chunks; larger
+  chunks above 256 MiB). Chunks that do not compress are stored raw.
