@@ -282,15 +282,16 @@ proptest! {
             let mut history = History::new(&objects, &index);
             for id in &order {
                 history.derive(&[*id]).unwrap();
+                history.blame(*id, b"shared").unwrap();
             }
             history.flush().unwrap();
             results.push(index.entries());
         }
         prop_assert_eq!(&results[0], &results[1]);
         prop_assert_eq!(&results[0], &results[2]);
-        // Commit graph data and a changed-path record per changeset.
+        // Two records per changeset, plus blame records.
         let changesets: BTreeSet<ObjectId> = nodes.iter().copied().collect();
-        prop_assert_eq!(results[0].len(), 2 * changesets.len());
+        prop_assert!(results[0].len() >= 2 * changesets.len());
     }
 }
 

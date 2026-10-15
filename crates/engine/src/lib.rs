@@ -16,9 +16,9 @@
 //! - [`first_parent_chain_contains`], [`is_ancestor`] and [`merge_base`]:
 //!   ancestry, walking history.
 //! - [`History`]: the same ancestry queries with generation numbers and skip
-//!   pointers, and the history of a path ([`History::path_log`]) with
-//!   changed-path filters, answered with derived data ([`DerivedKey`],
-//!   [`DerivedIndex`]) computed when missing.
+//!   pointers, the history of a path ([`History::path_log`]) with
+//!   changed-path filters, and [`History::blame`], all answered with derived
+//!   data ([`DerivedKey`], [`DerivedIndex`]) computed when missing.
 //! - [`merge3`]: three-way merges of file contents.
 //! - [`land`]: landing a change on a branch, with conflicts reported as data.
 //! - [`merge`]: merging two changesets into a merge changeset, with the same
@@ -55,6 +55,7 @@
 mod access;
 mod ancestry;
 mod apply;
+mod blame;
 mod bloom;
 mod commit;
 mod derived;
@@ -77,6 +78,7 @@ pub use ancestry::{
     GraphNode, first_parent_chain_contains, is_ancestor, merge_base, merge_bases, skip_height,
 };
 pub use apply::apply;
+pub use blame::Blame;
 pub use commit::{admit, commit};
 pub use derived::{DerivedIndex, DerivedKey, MemoryIndex};
 pub use diff::diff;

@@ -2,7 +2,8 @@
 // Copyright (c) 2026 UtopiaIA
 
 //! History queries answered with derived data: the history of paths, here,
-//! and ancestry in [`ancestry`](crate::ancestry).
+//! ancestry in [`ancestry`](crate::ancestry), and blame in
+//! [`blame`](crate::blame).
 //!
 //! A [`History`] reads objects, finds derived records through a
 //! [`DerivedIndex`], computes the values that are missing, stores them as
@@ -31,10 +32,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use braid_format::codec::{Reader, put_id};
-use braid_format::{Change, DecodeError, Kind, ObjectId, Objects};
+use braid_format::{Change, ChangeOp, DecodeError, Kind, ObjectId, Objects};
 
 use crate::access::{read_changes, read_changeset};
 use crate::ancestry::GraphNode;
+use crate::blame::Runs;
 use crate::bloom::{Filter, PathHash};
 use crate::derived::{DerivedIndex, DerivedKey, encode_record, record_value};
 use crate::error::{Error, store_error};
@@ -62,6 +64,8 @@ pub struct History<'o, O, I> {
     pub(crate) nodes: HashMap<ObjectId, Rc<GraphNode>>,
     /// Changed-path records, by changeset.
     paths: HashMap<ObjectId, Rc<ChangedPaths>>,
+    /// Blame records, by changeset and path.
+    pub(crate) blames: HashMap<(ObjectId, Vec<u8>), Rc<Runs>>,
     /// Records stored and not recorded in the index yet.
     pending: Vec<(DerivedKey, ObjectId)>,
     /// Records this history computed and stored.
@@ -73,6 +77,7 @@ impl<O, I> fmt::Debug for History<'_, O, I> {
         f.debug_struct("History")
             .field("nodes", &self.nodes.len())
             .field("paths", &self.paths.len())
+            .field("blames", &self.blames.len())
             .field("pending", &self.pending.len())
             .field("computed", &self.computed)
             .finish_non_exhaustive()
@@ -97,6 +102,7 @@ impl<'o, O: Objects, I: DerivedIndex> History<'o, O, I> {
             index,
             nodes: HashMap::new(),
             paths: HashMap::new(),
+            blames: HashMap::new(),
             pending: Vec::new(),
             computed: 0,
         }
@@ -229,9 +235,34 @@ impl<'o, O: Objects, I: DerivedIndex> History<'o, O, I> {
         Ok(found)
     }
 
+    /// The first changeset, from `from` down its first-parent chain, whose
+    /// change list names exactly `path`, with what it does there.
+    pub(crate) fn last_change(
+        &mut self,
+        from: Option<ObjectId>,
+        path: &[u8],
+        hash: PathHash,
+    ) -> Result<Option<(ObjectId, ChangeOp)>, Error> {
+        let mut next = from;
+        while let Some(id) = next {
+            let record = self.changed_paths(id)?;
+            if record.filter.may_contain(hash) {
+                let changeset = read_changeset(self.objects, id)?;
+                let changes = read_changes(self.objects, id, &changeset)?;
+                if let Ok(at) = changes.binary_search_by(|change| change.path.as_slice().cmp(path))
+                {
+                    return Ok(Some((id, changes[at].op.clone())));
+                }
+            }
+            next = record.first_parent;
+        }
+        Ok(None)
+    }
+
     /// Computes the derived data of every changeset reachable from `heads`
-    /// that is missing: commit graph data and changed-path records. Records
-    /// everything in the index before returning.
+    /// that is missing: commit graph data and changed-path records. Blame
+    /// records, per file, are computed when asked for. Records everything
+    /// in the index before returning.
     pub fn derive(&mut self, heads: &[ObjectId]) -> Result<DeriveReport, Error> {
         let before = self.computed;
         let mut seen: HashSet<ObjectId> = HashSet::new();
@@ -413,6 +444,19 @@ mod tests {
         );
         assert_eq!(history.path_log(back, &[b"a"], 2).unwrap(), [back, gone]);
         assert_eq!(history.path_log(back, &[b"a"], 0).unwrap(), []);
+        assert_eq!(
+            history
+                .last_change(Some(back), b"a/f", PathHash::of(b"a/f"))
+                .unwrap()
+                .map(|(id, _)| id),
+            Some(back)
+        );
+        assert_eq!(
+            history
+                .last_change(Some(empty), b"a/f", PathHash::of(b"a/f"))
+                .unwrap(),
+            Some((gone, ChangeOp::Delete))
+        );
     }
 
     #[test]
