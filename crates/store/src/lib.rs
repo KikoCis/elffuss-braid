@@ -76,7 +76,11 @@
 //! oplog/lock         empty; locked exclusively by transactions, shared by readers
 //! oplog/log          operation records, append-only
 //! oplog/ckpt.<seq>   every ref as of operation <seq>
+//! derived/index      where the records of derived values are, by key
 //! ```
+//!
+//! The derived index is a cache with its own rules: see
+//! [`DerivedIndexFile`].
 //!
 //! Segment names are 32 random lowercase hex digits. Files whose names start
 //! with `tmp-` are still being written, or were left by a writer that died;
@@ -154,6 +158,7 @@
 
 #![forbid(unsafe_code)]
 
+mod derived;
 mod error;
 mod fsck;
 mod fsutil;
@@ -172,6 +177,7 @@ use std::path::{Path, PathBuf};
 
 pub use braid_format::{Kind, ObjectId, Objects};
 
+pub use derived::{DERIVED_DIR, DerivedIndexFile};
 pub use error::{Error, TransactError};
 pub use fsck::{FsckReport, Problem};
 pub use oplog::{Operation, RefUpdate, Refs};
