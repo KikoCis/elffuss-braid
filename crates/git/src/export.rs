@@ -11,7 +11,7 @@ use braid_format::{Changeset, Entry, EntryKind, GitId, Kind, ObjectId, Objects};
 
 use crate::error::Error;
 use crate::fetch;
-use crate::map::GitMap;
+use crate::map::{GitMap, Pairings};
 use crate::oid::{GitKind, GitOid};
 use crate::raw::{self, EntryType, TreeItem};
 use crate::repo::GitRepo;
@@ -31,7 +31,8 @@ use crate::repo::GitRepo;
 /// An exporter caches the git ids it computes, so exporting many related
 /// objects through one exporter does each piece of work once. Nothing is
 /// recursive: deep histories and deep directories are walked with explicit
-/// stacks.
+/// stacks. What it computed that the map does not know yet is available from
+/// [`pairings`](Self::pairings), to record in the map.
 pub struct Exporter<'a, O: Objects> {
     objects: &'a O,
     map: &'a GitMap,
@@ -39,8 +40,8 @@ pub struct Exporter<'a, O: Objects> {
     /// link to one, and back.
     trees: HashMap<ObjectId, GitOid>,
     tree_sources: HashMap<GitOid, ObjectId>,
-    /// Git blobs computed here, and back.
-    blobs: HashMap<ObjectId, GitOid>,
+    /// Git blobs computed here, with their sizes, and back.
+    blobs: HashMap<ObjectId, (GitOid, u64)>,
     blob_sources: HashMap<GitOid, ObjectId>,
     /// Commits exported here, and back.
     commits: HashMap<ObjectId, GitOid>,
@@ -70,6 +71,39 @@ impl<'a, O: Objects> Exporter<'a, O> {
             blob_sources: HashMap::new(),
             commits: HashMap::new(),
             commit_sources: HashMap::new(),
+        }
+    }
+
+    /// Every pairing this exporter computed that its map does not hold: the
+    /// commits of the changesets it exported, and the canonical trees and
+    /// the blobs it generated. [`GitMap::record`] adds them to a map, so that
+    /// importing these git objects later gives back the same braid objects.
+    pub fn pairings(&self) -> Pairings {
+        let mut commits: Vec<(GitOid, ObjectId)> = self
+            .commits
+            .iter()
+            .filter(|(changeset, _)| self.map.commit(changeset).is_none())
+            .map(|(changeset, oid)| (*oid, *changeset))
+            .collect();
+        let mut trees: Vec<(GitOid, ObjectId)> = self
+            .trees
+            .iter()
+            .filter(|(tree, _)| self.map.git_tree(tree).is_none())
+            .map(|(tree, oid)| (*oid, *tree))
+            .collect();
+        let mut blobs: Vec<(GitOid, ObjectId, u64)> = self
+            .blobs
+            .iter()
+            .filter(|(blob, _)| self.map.git_blob(blob).is_none())
+            .map(|(blob, (oid, size))| (*oid, *blob, *size))
+            .collect();
+        commits.sort_unstable();
+        trees.sort_unstable();
+        blobs.sort_unstable();
+        Pairings {
+            commits,
+            trees,
+            blobs,
         }
     }
 
@@ -318,7 +352,7 @@ impl<'a, O: Objects> Exporter<'a, O> {
                 detail: format!("the map links it to git blob {known}, but its content is {oid}"),
             });
         }
-        self.blobs.insert(*blob, oid);
+        self.blobs.insert(*blob, (oid, bytes.len() as u64));
         self.blob_sources.insert(oid, *blob);
         Ok((oid, bytes))
     }
@@ -328,7 +362,7 @@ impl<'a, O: Objects> Exporter<'a, O> {
         match self
             .map
             .git_blob(blob)
-            .or_else(|| self.blobs.get(blob).copied())
+            .or_else(|| self.blobs.get(blob).map(|(oid, _)| *oid))
         {
             Some(oid) => Ok(oid),
             None => Ok(self.blob(blob)?.0),
@@ -469,19 +503,49 @@ pub struct WriteReport {
 /// then points the refs at them in one transaction.
 ///
 /// Refs are overwritten, whatever they pointed to before: there is no lease
-/// and no fast-forward check here. That is meant for local exports; updating
-/// a shared repository with a lease, as a fast-forward, is the job of
-/// `git sync`, which comes later.
+/// and no fast-forward check here. That is meant for local exports and for a
+/// mirror; updating a shared repository with a lease, as a fast-forward, is
+/// the job of `braid git sync`, which pushes from such a mirror.
 ///
 /// Objects the repository already has are not written again, and neither is
 /// anything they reach. Objects are written after everything they reach, so an
 /// interrupted write never leaves an object whose closure is missing.
+///
+/// The map is not changed: [`write_to_repo_recording`] also records what the
+/// export generated.
 pub fn write_to_repo<O: Objects>(
     git_repo: &Path,
     objects: &O,
     map: &GitMap,
     refs: &[RefUpdate],
 ) -> Result<WriteReport, Error> {
+    write(git_repo, objects, map, refs).map(|(report, _)| report)
+}
+
+/// [`write_to_repo`], then records in `map` every commit, canonical tree and
+/// blob the export generated (see [`Exporter::pairings`]), so that importing
+/// them again, from this repository or from any other that received them,
+/// gives back the same braid objects instead of new ones.
+///
+/// Nothing is recorded when the write fails. The caller saves the map.
+pub fn write_to_repo_recording<O: Objects>(
+    git_repo: &Path,
+    objects: &O,
+    map: &mut GitMap,
+    refs: &[RefUpdate],
+) -> Result<WriteReport, Error> {
+    let (report, pairings) = write(git_repo, objects, map, refs)?;
+    map.record(&pairings);
+    Ok(report)
+}
+
+/// Writes the objects and the refs, and returns what the export generated.
+fn write<O: Objects>(
+    git_repo: &Path,
+    objects: &O,
+    map: &GitMap,
+    refs: &[RefUpdate],
+) -> Result<(WriteReport, Pairings), Error> {
     let mut repo = GitRepo::open(git_repo)?;
     let mut writer = Writer {
         exporter: Exporter::new(objects, map),
@@ -498,10 +562,11 @@ pub fn write_to_repo<O: Objects>(
         writer.write_closure(oid)?;
         targets.push((update.name.clone(), oid));
     }
+    let pairings = writer.exporter.pairings();
     let mut report = writer.report;
     repo.set_refs(&targets, "braid: export")?;
     report.refs = targets;
-    Ok(report)
+    Ok((report, pairings))
 }
 
 struct Writer<'r, 'a, O: Objects> {

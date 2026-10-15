@@ -154,9 +154,67 @@ heads.
   no code from git itself, which is GPLv2.
 - Import keeps the raw bytes of commits, tags and non-canonical trees, and
   verifies each commit by exporting it again and comparing ids.
+- Export is deterministic. What it generates for changesets made in braid
+  (their commits, trees and blobs) enters the git map, so importing those
+  commits back, from wherever they went, gives the same changesets.
+- Braid's refs keep to their own namespaces: `braid/` for its bookkeeping
+  (the git map is `braid/git-map`), `tags/`, `git/` for other git refs, and
+  `remote/<label>/<branch>` for where the branches of git remotes were last
+  seen. A git branch named like one of them is imported under its full name,
+  below `git/`.
 - Sync fetches and imports first, then pushes with a lease, as a fast-forward.
   Braid never force-pushes. The push itself runs the `git` binary as a
   subprocess, since gitoxide does not push yet.
+
+### Sync
+
+`braid git sync <remote> [--branch main] [--remote-branch <name>]` keeps a
+braid branch and a branch of a git remote (GitHub, Gitea, a path) in step,
+so that the git host stays the public face of a repository while agents land
+in braid.
+
+- **Mirror.** Each remote has a bare mirror at `.braid/git/<label>.git`. The
+  label is the last name of the remote's path without `.git`, with every
+  character other than ASCII letters, digits, `.`, `_` and `-` turned into
+  `-`, then a `-` and the first 12 hex digits of the BLAKE3 hash of the
+  address without user name, password, trailing `/` or `.git`. So
+  `https://example.org/team/project.git` is `project-` and a hash, and no
+  credential ever reaches a file or ref name. In the mirror,
+  `refs/remotes/origin/<branch>` is the remote branch as fetched and
+  `refs/heads/<branch>` the braid branch as exported. `.braid/git/<label>.lock`
+  makes syncs with one remote take turns.
+- **Fetch and import.** The remote branch is fetched with an explicit refspec
+  and no tags, then imported. The braid ref `remote/<label>/<branch>` records
+  it.
+- **Reconcile.** With B the braid branch and G the remote branch: if they are
+  equal, there is nothing to do; without B, the braid branch is created at G;
+  if B is an ancestor of G, braid fast-forwards; if G is an ancestor of B, or
+  there is no G, B is pushed. Otherwise braid merges them with the engine's
+  `merge`, which follows landing's rules and conflicts: a clean merge moves
+  the braid branch to the merge, which is then pushed; conflicts move nothing
+  and exit with status 2. The braid branch moves only with a compare and swap,
+  in one operation with the git map and the remote's ref.
+- **Push.** `git push --atomic --porcelain
+  --force-with-lease=refs/heads/<branch>:<fetched> <remote>
+  <commit>:refs/heads/<branch>`, where `<fetched>` is what the same sync
+  fetched. What is pushed descends from it, so the remote only fast-forwards.
+  If someone else pushed in between, the lease fails and braid records
+  nothing more (after a merge, its branch is already at the merge); the next
+  sync merges the new commits.
+- **Crashes.** Each sync first records in the git map the commits of the
+  braid branch's changesets, which exports make deterministically. After a
+  crash between a push and its record, the commits that come back from the
+  remote are recognised as the changesets they came from, and nothing is
+  imported twice.
+- **Git commands** run with the user's environment, so credentials and SSH
+  settings work, minus the variables that would point git at another
+  repository, and with hooks, automatic garbage collection and the `ext::`
+  transport turned off.
+- **Identity.** A merge made by sync is committed by the `--agent` label, with
+  the `email` that `.braid/config` sets (`email = ...`), or else
+  `<agent>@example.org`. Git's own configuration is never read for identity.
+- **Dry run.** `--dry-run` fetches into a temporary repository that borrows
+  the mirror's objects, keeps braid objects in memory, and writes nothing.
 
 ## Server and caches
 

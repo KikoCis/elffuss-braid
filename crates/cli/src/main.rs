@@ -3,6 +3,7 @@
 
 //! `braid`, the command-line tool.
 
+mod sync;
 mod work;
 
 use std::fs::File;
@@ -174,6 +175,24 @@ enum GitAction {
         #[arg(long = "ref", value_name = "NAME")]
         refs: Vec<String>,
     },
+    /// Keep a braid branch and a branch of a git remote in step: fetch and
+    /// import the remote branch, then fast-forward the braid branch, or push
+    /// it (merging first when both moved) as a fast-forward with a lease.
+    /// Never force-pushes. Exits with 2 on conflicts and 1 when the push is
+    /// refused.
+    Sync {
+        /// The git remote: a URL or a path.
+        remote: String,
+        /// The braid branch.
+        #[arg(long, default_value = "main")]
+        branch: String,
+        /// The branch of the remote (default: the braid branch's name).
+        #[arg(long, value_name = "NAME")]
+        remote_branch: Option<String>,
+        /// Report what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -216,6 +235,15 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Git {
             action: GitAction::Export { path, refs },
         } => git_export(cli, path, refs),
+        Command::Git {
+            action:
+                GitAction::Sync {
+                    remote,
+                    branch,
+                    remote_branch,
+                    dry_run,
+                },
+        } => sync::git_sync(cli, remote, branch, remote_branch.as_deref(), *dry_run),
         Command::Fsck => fsck(cli),
         Command::Workspace { action } => work::workspace(cli, action),
         Command::Status => work::status(cli),

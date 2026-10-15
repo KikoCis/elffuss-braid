@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 UtopiaIA
 
-//! A braid repository on disk: where it is, how to open it, and how names
-//! resolve to objects.
+//! A braid repository on disk: where it is, how to open it, how names
+//! resolve to objects, and how it trades history with git repositories.
 //!
 //! A repository is a directory holding a `.braid` directory. Inside it,
 //! `store/` is the object store and op log shared by every process and every
-//! workspace of the repository.
+//! workspace of the repository, `git/` holds the mirrors of the git remotes
+//! that [`Repo::git_sync`] keeps in step with, and the optional `config` file
+//! holds settings (see [`Config`]).
 //!
 //! A workspace is any directory holding a `.braid` *file* instead: a
 //! [`WorkspaceLink`] naming the repository and the workspace. [`locate`] and
@@ -14,8 +16,11 @@
 
 #![forbid(unsafe_code)]
 
+mod config;
 mod git;
 mod link;
+mod remote;
+mod sync;
 pub mod text;
 
 use std::fs;
@@ -25,8 +30,15 @@ use std::path::{Path, PathBuf};
 use braid_format::{ObjectId, Objects};
 use braid_store::{Options, Store};
 
-pub use git::{GitImport, MAP_REF, braid_ref_for_git, git_ref_for_braid};
+pub use braid_engine::{Conflict, ConflictHunk, ConflictKind, HunkSide};
+pub use config::{CONFIG_FILE, Config};
+pub use git::{
+    GIT_EXPORT_AGENT, GitImport, MAP_REF, REMOTE_PREFIX, braid_ref_for_git, git_ref_for_braid,
+    remote_ref,
+};
 pub use link::{Location, WORKSPACES_DIR, WorkspaceLink, locate};
+pub use remote::Remote;
+pub use sync::{MIRRORS_DIR, SyncOptions, SyncOutcome, SyncReport};
 
 /// Name of the directory that holds a repository's data.
 pub const DIR: &str = ".braid";
@@ -74,6 +86,75 @@ pub enum Error {
     /// The file system failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// A merge, or a walk of history, failed.
+    #[error(transparent)]
+    Engine(#[from] braid_engine::Error),
+    /// A git remote braid does not hand to git.
+    #[error("invalid remote {remote:?}: {reason}")]
+    InvalidRemote {
+        /// The remote as given.
+        remote: String,
+        /// Why it is refused.
+        reason: &'static str,
+    },
+    /// A branch name sync cannot use.
+    #[error("invalid branch name {name:?}: {reason}")]
+    InvalidBranch {
+        /// The name.
+        name: String,
+        /// Why it is refused.
+        reason: &'static str,
+    },
+    /// An agent label that cannot name the committer of a git commit.
+    #[error("the agent label {agent:?} cannot name a git committer: {reason}")]
+    InvalidAgent {
+        /// The label.
+        agent: String,
+        /// Why it cannot.
+        reason: &'static str,
+    },
+    /// A setting of the repository's configuration that cannot be used.
+    #[error("the setting {key:?} in .braid/config cannot be used: {reason}")]
+    InvalidConfig {
+        /// The setting.
+        key: &'static str,
+        /// Why.
+        reason: &'static str,
+    },
+    /// A branch that should point at a changeset, or a remote branch that
+    /// should point at a commit, does not.
+    #[error("{what} does not point at a changeset")]
+    NotAChangeset {
+        /// Which branch.
+        what: String,
+    },
+    /// Neither braid nor the remote has the branch to sync.
+    #[error("neither braid nor the remote has the branch {branch:?}")]
+    NothingToSync {
+        /// The braid branch.
+        branch: String,
+    },
+    /// Another operation moved a branch while sync was working on it.
+    /// Nothing was pushed; syncing again starts from where it is now.
+    #[error("branch {branch:?} moved during the sync; nothing was pushed, sync again")]
+    BranchMoved {
+        /// The branch.
+        branch: String,
+    },
+    /// A ref kept moving, so an operation could not be recorded.
+    #[error("ref {name:?} keeps moving; try again")]
+    Busy {
+        /// The ref.
+        name: String,
+    },
+    /// A git command failed.
+    #[error("git {command} failed: {detail}")]
+    GitCommand {
+        /// The git command.
+        command: &'static str,
+        /// What git said, or why it could not run.
+        detail: String,
+    },
 }
 
 /// An open repository.

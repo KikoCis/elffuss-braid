@@ -16,6 +16,7 @@ use braid_format::{
 use braid_git::{
     Error, GitKind, GitMap, GitOid, ImportOptions, RefTarget, RefUpdate, RoundTripReport,
     export_commit, export_object, import, verify_round_trip, write_to_repo,
+    write_to_repo_recording,
 };
 use common::{Repo, exec, file, link, raw_tree, submodule};
 
@@ -1141,6 +1142,172 @@ fn changesets_made_in_braid_export_deterministically() {
 
 fn changeset_of(objects: &MemoryObjects, map: &GitMap, commit: &GitOid) -> Changeset {
     changeset(objects, map, &commit.to_hex())
+}
+
+/// Stores the directories holding exactly `files`, regular files given by
+/// path and content, and returns the root.
+fn store_files(objects: &MemoryObjects, files: &[(&str, &str)]) -> ObjectId {
+    fn store_dir(objects: &MemoryObjects, dir: &Dir) -> ObjectId {
+        let entries = dir
+            .iter()
+            .map(|(name, node)| Entry {
+                name: name.clone(),
+                kind: match node {
+                    Node::Leaf(kind) => kind.clone(),
+                    Node::Dir(below) => EntryKind::Tree {
+                        tree: store_dir(objects, below),
+                    },
+                },
+            })
+            .collect();
+        store_tree(objects, entries)
+    }
+    let mut dir = Dir::new();
+    let changes: Vec<Change> = files
+        .iter()
+        .map(|(path, content)| file_change(objects, path, content))
+        .collect();
+    apply(&mut dir, &changes);
+    store_dir(objects, &dir)
+}
+
+fn file_change(objects: &MemoryObjects, path: &str, content: &str) -> Change {
+    let (blob, size) = store_blob(objects, content.as_bytes());
+    Change {
+        path: path.as_bytes().to_vec(),
+        op: ChangeOp::File { blob, size },
+    }
+}
+
+/// A changeset made in braid on `parent`, whose tree holds exactly `files`
+/// and whose change list is `changes`.
+fn braid_changeset(
+    objects: &MemoryObjects,
+    parent: ObjectId,
+    files: &[(&str, &str)],
+    changes: Vec<Change>,
+    message: &str,
+) -> ObjectId {
+    let grace = Signature {
+        name: b"Grace Hopper".to_vec(),
+        email: b"grace@example.org".to_vec(),
+        seconds: 1_700_000_500,
+        offset_minutes: -300,
+    };
+    let assembled = ChangesetParts {
+        parents: vec![parent],
+        root: store_files(objects, files),
+        changes,
+        author: grace.clone(),
+        committer: grace,
+        message: message.as_bytes().to_vec(),
+        extras: Vec::new(),
+        git_origin: None,
+    }
+    .assemble()
+    .unwrap();
+    objects.put(Kind::Changeset, &assembled.encoded).unwrap()
+}
+
+#[test]
+fn exported_commits_import_as_the_changesets_they_came_from() {
+    let mut repo = Repo::new();
+    let imported = repo.snapshot(
+        "main",
+        &[file("README", "hi\n"), file("src/a.rs", "a\n")],
+        "imported",
+    );
+    let objects = MemoryObjects::new();
+    let mut map = GitMap::new();
+    import_all(&repo, &objects, &mut map);
+
+    // Two changesets made in braid, one on top of the other.
+    let base = map.changeset(&oid(&imported)).unwrap();
+    let first_files = [("README", "hello from braid\n"), ("src/a.rs", "a\n")];
+    let first = braid_changeset(
+        &objects,
+        base,
+        &first_files,
+        vec![file_change(&objects, "README", "hello from braid\n")],
+        "one\n",
+    );
+    let second_files = [
+        ("README", "hello from braid\n"),
+        ("docs/b.md", "# B\n"),
+        ("src/a.rs", "a\n"),
+    ];
+    let second = braid_changeset(
+        &objects,
+        first,
+        &second_files,
+        vec![file_change(&objects, "docs/b.md", "# B\n")],
+        "two\n",
+    );
+
+    // Exporting them records their commits, trees and blobs in the map.
+    let before = map.counts();
+    let report = write_to_repo_recording(
+        repo.path(),
+        &objects,
+        &mut map,
+        &[RefUpdate {
+            name: b"refs/heads/main".to_vec(),
+            target: RefTarget::Changeset(second),
+        }],
+    )
+    .unwrap();
+    assert_eq!((report.commits, report.trees, report.blobs), (2, 3, 2));
+    let tip = report.refs[0].1;
+    assert_eq!(map.changeset(&tip), Some(second));
+    assert_eq!(map.commit(&second), Some(tip));
+    let first_commit = map.commit(&first).unwrap();
+    assert_eq!(repo.git(&["rev-parse", "main~1"]), first_commit.to_hex());
+    let after = map.counts();
+    assert_eq!(after.commits, before.commits + 2);
+    assert_eq!(after.trees, before.trees + 3);
+    assert_eq!(after.blobs, before.blobs + 2);
+    // The plain export of the same changesets records nothing, and agrees.
+    let plain = write_to_repo(
+        repo.path(),
+        &objects,
+        &map,
+        &[RefUpdate {
+            name: b"refs/heads/again".to_vec(),
+            target: RefTarget::Changeset(second),
+        }],
+    )
+    .unwrap();
+    assert_eq!(plain.refs[0].1, tip);
+    assert_eq!((plain.commits, plain.trees, plain.blobs), (0, 0, 0));
+
+    // Importing the exported commits finds every object in the map: nothing
+    // new, and the branch is the changeset made in braid.
+    let again = import_all(&repo, &objects, &mut map);
+    assert_eq!(
+        (again.commits, again.trees, again.blobs, again.raw_trees),
+        (0, 0, 0, 0)
+    );
+    let main = again
+        .refs
+        .iter()
+        .find(|r| r.name == b"refs/heads/main")
+        .unwrap();
+    assert_eq!(main.braid, second);
+
+    // A commit made in git on top of them builds on the braid changeset.
+    let mut next_files: Vec<_> = second_files.iter().map(|(p, c)| file(p, c)).collect();
+    next_files.push(file("c", "from git\n"));
+    let next = repo.snapshot("main", &next_files, "made in git");
+    let later = import_all(&repo, &objects, &mut map);
+    assert_eq!(later.commits, 1);
+    let next_changeset = changeset(&objects, &map, &next);
+    assert_eq!(next_changeset.parents, [second]);
+    assert_eq!(changes(&objects, &map, &next), pairs(&[("c", "file")]));
+
+    // The map still encodes, and everything round-trips.
+    assert_eq!(GitMap::from_bytes(&map.to_bytes()).unwrap(), map);
+    assert_admissible(&objects, &map);
+    round_trip(&repo);
 }
 
 #[test]

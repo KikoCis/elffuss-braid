@@ -326,24 +326,24 @@ fn fold(name: &[u8]) -> Vec<u8> {
 /// The names of one directory, by folded name.
 type FoldedNames = HashMap<Vec<u8>, Vec<Vec<u8>>>;
 
-/// The state of one rebase.
-struct Rebase<'o, O> {
+/// The state of one rebase. [`merge`](crate::merge) runs one too.
+pub(crate) struct Rebase<'o, O> {
     trees: Trees<'o, O>,
     /// Root trees of the base, the head and the change.
     base: ObjectId,
     ours: ObjectId,
     theirs: ObjectId,
     /// The change list against the head, in path order.
-    resolved: Vec<Change>,
+    pub(crate) resolved: Vec<Change>,
     /// Paths merged from both sides.
-    merged: Vec<Vec<u8>>,
+    pub(crate) merged: Vec<Vec<u8>>,
     /// Merged contents to store.
-    blobs: Vec<(ObjectId, Vec<u8>)>,
+    pub(crate) blobs: Vec<(ObjectId, Vec<u8>)>,
     /// Paths the change adds that had no file in the base or on the head.
     added: Vec<Vec<u8>>,
     /// Paths the change deletes.
     deleted: Vec<Vec<u8>>,
-    conflicts: Vec<Conflict>,
+    pub(crate) conflicts: Vec<Conflict>,
     /// For each directory of the head, its names by folded name.
     folded: HashMap<ObjectId, Rc<FoldedNames>>,
     /// Names the change adds that were checked for collisions already.
@@ -351,7 +351,7 @@ struct Rebase<'o, O> {
 }
 
 impl<'o, O: Objects> Rebase<'o, O> {
-    fn new(objects: &'o O, base: ObjectId, ours: ObjectId, theirs: ObjectId) -> Self {
+    pub(crate) fn new(objects: &'o O, base: ObjectId, ours: ObjectId, theirs: ObjectId) -> Self {
         Rebase {
             trees: Trees::new(objects),
             base,
@@ -384,7 +384,7 @@ impl<'o, O: Objects> Rebase<'o, O> {
     }
 
     /// Resolves one path of the change list.
-    fn path(&mut self, change: &Change) -> Result<(), Error> {
+    pub(crate) fn path(&mut self, change: &Change) -> Result<(), Error> {
         let path = change.path.as_slice();
         if matches!(change.op, ChangeOp::Delete) {
             self.deleted.push(path.to_vec());
@@ -505,7 +505,7 @@ impl<'o, O: Objects> Rebase<'o, O> {
     /// Checks the structure around the resolved changes, applies them to the
     /// head without storing anything, and turns structural problems into
     /// conflicts.
-    fn structure(&mut self) -> Result<Applied, Error> {
+    pub(crate) fn structure(&mut self) -> Result<Applied, Error> {
         self.removed_under_added()?;
         self.added_under_removed()?;
         let sets: Vec<Vec<u8>> = self
@@ -650,7 +650,7 @@ impl<'o, O: Objects> Rebase<'o, O> {
     }
 
     /// The conflicts, sorted by path and kind, without repeats.
-    fn into_conflicts(self) -> Vec<Conflict> {
+    pub(crate) fn into_conflicts(self) -> Vec<Conflict> {
         let mut conflicts = self.conflicts;
         conflicts.sort_by(|a, b| {
             a.path
