@@ -104,13 +104,49 @@ heads.
 
 - One workspace per agent, all sharing one store. No staging area: tracked
   files are snapshotted as they are.
+- A workspace is any directory holding a `.braid` *file*, local and never
+  tracked, that names the repository and the workspace. The workspace's state
+  lives in the repository, under `.braid/ws/<name>/`: `state` (the base
+  changeset, the branch it lands on, its directory, the file system's name
+  rules, a rebase in progress), `stat` (the stat cache) and `lock`. Every
+  command that changes a workspace holds its lock, so two processes never
+  change one workspace at once; different workspaces never wait for each
+  other, except for the short transaction in which a landing moves a branch.
 - New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger than
   1 MiB need an explicit `braid track`.
-- Status uses a stat cache, with the usual guard against files modified in the
-  same instant the cache was written. A daemon can add a file system watcher.
-- Checkouts never follow symlinks while walking or writing, write through a
-  temporary file and a rename, refuse names that would collide on the file
-  system, and never run anything from repository content.
+- Status uses a stat cache (modification time, size, inode, type, blob id),
+  with the usual guard: a file whose modification time is not strictly older
+  than the start of the scan that cached it, read from the workspace's own
+  file system clock, is hashed again. Files the cache cannot vouch for are
+  hashed in parallel. `.gitignore` and `.braidignore` are honoured; tracked
+  files count whatever they say. A daemon can add a file system watcher.
+- Checkouts never follow symlinks while walking or writing: every step opens
+  one name from its parent's directory handle, refusing symlinks. They write
+  through a temporary file and a rename, with modes 0644 or 0755 only, remove
+  before they create when a path changes type, write symlink targets as data,
+  and make gitlinks empty directories. Each workspace finds out once, with a
+  scratch file, whether its file system ignores letter case or Unicode
+  normalisation; names that would collide there, or that the platform cannot
+  hold, are refused before anything is written. Untracked files in the way
+  stop a checkout too. Nothing from repository content is ever run.
+- `braid commit` records the working copy as a changeset on the base.
+  `braid land` puts the workspace's changesets on its branch in one op log
+  transaction: the engine fast-forwards or rebases them onto the head, and the
+  branch moves with a compare-and-swap. The working copy then follows, writing
+  only the difference. On conflicts the branch does not move, the conflicts
+  come back as data, and the command exits with status 2.
+- `braid update` brings a workspace onto its branch's head, rebasing its own
+  changesets without moving the branch. On conflicts, the working copy gets
+  the head's tree with the change's clean paths and git-style markers for
+  content conflicts; a rebase is then in progress, `braid resolve` settles the
+  other conflicts, and the next `braid commit` records the resolution on the
+  head, refusing while markers remain.
+- A changeset can also be made without any working copy: `braid change
+  create` takes the base, the new contents and the deletions, and can require
+  what the base holds at each path first, so that an agent never overwrites
+  an edit it did not see.
+- Signatures record the time in UTC for now: the local time zone offset is not
+  computed yet.
 
 ## Git bridge
 
