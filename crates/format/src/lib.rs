@@ -14,6 +14,7 @@ pub mod changeset;
 pub mod codec;
 pub mod id;
 pub mod name;
+pub mod objects;
 pub mod tree;
 
 pub use changeset::{
@@ -22,6 +23,7 @@ pub use changeset::{
 pub use codec::DecodeError;
 pub use id::{IdHasher, Kind, ObjectId, ParseIdError};
 pub use name::{NameError, PathError, validate_name, validate_path};
+pub use objects::{MemoryObjects, Objects};
 pub use tree::{
     Directory, Entry, EntryKind, GitId, Node, TreeError, build_directory, read_directory,
 };
