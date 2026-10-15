@@ -119,22 +119,24 @@
 //! | 0 raw | the object as it is (`stored_len == raw_len`) | up to 64 bytes, or when zstd does not make it smaller |
 //! | 1 zstd | one zstd frame, level 3 | anything else stored whole |
 //! | 2 | reserved: zstd with a dictionary | never written |
-//! | 3 delta | one zstd frame against the base's raw payload | blobs under 4 MiB and trees, given a similar object |
+//! | 3 delta | one zstd frame against the base's raw payload | blobs under 4 MiB, trees and derived objects, given a similar object |
 //! | 4 chunked | the chunk list | blobs of 4 MiB or more |
 //!
 //! **Deltas (codec 3).** [`Objects::put_similar`] names an object the new
-//! one is probably close to, such as the same path in the parent. A blob
-//! under 4 MiB or a tree is then compressed with zstd at level 3, with the
-//! raw payload of the base as a reference prefix, a window that holds the
-//! base and the object together (at most 2²⁷ bytes), and long-distance
-//! matching. The record names the base in its header. The delta is kept
-//! only when it and the base id take at most a quarter of the bytes of the
-//! object stored on its own; otherwise the object is stored whole. Depth is always
-//! one: a base is stored whole, and when the similar object is a delta, the
-//! new one is made against that delta's base instead. Reading a delta reads
-//! its base and applies one delta, never a chain; each handle keeps the
-//! payloads of the bases it used last. A handle that knows several copies
-//! of one object uses the best: stored whole, then delta, then chunked.
+//! one is probably close to, such as the same path in the parent, or the
+//! previous git map. A blob under 4 MiB, a tree or a derived object is then
+//! compressed with zstd at level 3, with the raw payload of the base as a
+//! reference prefix, a window that holds the base and the object together
+//! (at most 2²⁷ bytes), and long-distance matching. The record names the
+//! base in its header. The delta is kept only when it and the base id take
+//! at most a quarter of the bytes of the object stored on its own;
+//! otherwise the object is stored whole. Changesets are never deltas: they
+//! share too little with their parents. Depth is always one: a base is
+//! stored whole, and when the similar object is a delta, the new one is made
+//! against that delta's base instead. Reading a delta reads its base and
+//! applies one delta, never a chain; each handle keeps the payloads of the
+//! bases it used last. A handle that knows several copies of one object
+//! uses the best: stored whole, then delta, then chunked.
 //!
 //! **Chunked blobs (codec 4).** A blob of 4 MiB or more is cut with FastCDC
 //! (the 2020 algorithm, normalisation level 1, the standard gear table)
@@ -507,9 +509,10 @@ impl Objects for Store {
 
     /// Appends an object like [`Objects::put`], as a delta against
     /// `similar` (or against its base, if it is a delta itself) when it is a
-    /// blob under 4 MiB or a tree and the delta takes at most a quarter of the
-    /// bytes. A hint naming an object that is missing or cannot serve as a
-    /// base is ignored.
+    /// blob under 4 MiB, a tree or a derived object and the delta takes at
+    /// most a quarter of the bytes. Changesets are never deltas. A hint
+    /// naming an object that is missing or cannot serve as a base is
+    /// ignored.
     fn put_similar(
         &self,
         kind: Kind,

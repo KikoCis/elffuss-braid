@@ -35,7 +35,10 @@ use crate::record::{self, Header, RAW_MAX, ZSTD_LEVEL};
 const KEEP_DENOMINATOR: usize = 4;
 
 /// Blobs smaller than this may be stored as deltas; larger ones are stored
-/// in chunks instead. Trees may be deltas whatever their size.
+/// in chunks instead. Trees and derived objects, such as the git map, may
+/// be deltas whatever their size. Changesets never are: against their first
+/// parent, imported histories gave no delta that made the cut, and one in
+/// thousands at twice the fraction.
 pub(crate) const BLOB_MAX: u64 = crate::chunks::CHUNKED_MIN;
 
 /// The largest window a delta may use: 128 MiB, the largest that zstd
@@ -52,7 +55,7 @@ pub(crate) fn eligible(kind: Kind, len: usize) -> bool {
         return false;
     }
     match kind {
-        Kind::Tree => true,
+        Kind::Tree | Kind::Derived => true,
         Kind::Blob => (len as u64) < BLOB_MAX,
         _ => false,
     }
@@ -204,6 +207,7 @@ mod tests {
         assert!(!eligible(Kind::Blob, BLOB_MAX as usize));
         assert!(eligible(Kind::Tree, 10 << 20));
         assert!(!eligible(Kind::Changeset, 1000));
-        assert!(!eligible(Kind::Derived, 1000));
+        assert!(eligible(Kind::Derived, 10 << 20));
+        assert!(!eligible(Kind::ChunkList, 1000));
     }
 }

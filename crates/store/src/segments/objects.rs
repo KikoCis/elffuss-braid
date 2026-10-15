@@ -5,10 +5,10 @@
 //!
 //! - **Writes.** A blob of 4 MiB or more is cut into chunks, each stored as
 //!   a blob of its own, then its chunk list. Anything else is stored whole,
-//!   unless the writer names a similar object: a blob under 4 MiB or a tree
-//!   is then stored as a delta against that object, or against its base if
-//!   it is a delta itself, when the delta takes at most a quarter of the
-//!   bytes.
+//!   unless the writer names a similar object: a blob under 4 MiB, a tree
+//!   or a derived object is then stored as a delta against that object, or
+//!   against its base if it is a delta itself, when the delta takes at most
+//!   a quarter of the bytes.
 //! - **Reads.** A delta needs its base, stored whole; a chunked blob needs
 //!   its chunks, stored whole or as deltas. Whatever the form, what comes
 //!   back hashes to the id asked for, or the read fails.
@@ -105,11 +105,11 @@ impl Segments {
     }
 
     /// Stores an object that is probably close to `similar`. A blob under
-    /// 4 MiB or a tree becomes a delta when that takes at most a quarter of the
-    /// bytes of storing it on its own; anything else is stored as
-    /// [`Segments::put`] does. The hint never makes a write fail: when the
-    /// similar object is missing, damaged or unusable as a base, the object
-    /// is stored on its own.
+    /// 4 MiB, a tree or a derived object becomes a delta when that takes at
+    /// most a quarter of the bytes of storing it on its own; anything else
+    /// is stored as [`Segments::put`] does. The hint never makes a write
+    /// fail: when the similar object is missing, damaged or unusable as a
+    /// base, the object is stored on its own.
     pub fn put_similar(
         &self,
         kind: Kind,
