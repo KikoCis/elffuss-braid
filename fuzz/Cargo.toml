@@ -14,6 +14,7 @@ members = ["."]
 [dependencies]
 libfuzzer-sys = "0.4"
 braid-format = { package = "elffuss-braid-format", path = "../crates/format" }
+braid-git = { package = "elffuss-braid-git", path = "../crates/git", features = ["fuzzing"] }
 
 [[bin]]
 name = "decode_tree"
@@ -32,6 +33,20 @@ bench = false
 [[bin]]
 name = "names"
 path = "fuzz_targets/names.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_map"
+path = "fuzz_targets/git_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_objects"
+path = "fuzz_targets/git_objects.rs"
 test = false
 doc = false
 bench = false

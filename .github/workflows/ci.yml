@@ -22,6 +22,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The git bridge round-trips this repository's own history, which a
+          # shallow checkout does not have.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -87,6 +91,6 @@ jobs:
       - name: run every target for one minute
         working-directory: fuzz
         run: |
-          for target in decode_tree decode_changeset names; do
+          for target in decode_tree decode_changeset names git_map git_objects; do
             cargo fuzz run "$target" -- -max_total_time=60
           done
