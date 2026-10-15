@@ -39,3 +39,17 @@ todo = "deny"
 codegen-units = 1
 lto = "thin"
 strip = "symbols"
+
+# Hashing, compression and chunking run optimised even in debug builds, so
+# tests that store large blobs stay quick.
+[profile.dev.package.blake3]
+opt-level = 3
+
+[profile.dev.package.zstd-sys]
+opt-level = 3
+
+[profile.dev.package.fastcdc]
+opt-level = 3
+
+[profile.dev.package.crc32c]
+opt-level = 3
