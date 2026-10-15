@@ -41,11 +41,12 @@ change create --land prints it as \"land\", without base and updated_paths.
   head_before    the branch's head before the command
   head           the branch's head after it (update never moves it)
   base           the workspace's base after the command
-  landed         one {from, to} per changeset of the workspace, oldest
-                 first: its id, and the id of the changeset that holds it
-                 now (itself after a fast-forward, the rebased one after a
-                 rebase), or null when it did not move: its changes were
-                 there already, or a conflict stopped it or one before it
+  landed         one {from, to} per changeset of the workspace (for change
+                 create, the one it made), oldest first: its id, and the
+                 id of the changeset that holds it now (itself after a
+                 fast-forward, the rebased one after a rebase), or null
+                 when it did not move: its changes were there already, or
+                 a conflict stopped it or one before it
   merged_paths   paths both sides changed, merged line by line
   operation      the op log operation that moved the branch, or null
   updated_paths  paths of the working copy written or removed, sorted
@@ -716,7 +717,7 @@ impl<'a> Report<'a> {
         }
     }
 
-    /// `, 1 path merged`, or nothing when none was.
+    /// ` (1 path merged)`, or nothing when no path was merged.
     fn merged(&self) -> String {
         match self.merged_paths.len() {
             0 => String::new(),

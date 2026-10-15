@@ -180,7 +180,7 @@ impl Repo {
     /// Operations are recorded by `agent`, who is also the committer of a
     /// merge, with the `email` of the repository's [`Config`](crate::Config)
     /// or `<agent>@example.org`, and whom the merge's
-    /// [`AGENT`](braid_engine::AGENT) field names.
+    /// [`AGENT`] field names.
     ///
     /// # The mirror
     ///
