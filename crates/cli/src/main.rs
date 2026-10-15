@@ -777,7 +777,7 @@ fn git_import(cli: &Cli, path: &Path) -> Result<ExitCode> {
 
 fn git_export(cli: &Cli, path: &Path, names: &[String]) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
-    let report = repo.git_export(path, names)?;
+    let report = repo.git_export_as(path, names, &cli.agent)?;
     if cli.json {
         print_json(&json!({
             "commits": report.commits,
