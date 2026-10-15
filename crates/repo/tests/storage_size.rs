@@ -165,6 +165,38 @@ fn an_imported_history_keeps_versions_as_deltas() {
     assert!(size_of(deltas.root()) < size_of(whole.root()));
 }
 
+/// Importing again stores the git map, which grew by a few pairings, as a
+/// delta against the map it grew from rather than whole again.
+#[test]
+fn a_git_map_is_stored_against_the_one_it_grew_from() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("work");
+    fs::create_dir_all(work.join("files")).unwrap();
+    git_in(&work, &["init", "-q"]);
+    for i in 0..300 {
+        fs::write(work.join(format!("files/f{i:03}.txt")), format!("{i}\n")).unwrap();
+    }
+    git_in(&work, &["add", "-A"]);
+    git_in(&work, &["commit", "-q", "-m", "first"]);
+    let repo = braid_repo::Repo::init(&tmp.path().join("braid")).unwrap();
+    repo.git_import(&work, "tester").unwrap();
+
+    fs::write(work.join("files/f000.txt"), "changed\n").unwrap();
+    git_in(&work, &["commit", "-q", "-a", "-m", "second"]);
+    repo.git_import(&work, "tester").unwrap();
+
+    let stats = repo.store().stats().unwrap();
+    let maps = stats
+        .kinds
+        .iter()
+        .find(|k| k.kind == Kind::Derived)
+        .unwrap();
+    assert_eq!(maps.objects, 2);
+    // Two maps of almost the same size: the second one takes little room.
+    assert!(maps.stored_bytes * 10 < maps.raw_bytes * 6, "{maps:?}");
+    assert!(repo.store().fsck().unwrap().is_clean());
+}
+
 /// Imports every branch and tag of the git repository `git_dir` into a new
 /// store at `dir`, with or without hints, and returns the store.
 fn import_into(git_dir: &Path, dir: &Path, hints: bool) -> Store {

@@ -177,7 +177,7 @@ impl Repo {
     ) -> Result<Option<Operation>, Error> {
         for _ in 0..MAP_ATTEMPTS {
             let map_id = if map.changed() {
-                let id = self.store.put(Kind::Derived, &map.map.to_bytes())?;
+                let id = self.put_map(&map.map, map.base)?;
                 self.store.sync()?;
                 Some(id)
             } else {
@@ -237,12 +237,23 @@ impl Repo {
         })
     }
 
+    /// Stores a git map, with the map it grew from, if any, as a hint: the
+    /// store may keep it as a delta against it instead of whole again.
+    fn put_map(&self, map: &GitMap, previous: Option<ObjectId>) -> Result<ObjectId, Error> {
+        let bytes = map.to_bytes();
+        Ok(match previous {
+            Some(previous) => self.store.put_similar(Kind::Derived, &bytes, &previous)?,
+            None => self.store.put(Kind::Derived, &bytes)?,
+        })
+    }
+
     /// Imports every branch and tag of the git repository at `git_repo`,
     /// incrementally, and points the matching braid refs at them.
     pub fn git_import(&self, git_repo: &Path, agent: &str) -> Result<GitImport, Error> {
-        let mut map = self.git_map()?;
+        let previous = self.store.refs()?.get(MAP_REF);
+        let mut map = self.git_map_at(previous)?;
         let report = braid_git::import(git_repo, &self.store, &mut map, &ImportOptions::default())?;
-        let map_id = self.store.put(Kind::Derived, &map.to_bytes())?;
+        let map_id = self.put_map(&map, previous)?;
         self.store.sync()?;
 
         let mut wanted: Vec<(String, ObjectId)> = report
