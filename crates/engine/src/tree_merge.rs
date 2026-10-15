@@ -46,7 +46,8 @@ pub enum MergeOutcome {
 /// [`merge_bases`](crate::merge_bases)). The merge changeset has the parents
 /// `[ours, theirs]`; as root, the three-way merge of the three trees; the
 /// change list against `ours`; `committer` as author and committer;
-/// `message`; and no extra fields. It is made even when `ours` already has
+/// `message`; and `extras` as its extra fields, such as [`AGENT`](crate::AGENT)
+/// naming who merged. It is made even when `ours` already has
 /// every change of `theirs`, with an empty change list, so that its history
 /// records the merge. Blobs, directories and the changeset are stored only
 /// when the outcome is [`Merged`](MergeOutcome::Merged).
@@ -66,6 +67,7 @@ pub fn merge<O: Objects>(
     theirs: ObjectId,
     committer: Signature,
     message: Vec<u8>,
+    extras: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> Result<MergeOutcome, Error> {
     let bases = merge_bases(objects, ours, theirs)?;
     let base_root = match bases.as_slice() {
@@ -105,7 +107,7 @@ pub fn merge<O: Objects>(
         author: committer.clone(),
         committer,
         message,
-        extras: Vec::new(),
+        extras,
         git_origin: None,
     }
     .assemble()
@@ -144,7 +146,7 @@ mod tests {
     use super::*;
     use crate::access::read_changes;
     use crate::commit::{admit, commit};
-    use crate::land::{ConflictKind, LandOutcome, land};
+    use crate::land::{AGENT, ConflictKind, LandOutcome, land};
     use crate::testing::{Repo, delete, signature, text_map};
     use braid_format::{Change, Changes};
 
@@ -185,6 +187,7 @@ mod tests {
             fork.theirs,
             signature("merger"),
             b"Merge\n".to_vec(),
+            vec![(AGENT.to_vec(), b"merger".to_vec())],
         )
         .unwrap()
     }
@@ -223,7 +226,17 @@ mod tests {
         let later = repo.commit(&[next], vec![repo.set("b", "1")]);
         let objects = &repo.objects;
         let stored = objects.len();
-        let run = |ours, theirs| merge(objects, ours, theirs, signature("m"), Vec::new()).unwrap();
+        let run = |ours, theirs| {
+            merge(
+                objects,
+                ours,
+                theirs,
+                signature("m"),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap()
+        };
         assert_eq!(run(base, later), MergeOutcome::FastForward(later));
         assert_eq!(run(later, base), MergeOutcome::UpToDate);
         assert_eq!(run(later, next), MergeOutcome::UpToDate);
@@ -253,7 +266,7 @@ mod tests {
         assert_eq!(new.author, signature("merger"));
         assert_eq!(new.committer, signature("merger"));
         assert_eq!(new.message, b"Merge\n");
-        assert!(new.extras.is_empty());
+        assert_eq!(new.extras, [(AGENT.to_vec(), b"merger".to_vec())]);
         assert_eq!(new.git_origin, None);
 
         // Merging the other way gives the same tree.
@@ -262,6 +275,7 @@ mod tests {
             f.theirs,
             f.ours,
             signature("merger"),
+            Vec::new(),
             Vec::new(),
         )
         .unwrap();
@@ -390,7 +404,16 @@ mod tests {
         );
         let (first, _) = merged(&f);
         let repo = &f.repo;
-        let run = |ours, theirs| merge(&repo.objects, ours, theirs, signature("m"), Vec::new());
+        let run = |ours, theirs| {
+            merge(
+                &repo.objects,
+                ours,
+                theirs,
+                signature("m"),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
         assert_eq!(run(first, f.theirs).unwrap(), MergeOutcome::UpToDate);
         assert_eq!(
             run(f.theirs, first).unwrap(),
@@ -413,7 +436,14 @@ mod tests {
         let repo = Repo::new();
         let one = repo.commit(&[], vec![repo.set("a", "1")]);
         let two = repo.commit(&[], vec![repo.set("b", "1")]);
-        let result = merge(&repo.objects, one, two, signature("m"), Vec::new());
+        let result = merge(
+            &repo.objects,
+            one,
+            two,
+            signature("m"),
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(
             matches!(result, Err(Error::UnrelatedHistories { ours, theirs }) if ours == one && theirs == two),
             "{result:?}"
@@ -446,7 +476,14 @@ mod tests {
         let m2 = node(&repo, &[y, x], vec![repo.set("a", "x")], "m2");
         let ours = node(&repo, &[m1], vec![repo.set("c", "1")], "ours");
         let theirs = node(&repo, &[m2], vec![repo.set("d", "1")], "theirs");
-        let result = merge(&repo.objects, ours, theirs, signature("m"), Vec::new());
+        let result = merge(
+            &repo.objects,
+            ours,
+            theirs,
+            signature("m"),
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(
             matches!(&result, Err(Error::SeveralMergeBases { bases, .. }) if bases.len() == 2),
             "{result:?}"
@@ -460,9 +497,15 @@ mod tests {
         let m2 = node(&repo, &[y, x], Vec::new(), "m2 again");
         let ours = node(&repo, &[m1], vec![repo.set("c", "1")], "ours again");
         let theirs = node(&repo, &[m2], vec![repo.set("d", "1")], "theirs again");
-        let MergeOutcome::Merged { changeset, .. } =
-            merge(&repo.objects, ours, theirs, signature("m"), Vec::new()).unwrap()
-        else {
+        let MergeOutcome::Merged { changeset, .. } = merge(
+            &repo.objects,
+            ours,
+            theirs,
+            signature("m"),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap() else {
             panic!("expected a merge");
         };
         assert_eq!(

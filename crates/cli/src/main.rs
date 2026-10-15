@@ -34,7 +34,9 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     repo: Option<PathBuf>,
 
-    /// Label recorded in the op log for operations made by this command.
+    /// Who is acting: a label recorded in the op log with every ref this
+    /// command moves, and as the `agent` field of every changeset it
+    /// creates.
     #[arg(long, global = true, env = "BRAID_AGENT", default_value = "cli")]
     agent: String,
 
@@ -614,6 +616,15 @@ fn signature_json(signature: &Signature) -> Value {
     })
 }
 
+/// The agent a changeset names in its `agent` field, if it names one.
+fn agent_of(changeset: &Changeset) -> Option<String> {
+    changeset
+        .extras
+        .iter()
+        .find(|(key, _)| key.as_slice() == braid_engine::AGENT)
+        .map(|(_, value)| String::from_utf8_lossy(value).into_owned())
+}
+
 fn changeset_json(id: &ObjectId, changeset: &Changeset) -> Value {
     json!({
         "id": id.to_hex(),
@@ -621,6 +632,7 @@ fn changeset_json(id: &ObjectId, changeset: &Changeset) -> Value {
         "root": changeset.root.to_hex(),
         "author": signature_json(&changeset.author),
         "committer": signature_json(&changeset.committer),
+        "agent": agent_of(changeset),
         "message": String::from_utf8_lossy(&changeset.message),
         "extras": changeset.extras.iter().map(|(k, v)| json!([
             String::from_utf8_lossy(k), String::from_utf8_lossy(v)
@@ -660,9 +672,10 @@ fn log(cli: &Cli, revision: &str, limit: usize) -> Result<ExitCode> {
     } else {
         let mut out = io::stdout().lock();
         for (id, changeset) in &entries {
+            let agent = agent_of(changeset).map_or_else(String::new, |agent| format!(" ({agent})"));
             writeln!(
                 out,
-                "{}  {}  {}  {}",
+                "{}  {}  {}{agent}  {}",
                 id.short(),
                 format_signature_time(&changeset.author),
                 String::from_utf8_lossy(&changeset.author.name),
@@ -722,6 +735,9 @@ fn show(cli: &Cli, revision: &str) -> Result<ExitCode> {
             String::from_utf8_lossy(&signature.email),
             format_signature_time(signature)
         )?;
+    }
+    if let Some(agent) = agent_of(&changeset) {
+        writeln!(out, "agent     {agent}")?;
     }
     writeln!(out)?;
     for line in String::from_utf8_lossy(&changeset.message).lines() {

@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use braid_engine::{Conflict, MergeOutcome, is_ancestor, merge};
+use braid_engine::{AGENT, Conflict, MergeOutcome, is_ancestor, merge};
 use braid_format::{Kind, MemoryObjects, ObjectId, Objects, Signature};
 use braid_git::{Exporter, GitKind, GitOid, ImportOptions, RefTarget};
 use braid_store::{Operation, Store};
@@ -179,7 +179,8 @@ impl Repo {
     /// moved) as a fast-forward with a lease. Braid never force-pushes.
     /// Operations are recorded by `agent`, who is also the committer of a
     /// merge, with the `email` of the repository's [`Config`](crate::Config)
-    /// or `<agent>@example.org`.
+    /// or `<agent>@example.org`, and whom the merge's
+    /// [`AGENT`](braid_engine::AGENT) field names.
     ///
     /// # The mirror
     ///
@@ -494,12 +495,14 @@ impl<'r> Sync<'r> {
             }
             (Some(head), Some(remote)) => {
                 let message = format!("Merge {} into {}\n", self.remote_ref, self.branch);
+                let agent = vec![(AGENT.to_vec(), self.agent.as_bytes().to_vec())];
                 match merge(
                     objects,
                     head,
                     remote,
                     self.committer.clone(),
                     message.into_bytes(),
+                    agent,
                 )? {
                     MergeOutcome::UpToDate => Decision::Push(head),
                     MergeOutcome::FastForward(to) => Decision::FastForward(to),

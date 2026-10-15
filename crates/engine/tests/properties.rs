@@ -433,7 +433,7 @@ fn check_merge_agrees_with_land(
         Vec::new(),
     )?;
     let landed = land(&objects, Some(x), y, signature())?;
-    let merged = merge(&objects, x, y, signature(), b"merge\n".to_vec())?;
+    let merged = merge(&objects, x, y, signature(), b"merge\n".to_vec(), Vec::new())?;
     match (landed, merged) {
         (LandOutcome::Conflicts(by_land), MergeOutcome::Conflicts(by_merge)) => {
             prop_assert_eq!(by_land, by_merge);

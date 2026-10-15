@@ -41,6 +41,9 @@ pub struct ChangeRequest {
     pub message: Vec<u8>,
     /// The author, who also commits it.
     pub author: Identity,
+    /// The label of the agent making it, recorded as its
+    /// [`AGENT`](braid_engine::AGENT) field.
+    pub agent: String,
 }
 
 /// Checks the expectations against the base, stores the contents and the
@@ -118,7 +121,7 @@ pub fn create_change(store: &Store, request: &ChangeRequest) -> Result<ObjectId,
         signature.clone(),
         signature,
         request.message.clone(),
-        Vec::new(),
+        crate::rebase::agent_extras(&request.agent),
     )?;
     store.sync()?;
     Ok(id)

@@ -426,6 +426,7 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
         paths: workspace_paths(&workspace, &args.paths)?,
         author: None,
         committer: identity(&args.identity, &target.repo)?,
+        agent: cli.agent.clone(),
         force: args.force,
     };
     let outcome = workspace.commit(&request)?;
@@ -704,6 +705,7 @@ pub(crate) fn change(cli: &Cli, action: &ChangeAction) -> Result<ExitCode> {
         expects,
         message: args.message.as_bytes().to_vec(),
         author: author.clone(),
+        agent: cli.agent.clone(),
     };
     let change = braid_wc::create_change(repo.store(), &request)?;
     let landing = match &args.land {

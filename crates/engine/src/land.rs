@@ -45,6 +45,12 @@ use crate::path::{check_depth, join};
 /// changeset it was rebased from.
 pub const REBASED_FROM: &[u8] = b"rebased-from";
 
+/// The extra field naming the agent that made a changeset: its label, as
+/// the command line's `--agent` gives it. A rebased changeset keeps the
+/// original's, as it keeps every extra field but [`REBASED_FROM`], so the
+/// field names the agent that made the change, wherever it landed.
+pub const AGENT: &[u8] = b"agent";
+
 /// What landing a change does to the branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LandOutcome {

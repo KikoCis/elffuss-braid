@@ -19,6 +19,7 @@ fn commit_all(ws: &Workspace<'_>, message: &str) -> braid_wc::CommitOutcome {
         paths: Vec::new(),
         author: None,
         committer: ada(),
+        agent: "tester".to_owned(),
         force: false,
     })
     .unwrap()
@@ -153,6 +154,7 @@ fn a_stack_that_conflicts_half_way_continues_after_the_commit() {
         paths: vec![b"x".to_vec()],
         author: None,
         committer: ada(),
+        agent: "tester".to_owned(),
         force: false,
     });
     assert!(
@@ -167,6 +169,7 @@ fn a_stack_that_conflicts_half_way_continues_after_the_commit() {
             paths: Vec::new(),
             author: None,
             committer: ada(),
+            agent: "tester".to_owned(),
             force: false,
         })
         .unwrap();
@@ -263,6 +266,7 @@ fn refusals() {
             paths: Vec::new(),
             author: None,
             committer: ada(),
+            agent: "tester".to_owned(),
             force: false,
         }),
         Err(Error::NothingToCommit)
@@ -274,6 +278,7 @@ fn refusals() {
             paths: Vec::new(),
             author: None,
             committer: ada(),
+            agent: "tester".to_owned(),
             force: false,
         }),
         Err(Error::NoMessage)

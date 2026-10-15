@@ -53,24 +53,26 @@ impl Repo {
 
 /// Runs braid in `dir` with a fixed author and agent.
 fn braid(dir: &Path, args: &[&str]) -> Output {
+    braid_as("tester", dir, args)
+}
+
+/// Runs braid in `dir` with a fixed author, as the agent `agent`.
+fn braid_as(agent: &str, dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_braid"))
         .current_dir(dir)
         .args(args)
         .env("BRAID_AUTHOR", AUTHOR)
-        .env("BRAID_AGENT", "tester")
+        .env("BRAID_AGENT", agent)
         .output()
         .unwrap()
 }
 
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// Runs braid with `--json`, expecting exit status `code`.
-fn json_status(dir: &Path, args: &[&str], code: i32) -> Value {
+/// Runs braid with `--json` as the agent `agent`, expecting exit status
+/// `code`.
+fn json_as(agent: &str, dir: &Path, args: &[&str], code: i32) -> Value {
     let mut all = args.to_vec();
     all.push("--json");
-    let out = braid(dir, &all);
+    let out = braid_as(agent, dir, &all);
     assert_eq!(
         out.status.code(),
         Some(code),
@@ -79,6 +81,15 @@ fn json_status(dir: &Path, args: &[&str], code: i32) -> Value {
         stderr(&out)
     );
     serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Runs braid with `--json`, expecting exit status `code`.
+fn json_status(dir: &Path, args: &[&str], code: i32) -> Value {
+    json_as("tester", dir, args, code)
 }
 
 fn json(dir: &Path, args: &[&str]) -> Value {
@@ -539,6 +550,47 @@ fn the_short_id_commit_prints_works_everywhere() {
     write(&ws, "more.txt", "more\n");
     let committed = json(&ws, &["commit", "-m", "more"]);
     assert_eq!(committed["changeset"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn changesets_name_the_agent_that_made_them() {
+    let repo = Repo::new();
+    seed(&repo, &[("shared.txt", "one\ntwo\nthree\n")]);
+    let a = repo.workspace("a");
+    let b = repo.workspace("b");
+    write(&a, "shared.txt", "one\nTWO from a\nthree\n");
+    json_as("agent-a", &a, &["commit", "-m", "a's two"], 0);
+    json_as("agent-a", &a, &["land"], 0);
+    write(&b, "b.txt", "b\n");
+    json_as("agent-b", &b, &["commit", "-m", "add b"], 0);
+    write(&b, "shared.txt", "one\nTWO from b\nthree\n");
+    json_as("agent-b", &b, &["commit", "-m", "b's two"], 0);
+
+    // Rebased by an update and resolved under another label, b's changes
+    // still name agent-b; landing records the lander in the op log only.
+    json_as("fixer", &b, &["update"], 2);
+    write(&b, "shared.txt", "one\nTWO from a and b\nthree\n");
+    json_as("fixer", &b, &["commit"], 0);
+    let landed = json_as("lander", &b, &["land"], 0);
+    let log = history(&repo);
+    let agents: Vec<&str> = log.iter().map(|c| c["agent"].as_str().unwrap()).collect();
+    assert_eq!(agents, ["agent-b", "agent-b", "agent-a", "tester"]);
+    for changeset in &log[..2] {
+        assert!(rebased_from(changeset).is_some());
+        let extras = changeset["extras"].as_array().unwrap();
+        assert_eq!(extras[0], serde_json::json!(["agent", "agent-b"]));
+    }
+    let ops = json(&repo.root, &["op", "log", "-n", "1"]);
+    assert_eq!(ops[0]["agent"], "lander");
+    assert_eq!(ops[0]["seq"], landed["operation"]);
+
+    // The text forms show it too.
+    let out = braid(&repo.root, &["show", "main"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("\nagent     agent-b\n"), "{text}");
+    let out = braid(&repo.root, &["log", "-n", "1"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("  Ada (agent-b)  b's two"), "{text}");
 }
 
 #[test]

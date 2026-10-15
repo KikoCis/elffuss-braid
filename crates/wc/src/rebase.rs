@@ -15,8 +15,8 @@
 //! the store, unreferenced.
 
 use braid_engine::{
-    Conflict, LandOutcome, REBASED_FROM, commit, diff, entry_at, land, read_blob, read_changes,
-    read_changeset,
+    AGENT, Conflict, LandOutcome, REBASED_FROM, commit, diff, entry_at, land, read_blob,
+    read_changes, read_changeset,
 };
 use braid_format::{
     Change, ChangeOp, ChangesetParts, EntryKind, Kind, ObjectId, Objects, Signature,
@@ -178,7 +178,8 @@ pub(crate) fn replay_one<O: Objects>(
         return Ok(outcome);
     };
     // The same tree and change list, with `onto` as the first parent (the
-    // temporary base has `onto`'s tree), naming the original change.
+    // temporary base has `onto`'s tree), naming the original change. The
+    // other extra fields are the original's, its agent among them.
     let landed = read_changeset(objects, changeset)?;
     let changes = read_changes(objects, changeset, &landed)?.into_owned();
     let parents = std::iter::once(onto)
@@ -189,7 +190,7 @@ pub(crate) fn replay_one<O: Objects>(
         .into_iter()
         .filter(|(key, _)| key.as_slice() != REBASED_FROM)
         .collect();
-    extras.extend(rebased_extras(change));
+    extras.push((REBASED_FROM.to_vec(), change.to_hex().into_bytes()));
     let rebased = store_parts(
         objects,
         ChangesetParts {
@@ -373,7 +374,28 @@ fn put_file<O: Objects>(objects: &O, content: &[u8], executable: bool) -> Result
     })
 }
 
-/// The extras of a changeset made by finishing a rebase of `change`.
-pub(crate) fn rebased_extras(change: ObjectId) -> Vec<(Vec<u8>, Vec<u8>)> {
-    vec![(REBASED_FROM.to_vec(), change.to_hex().into_bytes())]
+/// The extra fields of a changeset: the agent that makes it.
+pub(crate) fn agent_extras(agent: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    vec![(AGENT.to_vec(), agent.as_bytes().to_vec())]
+}
+
+/// The extra fields of the changeset that finishes a rebase of `change`,
+/// whose own are `original`: the same, as landing keeps them, with
+/// [`REBASED_FROM`] naming `change`. The original's [`AGENT`] stays; a change
+/// without one gets `agent`, who resolved it.
+pub(crate) fn rebased_extras(
+    original: &[(Vec<u8>, Vec<u8>)],
+    change: ObjectId,
+    agent: &str,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut extras: Vec<(Vec<u8>, Vec<u8>)> = original
+        .iter()
+        .filter(|(key, _)| key.as_slice() != REBASED_FROM)
+        .cloned()
+        .collect();
+    if !extras.iter().any(|(key, _)| key.as_slice() == AGENT) {
+        extras.splice(0..0, agent_extras(agent));
+    }
+    extras.push((REBASED_FROM.to_vec(), change.to_hex().into_bytes()));
+    extras
 }

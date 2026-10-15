@@ -70,7 +70,7 @@ pub use apply::apply;
 pub use commit::{admit, commit};
 pub use diff::diff;
 pub use error::{ApplyProblem, Error, StoreError};
-pub use land::{Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
+pub use land::{AGENT, Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
 pub use merge::{BINARY_SNIFF_BYTES, ConflictHunk, HunkSide, MergeResult, is_binary, merge3};
 pub use path::MAX_PATH_DEPTH;
 pub use tree_merge::{MergeOutcome, merge};

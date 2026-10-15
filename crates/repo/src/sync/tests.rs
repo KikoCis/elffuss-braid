@@ -469,6 +469,11 @@ fn diverged_with_disjoint_edits_merges_and_pushes() {
     let theirs_changeset = world.map().changeset(&oid(&theirs)).unwrap();
     let merged = read_changeset(world.braid.store(), merge).unwrap();
     assert_eq!(merged.parents, [ours, theirs_changeset]);
+    // The merge names the agent that made it.
+    assert_eq!(
+        merged.extras,
+        [(braid_engine::AGENT.to_vec(), b"tester".to_vec())]
+    );
     assert_eq!(report.operations.len(), 2, "the merge, then the push");
 
     // The remote has both lines and the merge commit, a fast-forward from
@@ -485,6 +490,7 @@ fn diverged_with_disjoint_edits_merges_and_pushes() {
         text.contains("\ncommitter tester <tester@example.org> "),
         "{text}"
     );
+    assert!(text.contains("\nagent tester\n"), "{text}");
     assert!(
         text.ends_with(&format!("Merge {} into main", report.remote_ref)),
         "{text}"

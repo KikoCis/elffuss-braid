@@ -27,7 +27,7 @@ use crate::fsprobe::FileSystem;
 use crate::identity::Identity;
 use crate::markers::has_markers;
 use crate::paths::{is_within, os_name, split_last};
-use crate::rebase::{First, Replayed, conflict_tree, rebased_extras, replay};
+use crate::rebase::{First, Replayed, agent_extras, conflict_tree, rebased_extras, replay};
 use crate::safe::{Found, Root, Stat, StatKind, open_file, read_link};
 use crate::scan;
 use crate::state::{Checkout, Lock, Rebase, RecordedConflict, State};
@@ -73,6 +73,10 @@ pub struct CommitRequest {
     pub author: Option<Identity>,
     /// Who records the changeset.
     pub committer: Identity,
+    /// The label of the agent making it, recorded as its
+    /// [`AGENT`](braid_engine::AGENT) field. While a rebase is in progress,
+    /// the rebased changeset's own agent stays, if it names one.
+    pub agent: String,
     /// Commit even if conflict markers remain or conflicts are not marked
     /// resolved.
     pub force: bool,
@@ -623,11 +627,12 @@ impl<'r> Workspace<'r> {
             (None, Some(original)) => original.author.clone(),
             (None, None) => committer.clone(),
         };
-        let extras = state
-            .rebase
-            .as_ref()
-            .map(|rebase| rebased_extras(rebase.change))
-            .unwrap_or_default();
+        let extras = match (&state.rebase, &original) {
+            (Some(rebase), Some(original)) => {
+                rebased_extras(&original.extras, rebase.change, &request.agent)
+            }
+            _ => agent_extras(&request.agent),
+        };
         let parents: Vec<ObjectId> = state.base.into_iter().collect();
         let count = changes.len();
         let id = braid_engine::commit(
