@@ -24,7 +24,22 @@ pub(crate) fn get<O: Objects>(objects: &O, id: &ObjectId, kind: Kind) -> Result<
 
 /// Stores an object and checks the id the store gives back.
 pub(crate) fn put<O: Objects>(objects: &O, kind: Kind, payload: &[u8]) -> Result<ObjectId, Error> {
-    let id = objects.put(kind, payload).map_err(Error::objects)?;
+    put_hinted(objects, kind, payload, None)
+}
+
+/// Stores an object, with an object it is probably close to as a hint for
+/// the store, and checks the id the store gives back.
+pub(crate) fn put_hinted<O: Objects>(
+    objects: &O,
+    kind: Kind,
+    payload: &[u8],
+    similar: Option<&ObjectId>,
+) -> Result<ObjectId, Error> {
+    let id = match similar {
+        Some(similar) => objects.put_similar(kind, payload, similar),
+        None => objects.put(kind, payload),
+    }
+    .map_err(Error::objects)?;
     let expected = ObjectId::hash(kind, payload);
     if id != expected {
         return Err(Error::BadBraidObject {
