@@ -121,6 +121,10 @@ enum Command {
     },
     /// Check every record, index, op log entry and ref of the store.
     Fsck,
+    /// Show what the store holds: objects by kind and by codec, with their
+    /// sizes as stored and decoded.
+    #[command(long_about = STATS_HELP)]
+    Stats,
     /// Create, list and remove workspaces.
     Workspace {
         #[command(subcommand)]
@@ -267,6 +271,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 },
         } => sync::git_sync(cli, remote, branch, remote_branch.as_deref(), *dry_run),
         Command::Fsck => fsck(cli),
+        Command::Stats => stats(cli),
         Command::Workspace { action } => work::workspace(cli, action),
         Command::Status => work::status(cli),
         Command::Commit(args) => work::commit(cli, args),
@@ -321,11 +326,19 @@ fn hash_object(cli: &Cli, paths: &[PathBuf], write: bool) -> Result<ExitCode> {
     let mut hashed = Vec::with_capacity(paths.len());
     for path in paths {
         let (id, size) = match &repo {
-            // Storing needs the whole payload; the store compresses it.
+            // Streamed into the store: large files are cut into chunks as
+            // they are read, never held in memory whole.
+            Some(repo) if path.as_os_str() == "-" => repo
+                .store()
+                .put_blob_from(io::stdin().lock(), None)
+                .context("cannot store standard input")?,
             Some(repo) => {
-                let bytes = read_input(path)?;
-                let id = repo.store().put(Kind::Blob, &bytes)?;
-                (id, bytes.len() as u64)
+                let file =
+                    File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+                let size = file.metadata().ok().map(|meta| meta.len());
+                repo.store()
+                    .put_blob_from(file, size)
+                    .with_context(|| format!("cannot store {}", path.display()))?
             }
             None if path.as_os_str() == "-" => {
                 hash_blob(io::stdin().lock()).context("cannot read standard input")?
@@ -364,22 +377,6 @@ fn hash_object(cli: &Cli, paths: &[PathBuf], write: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn read_input(path: &Path) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    if path.as_os_str() == "-" {
-        io::stdin()
-            .lock()
-            .read_to_end(&mut bytes)
-            .context("cannot read standard input")?;
-    } else {
-        File::open(path)
-            .with_context(|| format!("cannot open {}", path.display()))?
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("cannot read {}", path.display()))?;
-    }
-    Ok(bytes)
-}
-
 /// Hashes a stream as a blob without holding it in memory.
 fn hash_blob(mut reader: impl Read) -> io::Result<(ObjectId, u64)> {
     let mut hasher = IdHasher::new(Kind::Blob);
@@ -401,17 +398,23 @@ fn hash_blob(mut reader: impl Read) -> io::Result<(ObjectId, u64)> {
 fn cat_object(cli: &Cli, revision: &str) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
     let id = repo.resolve(revision)?;
-    let Some((kind, payload)) = repo.store().get(&id)? else {
-        bail!("object {id} is not in the store");
-    };
     if cli.json {
+        // The size is in the record's header: nothing needs decoding.
+        let Some((kind, size)) = repo.store().stat(&id)? else {
+            bail!("object {id} is not in the store");
+        };
         print_json(&json!({
             "id": id.to_hex(),
             "kind": kind.name(),
-            "size": payload.len(),
+            "size": size,
         }))?;
     } else {
-        io::stdout().lock().write_all(&payload)?;
+        // Streamed: a large blob is written a chunk at a time.
+        let mut out = io::stdout().lock();
+        if repo.store().read_to(&id, &mut out)?.is_none() {
+            bail!("object {id} is not in the store");
+        }
+        out.flush()?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -566,6 +569,8 @@ fn fsck(cli: &Cli) -> Result<ExitCode> {
             "segments": report.segments,
             "sealed_segments": report.sealed_segments,
             "records": report.records,
+            "delta_records": report.delta_records,
+            "chunked_records": report.chunked_records,
             "objects": report.objects,
             "operations": report.operations,
             "refs": report.refs,
@@ -575,6 +580,10 @@ fn fsck(cli: &Cli) -> Result<ExitCode> {
         println!(
             "{} objects in {} segments, {} operations, {} refs",
             report.objects, report.segments, report.operations, report.refs
+        );
+        println!(
+            "{} records: {} deltas, {} chunked blobs",
+            report.records, report.delta_records, report.chunked_records
         );
         for problem in &problems {
             println!("problem: {problem}");
@@ -593,6 +602,102 @@ fn fsck(cli: &Cli) -> Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// The long help of `stats`.
+const STATS_HELP: &str = "Show what the store holds: objects by kind and by codec, with their
+sizes as stored and decoded, and the size of the files that hold them. It
+reads the indexes and journals only, never a payload.
+
+Codecs: raw (as it is), zstd (compressed on its own), delta (compressed
+against a similar object, its base: the same path one change earlier),
+chunked (a blob of 4 MiB or more, stored as the list of its chunks; the
+chunks are blobs of their own, so content shared by several versions of a
+file is stored once).
+
+With --json, stats prints objects, stored_bytes (payloads as stored),
+raw_bytes (distinct content: chunked blobs count through their chunks),
+record_bytes (with record headers and padding), segment_bytes and
+index_bytes (the files), kinds (objects, stored_bytes and raw_bytes for
+each of blob, tree, changeset, chunklist and derived) and codecs (the same
+for each of raw, zstd, dictionary, delta and chunked).";
+
+fn stats(cli: &Cli) -> Result<ExitCode> {
+    let repo = open_repo(cli)?;
+    let stats = repo.store().stats()?;
+    let sizes = |objects: u64, stored: u64, raw: u64| json!({ "objects": objects, "stored_bytes": stored, "raw_bytes": raw });
+    if cli.json {
+        let kinds: serde_json::Map<String, Value> = stats
+            .kinds
+            .iter()
+            .map(|k| {
+                (
+                    k.kind.name().to_owned(),
+                    sizes(k.objects, k.stored_bytes, k.raw_bytes),
+                )
+            })
+            .collect();
+        let codecs: serde_json::Map<String, Value> = stats
+            .codecs
+            .iter()
+            .map(|c| {
+                (
+                    c.codec.name().to_owned(),
+                    sizes(c.objects, c.stored_bytes, c.raw_bytes),
+                )
+            })
+            .collect();
+        print_json(&json!({
+            "objects": stats.objects,
+            "stored_bytes": stats.stored_bytes,
+            "raw_bytes": stats.raw_bytes,
+            "record_bytes": stats.record_bytes,
+            "segment_bytes": stats.segment_bytes,
+            "index_bytes": stats.index_bytes,
+            "kinds": kinds,
+            "codecs": codecs,
+        }))?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut out = io::stdout().lock();
+    writeln!(
+        out,
+        "{:<12} {:>10} {:>14} {:>14}",
+        "", "objects", "stored", "raw"
+    )?;
+    for k in stats.kinds.iter().filter(|k| k.objects > 0) {
+        writeln!(
+            out,
+            "{:<12} {:>10} {:>14} {:>14}",
+            k.kind.name(),
+            k.objects,
+            k.stored_bytes,
+            k.raw_bytes
+        )?;
+    }
+    writeln!(out)?;
+    for c in stats.codecs.iter().filter(|c| c.objects > 0) {
+        writeln!(
+            out,
+            "{:<12} {:>10} {:>14} {:>14}",
+            c.codec.name(),
+            c.objects,
+            c.stored_bytes,
+            c.raw_bytes
+        )?;
+    }
+    writeln!(out)?;
+    writeln!(
+        out,
+        "{} objects: {} bytes stored for {} bytes of distinct content",
+        stats.objects, stats.stored_bytes, stats.raw_bytes
+    )?;
+    writeln!(
+        out,
+        "files: {} bytes of segments, {} bytes of indexes and journals",
+        stats.segment_bytes, stats.index_bytes
+    )?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// A changeset named by a ref, its id or a short id.

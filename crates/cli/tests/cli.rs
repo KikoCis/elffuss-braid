@@ -91,6 +91,79 @@ fn braid_in(dir: &std::path::Path) -> Command {
     command
 }
 
+#[test]
+fn large_files_are_stored_in_chunks_and_read_back_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        braid()
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut state = 1u64;
+    let payload: Vec<u8> = (0..(5 << 20) + 77)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 33) as u8
+        })
+        .collect();
+    let path = dir.path().join("model.bin");
+    std::fs::write(&path, &payload).unwrap();
+    let id = ObjectId::hash(Kind::Blob, &payload);
+
+    let stored = run_json(braid_in(dir.path()).args(["hash-object", "-w"]).arg(&path));
+    assert_eq!(stored[0]["id"], id.to_hex().as_str());
+    assert_eq!(stored[0]["size"], payload.len() as u64);
+    // Standard input too, with a different file.
+    let mut child = braid_in(dir.path())
+        .args(["hash-object", "-w", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let shorter = &payload[..(4 << 20) + 5];
+    child.stdin.take().unwrap().write_all(shorter).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let from_stdin = ObjectId::hash(Kind::Blob, shorter);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("{from_stdin}  -\n")
+    );
+
+    let out = braid_in(dir.path())
+        .args(["cat-object", &id.to_hex()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(out.stdout == payload);
+    let described = run_json(braid_in(dir.path()).args(["cat-object", &id.to_hex()]));
+    assert_eq!(described["size"], payload.len() as u64);
+
+    let fsck = run_json(braid_in(dir.path()).arg("fsck"));
+    assert_eq!(fsck["clean"], true);
+    assert_eq!(fsck["chunked_records"], 2);
+    assert_eq!(fsck["delta_records"], 0);
+    let stats = run_json(braid_in(dir.path()).arg("stats"));
+    assert_eq!(stats["codecs"]["chunked"]["objects"], 2);
+    assert_eq!(
+        stats["codecs"]["chunked"]["raw_bytes"],
+        (payload.len() + shorter.len()) as u64
+    );
+    assert_eq!(stats["kinds"]["blob"]["objects"], stats["objects"]);
+    // The two files share their first chunks: distinct content is a
+    // little over the longer one.
+    let raw = stats["raw_bytes"].as_u64().unwrap();
+    assert!(raw >= payload.len() as u64 && raw < (payload.len() + (1 << 20)) as u64);
+    let text = braid_in(dir.path()).arg("stats").output().unwrap();
+    assert!(text.status.success());
+    assert!(String::from_utf8(text.stdout).unwrap().contains("chunked"));
+}
+
 fn run_json(command: &mut Command) -> serde_json::Value {
     let out = command.arg("--json").output().unwrap();
     assert!(
