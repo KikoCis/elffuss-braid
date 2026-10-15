@@ -482,10 +482,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "elffuss-braid-engine",
  "elffuss-braid-format",
  "elffuss-braid-git",
  "elffuss-braid-repo",
  "elffuss-braid-store",
+ "elffuss-braid-wc",
  "serde_json",
  "tempfile",
 ]
