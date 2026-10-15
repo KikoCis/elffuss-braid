@@ -17,12 +17,17 @@
 //! A revision is a ref name, a full object id, or a short id: at least
 //! [`MIN_SHORT_ID`] hex digits that start the id of exactly one stored
 //! object (see [`Repo::resolve`]).
+//!
+//! [`Repo::history`] answers history queries (ancestry, the changes to a
+//! path, blame) with the derived data the store keeps, computing what is
+//! missing.
 
 #![forbid(unsafe_code)]
 
 mod clock;
 mod config;
 mod git;
+mod history;
 mod link;
 mod remote;
 mod sync;
@@ -33,7 +38,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use braid_format::{Kind, ObjectId, Objects};
-use braid_store::{Options, Store};
+use braid_store::{DerivedIndexFile, Options, Store};
 
 pub use braid_engine::{Conflict, ConflictHunk, ConflictKind, HunkSide};
 pub use clock::{local_now, signature_now};
@@ -42,6 +47,7 @@ pub use git::{
     GIT_EXPORT_AGENT, GitImport, MAP_REF, REMOTE_PREFIX, braid_ref_for_git, git_ref_for_braid,
     remote_ref,
 };
+pub use history::{RepoHistory, StoreIndex};
 pub use link::{Location, WORKSPACES_DIR, WorkspaceLink, locate};
 pub use remote::Remote;
 pub use sync::{MIRRORS_DIR, SyncOptions, SyncOutcome, SyncReport};
@@ -188,6 +194,8 @@ pub enum Error {
 pub struct Repo {
     root: PathBuf,
     store: Store,
+    /// The store's derived index, read when first needed.
+    derived: DerivedIndexFile,
 }
 
 impl Repo {
@@ -202,6 +210,7 @@ impl Repo {
         Ok(Repo {
             root: dir.to_path_buf(),
             store,
+            derived: DerivedIndexFile::new(&store_dir),
         })
     }
 
@@ -215,6 +224,7 @@ impl Repo {
         Ok(Repo {
             root: dir.to_path_buf(),
             store,
+            derived: DerivedIndexFile::new(&store_dir),
         })
     }
 

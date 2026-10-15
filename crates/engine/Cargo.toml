@@ -14,6 +14,7 @@ name = "braid_engine"
 
 [dependencies]
 braid-format.workspace = true
+blake3.workspace = true
 imara-diff = { version = "0.2.0", default-features = false }
 thiserror = "2.0"
 unicode-normalization = "0.1.25"

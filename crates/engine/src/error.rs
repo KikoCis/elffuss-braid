@@ -173,6 +173,14 @@ pub enum Error {
         theirs: ObjectId,
     },
 
+    /// Derived data about a changeset contradicts the history it was derived
+    /// from: a record made by a faulty version, or tampered with.
+    #[error("the derived data of {id} contradicts its history")]
+    DerivedData {
+        /// The changeset.
+        id: ObjectId,
+    },
+
     /// Two changesets to merge have several best common ancestors, as after
     /// criss-cross merges, with different trees: the merge would depend on
     /// which one it started from.

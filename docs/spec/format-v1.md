@@ -3,7 +3,8 @@
 **Status: frozen.** Sections 1 to 5 (ids, the codec, trees, changesets and
 names) are implemented in `crates/format` and frozen: any change to hashed bytes
 needs a new format version. Sections 6 and 7 describe the git mapping and the
-on-disk storage, which are not hashed and can still change.
+on-disk storage, which are not hashed and can still change. Section 8 describes
+derived data, whose encodings each have a version of their own.
 
 Every golden vector below is pinned by the Rust tests and recomputed by
 [`check_vectors.py`](check_vectors.py), a second implementation written from
@@ -325,6 +326,7 @@ section 1.
 .braid/store/oplog/lock        empty; locked exclusively by transactions, shared by readers
 .braid/store/oplog/log         operation records, append-only
 .braid/store/oplog/ckpt.<seq>  every ref as of operation <seq>
+.braid/store/derived/index     where the records of derived values are, by key
 ```
 
 Segment names are 32 random lowercase hex digits. Files whose names start with
@@ -411,7 +413,80 @@ uv n | n × (bytes ref name | [32] id), names strictly ascending
 [32] BLAKE3 hash of everything before it
 ```
 
+**Derived index entry**, 72 bytes at a multiple of 72:
+
+```
+[32] key | [32] record id | u32 0 | u32 crc32c of the 68 bytes before it
+```
+
+The derived index is a cache of where the records of section 8 are. A writer
+locks the file exclusively, appends its entries at the first multiple of 72 at
+or after the end, and unlocks; the records the entries name are durable
+first. Readers take no lock, skip entries that fail their CRC, and let the last
+entry of a key count. The file needs no sync: losing entries only means
+computing values again.
+
 **Planned, not implemented yet:** a binary fuse filter in indexes for fast
 misses, merged indexes, one-level zstd deltas against the same path in the
 first parent (codec 3), per-repository dictionaries (codec 2), and FastCDC
 chunking of blobs of 4 MiB or more.
+
+## 8. Derived data (not frozen, versioned per function)
+
+Values computed from changesets are stored as derived objects (kind 5), so
+their ids follow section 2, but their payloads are not part of format v1:
+each function versions its encoding, and a new encoding is a new version, so
+new keys. They are implemented in `crates/engine`.
+
+**Key** of the value of `function` at `version`:
+
+```
+BLAKE3-derive-key("elffuss-braid 2026 derived v1",
+    bytes function | uv version | uv n | n × [32] input id | bytes argument)
+```
+
+**Record**: a derived object whose payload is `[32] key` followed by the
+value. A reader uses a record only when it starts with the key and the value
+decodes; anything else is computed again.
+
+**`graph`, version 1**, of a changeset (the input is its id):
+
+```
+uv   n, n × [32] parents, in order
+uv   generation        1 without parents, else 1 + the largest of the parents'
+uv   height            0 without parents, else 1 + the first parent's
+[32] skip              present when height > 0: the first-parent ancestor at
+                       skip_height(height)
+```
+
+`skip_height(h)` is 0 for `h < 2`; for an even `h`, `h` with its lowest set
+bit cleared; for an odd `h`, 1 + (`h - 1` with its two lowest set bits
+cleared).
+
+**`changed-paths`, version 1**, of a changeset (the input is its id):
+
+```
+u8   1, then [32] the first parent; or 0 without parents
+uv   n                 the paths the change list names and all their parent
+                       directories, each once
+     filter            ceil(10 n / 8) bytes when 0 < n ≤ 1024, else nothing
+```
+
+The bits of an entry come from `h = BLAKE3-derive-key("elffuss-braid 2026
+changed-paths v1", path)`: with `a` and `b` its first two little-endian 64-bit
+words and `m` the number of bits of the filter, its bits are `(a + i·b) mod m`
+for `i` from 0 to 6, computed modulo 2⁶⁴; bit `j` is bit `j mod 8` of byte
+`j / 8`. With `n = 0` no path matches; with `n > 1024` every path may.
+
+**`blame`, version 1**, of a changeset and a path (the input is the
+changeset's id, the argument the path), for a changeset whose change list sets
+the path to a file, an executable or a symlink:
+
+```
+uv   k, k × [32] changesets, in the order their first lines come
+uv   r, r × (uv index of the changeset, uv lines)    runs, in line order
+```
+
+Runs are not empty, two runs in a row never have the same changeset, and every
+changeset listed has lines. A line ends after `\n`; a last line without one
+is a line too.
