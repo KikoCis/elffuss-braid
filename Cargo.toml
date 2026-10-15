@@ -17,6 +17,8 @@ braid-format = { package = "elffuss-braid-format", path = "crates/format" }
 braid-store = { package = "elffuss-braid-store", path = "crates/store" }
 braid-repo = { package = "elffuss-braid-repo", path = "crates/repo" }
 braid-git = { package = "elffuss-braid-git", path = "crates/git" }
+braid-engine = { package = "elffuss-braid-engine", path = "crates/engine" }
+braid-wc = { package = "elffuss-braid-wc", path = "crates/wc" }
 anyhow = "1.0"
 blake3 = "1.8"
 clap = { version = "4.6", features = ["derive", "env"] }
