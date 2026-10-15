@@ -7,10 +7,16 @@
 //! A repository is a directory holding a `.braid` directory. Inside it,
 //! `store/` is the object store and op log shared by every process and every
 //! workspace of the repository.
+//!
+//! A workspace is any directory holding a `.braid` *file* instead: a
+//! [`WorkspaceLink`] naming the repository and the workspace. [`locate`] and
+//! [`Repo::discover`] find the repository from inside either.
 
 #![forbid(unsafe_code)]
 
 mod git;
+mod link;
+pub mod text;
 
 use std::fs;
 use std::io;
@@ -20,6 +26,7 @@ use braid_format::{ObjectId, Objects};
 use braid_store::{Options, Store};
 
 pub use git::{GitImport, MAP_REF, braid_ref_for_git, git_ref_for_braid};
+pub use link::{Location, WORKSPACES_DIR, WorkspaceLink, locate};
 
 /// Name of the directory that holds a repository's data.
 pub const DIR: &str = ".braid";
@@ -31,9 +38,18 @@ pub const STORE_DIR: &str = "store";
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// No `.braid` directory in the starting directory or any parent.
+    /// No `.braid` directory or workspace file in the starting directory or
+    /// any parent.
     #[error("not inside a braid repository")]
     NotFound,
+    /// A workspace's `.braid` file cannot be read.
+    #[error("{}: not a valid workspace file: {detail}", .path.display())]
+    BadWorkspaceFile {
+        /// The file.
+        path: PathBuf,
+        /// What is wrong with it.
+        detail: String,
+    },
     /// `init` on a directory that already holds a repository.
     #[error("a braid repository already exists here")]
     AlreadyExists,
@@ -96,14 +112,13 @@ impl Repo {
     }
 
     /// Opens the repository that contains `start`: `start` itself or the
-    /// nearest parent with a `.braid` directory.
+    /// nearest parent with a `.braid` directory, or the repository named by
+    /// the `.braid` file of the workspace that contains `start`.
     pub fn discover(start: &Path) -> Result<Repo, Error> {
-        for dir in start.ancestors() {
-            if dir.join(DIR).join(STORE_DIR).is_dir() {
-                return Repo::open(dir);
-            }
+        match locate(start)? {
+            Location::Root(dir) => Repo::open(&dir),
+            Location::Workspace { link, .. } => Repo::open(&link.repository),
         }
-        Err(Error::NotFound)
     }
 
     /// The directory that holds `.braid`.
@@ -169,6 +184,37 @@ mod tests {
         assert!(matches!(
             Repo::discover(elsewhere.path()),
             Err(Error::NotFound)
+        ));
+    }
+
+    #[test]
+    fn discover_through_a_workspace_file() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        Repo::init(repo_dir.path()).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let workspace = elsewhere.path().join("agent-1");
+        fs::create_dir_all(workspace.join("src/deep")).unwrap();
+        let link = WorkspaceLink {
+            repository: repo_dir.path().to_path_buf(),
+            name: "agent-1".to_owned(),
+        };
+        fs::write(workspace.join(DIR), link.encode()).unwrap();
+
+        let found = Repo::discover(&workspace.join("src/deep")).unwrap();
+        assert_eq!(found.root(), repo_dir.path());
+        match locate(&workspace.join("src")).unwrap() {
+            Location::Workspace { dir, link: read } => {
+                assert_eq!(dir, workspace);
+                assert_eq!(read, link);
+            }
+            other => panic!("expected a workspace, got {other:?}"),
+        }
+
+        // A damaged file is an error, not a reason to keep looking.
+        fs::write(workspace.join(DIR), b"something else\n").unwrap();
+        assert!(matches!(
+            Repo::discover(&workspace),
+            Err(Error::BadWorkspaceFile { .. })
         ));
     }
 }
