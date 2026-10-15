@@ -327,7 +327,7 @@ mod tests {
 
         let first = scan(&root, &base, &Cache::default()).unwrap();
         assert_eq!(first.files[&b"a.txt".to_vec()], blob("one"));
-        assert!(first.cache.entries.contains_key(&b"a.txt".to_vec()));
+        assert!(first.cache.entries.contains_key(b"a.txt".as_slice()));
 
         // Rewrite the content in place behind the cache's back: same inode,
         // same size, same modification time. The cache vouches for it, so
@@ -346,7 +346,7 @@ mod tests {
         let same_instant = UNIX_EPOCH + Duration::new(seconds as u64, nanos);
         set_mtime(&path, same_instant);
         let mut racy = second.cache.clone();
-        racy.entries.get_mut(&b"a.txt".to_vec()).unwrap().mtime = (seconds, nanos);
+        racy.entries.get_mut(b"a.txt".as_slice()).unwrap().mtime = (seconds, nanos);
         let third = scan(&root, &base, &racy).unwrap();
         assert_eq!(third.files[&b"a.txt".to_vec()], blob("two"));
     }

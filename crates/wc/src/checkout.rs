@@ -75,20 +75,22 @@ pub(crate) fn plan<O: Objects>(
     if from == to {
         return Ok(plan);
     }
-    let mut olds = HashMap::new();
+    // The diff the other way lists the same paths with what `from` has
+    // there: one walk over the difference instead of a lookup per path.
+    let olds: HashMap<Vec<u8>, ChangeOp> = if from == EMPTY_TREE {
+        HashMap::new()
+    } else {
+        diff(objects, to, from)?
+            .into_iter()
+            .filter(|change| !matches!(change.op, ChangeOp::Delete))
+            .map(|change| (change.path, change.op))
+            .collect()
+    };
     for change in diff(objects, from, to)? {
-        let old = if from == EMPTY_TREE {
-            None
-        } else {
-            entry_at(objects, from, &change.path)?.and_then(|kind| ChangeOp::from_entry(&kind))
-        };
-        if let Some(old) = &old {
-            olds.insert(change.path.clone(), old.clone());
-        }
         match change.op {
             ChangeOp::Delete => {
-                if let Some(old) = old {
-                    plan.removes.push((change.path, old));
+                if let Some(old) = olds.get(&change.path) {
+                    plan.removes.push((change.path, old.clone()));
                 }
             }
             op => plan.writes.push((change.path, op)),
@@ -96,10 +98,19 @@ pub(crate) fn plan<O: Objects>(
     }
 
     // Directories the removals may leave behind, deepest first.
+    let mut is_dir: HashMap<&[u8], bool> = HashMap::new();
     let mut gone = BTreeSet::new();
     for (path, _) in &plan.removes {
         for dir in ancestors(path) {
-            if !gone.contains(dir) && !is_dir_in(objects, to, dir)? {
+            let stays = match is_dir.get(dir) {
+                Some(stays) => *stays,
+                None => {
+                    let stays = is_dir_in(objects, to, dir)?;
+                    is_dir.insert(dir, stays);
+                    stays
+                }
+            };
+            if !stays {
                 gone.insert(dir.to_vec());
             }
         }
@@ -347,7 +358,7 @@ pub(crate) fn apply<O: Objects>(objects: &O, root: &Root, plan: &Plan) -> Result
     }
 
     // Writes in path order, so a directory's files go out together.
-    let mut by_dir: BTreeMap<&[u8], Vec<(&[u8], &[u8], &ChangeOp)>> = BTreeMap::new();
+    let mut by_dir: BTreeMap<&[u8], Vec<Write<'_>>> = BTreeMap::new();
     for (path, op) in &plan.writes {
         let (parent, name) = split_last(path);
         by_dir.entry(parent).or_default().push((path, name, op));
@@ -384,6 +395,10 @@ pub(crate) fn apply<O: Objects>(objects: &O, root: &Root, plan: &Plan) -> Result
     }
     Ok(plan.len())
 }
+
+/// One write of a directory: the full path, the name in the directory, and
+/// what to write.
+type Write<'p> = (&'p [u8], &'p [u8], &'p ChangeOp);
 
 fn is_not_empty(err: &io::Error) -> bool {
     // Some systems report a directory that is not empty as "exists".
