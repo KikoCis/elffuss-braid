@@ -10,7 +10,9 @@ mod common;
 use std::fs;
 
 use braid_format::{ChangeOp, ObjectId};
-use braid_wc::{ChangeKind, CommitRequest, Error, Landed, RebaseProgress, Updated, Workspace};
+use braid_wc::{
+    Blocker, ChangeKind, CommitRequest, Error, Landed, RebaseProgress, Updated, Workspace,
+};
 use common::{Fixture, ada};
 
 fn commit_all(ws: &Workspace<'_>, message: &str) -> braid_wc::CommitOutcome {
@@ -225,6 +227,52 @@ fn a_stack_that_conflicts_half_way_continues_after_the_commit() {
     );
     let hex = |id: braid_format::ObjectId| Some(id.to_hex());
     assert_eq!(origins[..3], [hex(third), hex(second), hex(first)]);
+}
+
+#[test]
+fn files_a_rebased_change_tracked_stay_in_its_resolution() {
+    let f = Fixture::new();
+    let seed = f.commit(&[], vec![("x", f.file("1\n2\n3\n"))]);
+    f.set_branch("main", seed);
+    let dir = f.path("ws");
+    let (ws, _) = Workspace::create(&f.repo, "ws", &dir, Some(seed), "main").unwrap();
+    // One changeset adds a file the secrets guard holds back, once tracked,
+    // and edits a line that main edits too.
+    fs::write(dir.join(".env.example"), "KEY=\n").unwrap();
+    ws.track(&[b".env.example".to_vec()]).unwrap();
+    fs::write(dir.join("x"), "1\nours\n3\n").unwrap();
+    commit_all(&ws, "env and x");
+    assert!(ws.state().unwrap().tracked.is_empty());
+    let theirs = f.commit(&[seed], vec![("x", f.file("1\ntheirs\n3\n"))]);
+    f.set_branch("main", theirs);
+
+    let report = ws.update(&ada()).unwrap();
+    assert!(matches!(report.updated, Updated::Conflicts { .. }));
+    // The file is back, and does not wait for `braid track` again: only the
+    // markers stop the resolution.
+    assert_eq!(fs::read(dir.join(".env.example")).unwrap(), b"KEY=\n");
+    let status = ws.status().unwrap();
+    assert!(status.status.needs_track.is_empty());
+    assert_eq!(status.blocking, [Blocker::Markers(b"x".to_vec())]);
+    fs::write(dir.join("x"), "1\nboth\n3\n").unwrap();
+    let resolution = ws
+        .commit(&CommitRequest {
+            message: None,
+            paths: Vec::new(),
+            author: None,
+            committer: ada(),
+            agent: "tester".to_owned(),
+            force: false,
+        })
+        .unwrap()
+        .changeset
+        .unwrap();
+    let root = braid_engine::read_changeset(f.repo.store(), resolution)
+        .unwrap()
+        .root;
+    let kept = braid_engine::entry_at(f.repo.store(), root, b".env.example").unwrap();
+    assert!(kept.is_some());
+    assert!(ws.state().unwrap().tracked.is_empty());
 }
 
 #[test]

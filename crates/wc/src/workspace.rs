@@ -15,7 +15,9 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use braid_engine::{Conflict, EMPTY_TREE, first_parent_chain_contains, read_changeset};
+use braid_engine::{
+    Conflict, EMPTY_TREE, first_parent_chain_contains, read_changes, read_changeset,
+};
 use braid_format::{Change, ChangeOp, Kind, ObjectId, Objects, Signature};
 use braid_repo::{DIR, Repo, WORKSPACES_DIR, WorkspaceLink};
 use braid_store::{RefUpdate, Store, TransactError};
@@ -922,11 +924,28 @@ impl<'r> Workspace<'r> {
         conflicts: &[Conflict],
     ) -> Result<Vec<Vec<u8>>, Error> {
         let store = self.store();
-        let subject = subject(&read_changeset(store, change)?.message);
+        let changeset = read_changeset(store, change)?;
+        let subject = subject(&changeset.message);
         let ours = format!("{} ({})", state.branch, onto.short());
         let theirs = format!("{} ({subject})", change.short());
         let (tree, recorded) = conflict_tree(store, onto, change, conflicts, (&ours, &theirs))?;
         let plan = checkout::plan(store, root, state.fs, from, tree, Mode::Checked)?;
+        // The files the change sets were committed once already, those the
+        // secrets guard holds back too, after `braid track`: they stay
+        // tracked through the resolution, rather than waiting to be
+        // tracked again or dropped from it.
+        for item in read_changes(store, change, &changeset)?.iter() {
+            let size = match &item.op {
+                ChangeOp::File { size, .. }
+                | ChangeOp::Executable { size, .. }
+                | ChangeOp::Symlink { size, .. } => *size,
+                ChangeOp::Gitlink { .. } | ChangeOp::Delete => continue,
+            };
+            if status::is_guarded(&item.path, size) && !state.tracked.contains(&item.path) {
+                state.tracked.push(item.path.clone());
+            }
+        }
+        state.tracked.sort();
         state.base = Some(onto);
         state.rebase = Some(Rebase {
             change,
