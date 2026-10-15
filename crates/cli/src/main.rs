@@ -4,6 +4,7 @@
 //! `braid`, the command-line tool.
 
 mod sync;
+mod work;
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -36,6 +37,11 @@ struct Cli {
     /// Label recorded in the op log for operations made by this command.
     #[arg(long, global = true, env = "BRAID_AGENT", default_value = "cli")]
     agent: String,
+
+    /// Workspace to act on (default: the one containing the current
+    /// directory).
+    #[arg(long, global = true, value_name = "NAME")]
+    workspace: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -98,6 +104,38 @@ enum Command {
     },
     /// Check every record, index, op log entry and ref of the store.
     Fsck,
+    /// Create, list and remove workspaces.
+    Workspace {
+        #[command(subcommand)]
+        action: work::WorkspaceAction,
+    },
+    /// Show how the workspace differs from its base and its branch.
+    Status,
+    /// Record the workspace's changes as a changeset on its base.
+    Commit(work::CommitArgs),
+    /// Land the workspace's changesets on its branch (exit status 2 on
+    /// conflicts).
+    Land(work::LandArgs),
+    /// Bring the workspace onto its branch's head, rebasing its own
+    /// changesets (exit status 2 on conflicts).
+    Update(work::IdentityArgs),
+    /// Mark conflicts of a rebase in progress resolved.
+    Resolve {
+        /// Paths whose conflicts are settled.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+    /// Let new files that look like secrets or are large be committed.
+    Track {
+        /// Files, or directories whose new files may be committed.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+    /// Make changesets without a working copy.
+    Change {
+        #[command(subcommand)]
+        action: work::ChangeAction,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -207,6 +245,14 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 },
         } => sync::git_sync(cli, remote, branch, remote_branch.as_deref(), *dry_run),
         Command::Fsck => fsck(cli),
+        Command::Workspace { action } => work::workspace(cli, action),
+        Command::Status => work::status(cli),
+        Command::Commit(args) => work::commit(cli, args),
+        Command::Land(args) => work::land(cli, args),
+        Command::Update(args) => work::update(cli, args),
+        Command::Resolve { paths } => work::resolve(cli, paths),
+        Command::Track { paths } => work::track(cli, paths),
+        Command::Change { action } => work::change(cli, action),
     }
 }
 

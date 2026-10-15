@@ -14,10 +14,12 @@ name = "braid"
 path = "src/main.rs"
 
 [dependencies]
+braid-engine.workspace = true
 braid-format.workspace = true
 braid-git.workspace = true
 braid-repo.workspace = true
 braid-store.workspace = true
+braid-wc.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true

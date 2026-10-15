@@ -91,8 +91,8 @@ flowchart LR
 
 ## Quick start
 
-Today braid stores history and moves it in and out of git bit for bit.
-Workspaces and landing for many agents arrive with milestone 4.
+Braid stores history, moves it in and out of git bit for bit, and gives each
+agent a workspace that lands on `main` without waiting for the others.
 
 ```bash
 git clone https://github.com/KikoCis/elffuss-braid
@@ -128,6 +128,38 @@ Ids can be checked with any BLAKE3 implementation, for example the reference
 ```bash
 b3sum --derive-key "elffuss-braid 2026 blob v1" README.md
 ```
+
+### Many agents, one repository
+
+Each agent gets its own workspace. There is no staging area and no shared
+index: an agent commits what it changed and lands it, and braid rebases it
+onto whatever the others landed first.
+
+```bash
+export BRAID_AUTHOR="Ada Lovelace <ada@example.org>"
+braid workspace add agent-1          # ./agent-1, tracking main
+cd agent-1
+echo 'fn main() {}' > main.rs
+braid status
+braid commit -m "Add main.rs"
+braid land                           # fast-forward, or a rebase onto main
+```
+
+When two agents change the same lines, the second `land` exits with status 2,
+prints the conflicts as data (`--json` for agents) and leaves `main` where it
+was. `braid update` then rebases the change and writes git-style conflict
+markers; fix the file, `braid commit`, `braid land`.
+
+An agent that knows exactly what it changes needs no checkout at all, and can
+check that nobody changed the file under it:
+
+```bash
+braid change create --base main --set src/lib.rs=@new-lib.rs \
+  --expect src/lib.rs=<blob id it read> -m "Fix the parser" --land main
+```
+
+New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger than
+1 MiB are not committed until `braid track <path>` says so.
 
 ## Working with git
 
@@ -177,9 +209,10 @@ landing.
 
 ## What is honest about this
 
-- **It is pre-alpha.** Today it stores history and round-trips git
-  repositories, but it has no workspaces yet. Keep your git repository as the
-  source of truth, and do not keep anything only in braid.
+- **It is pre-alpha.** Today it stores history, round-trips git
+  repositories, and runs workspaces for many agents on one machine. Keep your
+  git repository as the source of truth, and do not keep anything only in
+  braid.
 - **No performance claims yet.** When benchmarks land they will be ratios
   against git on the same machine, with the script that reproduces them, never
   numbers nobody can check.
@@ -240,6 +273,7 @@ Parte de las ideas que Anthropic contó en público sobre Scion, su sistema inte
 Es una implementación independiente, sin código de Anthropic y sin relación con
 la empresa.
 
-Hoy está en pre-alfa: guarda historia y la mete y saca de git bit a bit, pero aún
-no tiene espacios de trabajo para agentes. Las [fases](#status-and-roadmap)
-dicen qué llega después y qué pruebas tiene que pasar cada una.
+Hoy está en pre-alfa: guarda historia, la mete y saca de git bit a bit, y cada
+agente tiene su espacio de trabajo y aterriza en `main` sin esperar a los demás.
+Las [fases](#status-and-roadmap) dicen qué llega después y qué pruebas tiene que
+pasar cada una.
