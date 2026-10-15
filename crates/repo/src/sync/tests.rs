@@ -345,6 +345,7 @@ fn the_first_sync_creates_the_branch() {
     assert_eq!(report.fetched, Some((oid(&second), changeset)));
     assert_eq!(report.pushed, None);
     assert_eq!(report.operations.len(), 1);
+    assert_eq!(report.operations[0].agent, "tester");
     assert_eq!(world.head(), Some(changeset));
     let refs = world.braid.store().refs().unwrap();
     assert_eq!(refs.get(&report.remote_ref), Some(changeset));
@@ -862,7 +863,7 @@ fn saving_the_map_merges_what_another_process_saved() {
 }
 
 #[test]
-#[should_panic(expected = "failed")]
+#[should_panic(expected = "\"merge-base\", \"--is-ancestor\"")]
 fn the_forward_check_catches_a_forced_update() {
     let world = World::new();
     let first = world.push_elsewhere(&[("a", Some("1\n"))], "first");
@@ -942,4 +943,79 @@ fn an_unreachable_remote_is_an_error() {
         "{result:?}"
     );
     assert_eq!(world.operations(), operations);
+}
+
+#[test]
+fn a_crash_between_the_merge_and_its_push_loses_nothing() {
+    let world = World::new();
+    world.push_elsewhere(&[("a", Some("1\n")), ("b", Some("1\n"))], "first");
+    world.sync();
+    let ours = world.commit_in_braid(&[("a", Some("braid\n"))], "In braid\n");
+    let theirs = world.push_elsewhere(&[("b", Some("git\n"))], "In git");
+
+    // The braid branch moves to the merge, and the process dies before the
+    // push.
+    let merge = {
+        let options = world.options();
+        let sync = world.steps(&options);
+        let (_lock, mirror) = sync.open_mirror().unwrap();
+        let store = world.braid.store();
+        let mut prepared = sync.prepare(store, &mirror).unwrap();
+        let Decision::Merge { changeset, .. } = sync.decide(store, &prepared).unwrap() else {
+            panic!("expected a merge");
+        };
+        sync.export(&mirror, &mut prepared.map, changeset).unwrap();
+        let remote = prepared.fetched.map(|(_, changeset)| changeset);
+        sync.save(
+            "merge",
+            &mut prepared.map,
+            Some((Some(ours), changeset)),
+            remote,
+        )
+        .unwrap();
+        changeset
+    };
+    assert_eq!(world.head(), Some(merge));
+    assert_eq!(world.remote_head(), Some(theirs));
+
+    // The next sync finds braid ahead, and pushes the merge.
+    let report = world.sync();
+    assert_eq!(report.outcome, SyncOutcome::Pushed);
+    assert_eq!(report.imported, 0);
+    assert_eq!(report.after, Some(merge));
+    assert_eq!(world.map().commit(&merge), report.pushed);
+    world.assert_same_history();
+    world.assert_forward_only();
+    world.assert_sync_is_a_no_op();
+}
+
+#[test]
+fn syncs_with_one_remote_take_turns() {
+    let world = World::new();
+    world.push_elsewhere(&[("a", Some("1\n"))], "first");
+    world.sync();
+    world.commit_in_braid(&[("a", Some("2\n"))], "In braid\n");
+    let (repo, remote, options) = (&world.braid, world.remote_address(), world.options());
+    let outcomes: Vec<SyncOutcome> = std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| repo.git_sync(remote, "main", "tester", &options)))
+            .collect();
+        runs.into_iter()
+            .map(|run| run.join().unwrap().unwrap().outcome)
+            .collect()
+    });
+    let pushed = outcomes
+        .iter()
+        .filter(|outcome| **outcome == SyncOutcome::Pushed)
+        .count();
+    assert_eq!(pushed, 1, "{outcomes:?}");
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, SyncOutcome::Pushed | SyncOutcome::UpToDate)),
+        "{outcomes:?}"
+    );
+    world.assert_same_history();
+    world.assert_forward_only();
+    world.assert_sync_is_a_no_op();
 }
