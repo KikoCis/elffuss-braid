@@ -281,16 +281,16 @@ proptest! {
             let index = MemoryIndex::new();
             let mut history = History::new(&objects, &index);
             for id in &order {
-                history.graph(*id).unwrap();
+                history.derive(&[*id]).unwrap();
             }
             history.flush().unwrap();
             results.push(index.entries());
         }
         prop_assert_eq!(&results[0], &results[1]);
         prop_assert_eq!(&results[0], &results[2]);
-        // One record per changeset.
+        // Commit graph data and a changed-path record per changeset.
         let changesets: BTreeSet<ObjectId> = nodes.iter().copied().collect();
-        prop_assert_eq!(results[0].len(), changesets.len());
+        prop_assert_eq!(results[0].len(), 2 * changesets.len());
     }
 }
 
@@ -342,8 +342,7 @@ fn a_long_chain_is_walked_in_few_records() {
     }
     let index = MemoryIndex::new();
     let mut history = History::new(&objects, &index);
-    history.graph(at).unwrap();
-    history.flush().unwrap();
+    history.derive(&[at]).unwrap();
 
     let counting = Counting {
         inner: &index,

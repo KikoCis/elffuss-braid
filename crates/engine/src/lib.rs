@@ -16,8 +16,9 @@
 //! - [`first_parent_chain_contains`], [`is_ancestor`] and [`merge_base`]:
 //!   ancestry, walking history.
 //! - [`History`]: the same ancestry queries with generation numbers and skip
-//!   pointers, answered with derived data ([`DerivedKey`], [`DerivedIndex`])
-//!   computed when missing.
+//!   pointers, and the history of a path ([`History::path_log`]) with
+//!   changed-path filters, answered with derived data ([`DerivedKey`],
+//!   [`DerivedIndex`]) computed when missing.
 //! - [`merge3`]: three-way merges of file contents.
 //! - [`land`]: landing a change on a branch, with conflicts reported as data.
 //! - [`merge`]: merging two changesets into a merge changeset, with the same
@@ -54,6 +55,7 @@
 mod access;
 mod ancestry;
 mod apply;
+mod bloom;
 mod commit;
 mod derived;
 mod diff;
@@ -79,7 +81,7 @@ pub use commit::{admit, commit};
 pub use derived::{DerivedIndex, DerivedKey, MemoryIndex};
 pub use diff::diff;
 pub use error::{ApplyProblem, Error, StoreError};
-pub use history::History;
+pub use history::{DeriveReport, History};
 pub use land::{AGENT, Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
 pub use merge::{BINARY_SNIFF_BYTES, ConflictHunk, HunkSide, MergeResult, is_binary, merge3};
 pub use path::MAX_PATH_DEPTH;
