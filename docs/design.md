@@ -84,6 +84,37 @@ process dies, atomic rename, and ordered syncs.
   filters, blame, git mappings) is stored as records keyed by their inputs, and
   can always be recomputed.
 
+### Derived data
+
+Everything that is not in a changeset is derived data: computed from
+changesets, stored, and always recomputable. A derived value is what a named
+function, at some version, gives for some inputs, and its key is
+`BLAKE3-derive-key("elffuss-braid 2026 derived v1", function ‖ version ‖ input
+ids ‖ argument)`. The encodings are in section 8 of the format spec.
+
+- **Records.** A value is stored as an ordinary derived object whose payload
+  is its key followed by its encoding, which each function versions on its
+  own: a new encoding is a new version, so new keys. The object's id depends
+  on the value, so the store keeps a *derived index* next to its segments,
+  `derived/index`: an append-only file of fixed-size entries, a key and a
+  record id, each with a checksum.
+- **A cache, checked on use.** The index is never trusted: a record is used
+  only when its payload starts with the key and its value decodes, and a
+  value whose record is missing, damaged or unindexed is computed again.
+  Losing the index, or part of it, costs only time.
+- **Many processes, no database.** Values are deterministic functions of their
+  inputs, so two processes that compute the same value store the same bytes
+  under the same id; storing an object twice does nothing, and two entries
+  for a key name the same record. Writers append to the index under an
+  exclusive lock, at a multiple of the entry size, so a crash leaves at worst
+  an entry that fails its checksum, and readers take no lock. Records are
+  made durable before an entry names them.
+- **Lazy.** A value is computed the first time a command needs it, with the
+  values it depends on, and recorded when the command finishes. `braid
+  derive` computes them ahead of time, after a large import for example.
+- The git map is a derived record too, but a single one, found through the
+  ref `braid/git-map` rather than the index.
+
 ## Landing on a branch
 
 `land` takes a changeset `C` built on base `B` and moves a branch to include it.
@@ -115,6 +146,66 @@ two ways.
 conflict. No value is overwritten except by a change whose base already
 contained it. An acknowledged landing is durable. Readers only see durable
 heads.
+
+## History
+
+Three derived functions answer history queries without walking all of
+history every time. The engine's `History` reads them through the derived
+index, computes what is missing, and remembers what it read.
+
+- **Commit graph data** (`graph`, per changeset): the parents, the
+  generation (1 without parents, otherwise 1 more than the largest of the
+  parents'), the height along first parents, and a skip pointer to the
+  first-parent ancestor at the height that Bitcoin's block index picks for
+  its skip pointers. Following skip pointers reaches any first-parent
+  ancestor in a number of steps that grows with the logarithm of the
+  distance. With them, `is_ancestor` and `first_parent_chain_contains` find a
+  first-parent ancestor in logarithmic time, and every other walk stops
+  below the generation it looks for, since an ancestor always has a smaller
+  generation. `merge_bases` walks down from both sides in order of
+  generation, marking what each side reaches; a changeset reached from both
+  is a merge base unless it is below one already found, and the walk stops
+  when everything left to visit is. The answers are those of the walking
+  functions, which landing, merging, workspaces and git sync still use,
+  since they are given only objects; property tests compare the two on
+  random histories with octopus and criss-cross merges.
+- **Changed-path filters** (`changed-paths`, per changeset): the first parent
+  and a Bloom filter, with git's parameters (10 bits per entry, 7 hashes), of
+  the paths the change list names and their parent directories. `braid log
+  [rev] -- <path>...` lists, newest first, the changesets on the first-parent
+  chain whose change list touches a path or anything below it, as `git log
+  --first-parent -- <path>` does, without following renames. It reads one
+  small record per changeset walked, and a change list only where the filter
+  lets the changeset through: the ones that touched the path, and about one
+  in a hundred of the others.
+- **Blame** (`blame`, per changeset and path, where the changeset sets the
+  file): the changeset that last changed each line, as runs. It is computed
+  from the blame of the previous version of the file on the first-parent
+  chain and a line diff between the two versions, imara-diff's Myers
+  algorithm with its indentation heuristic, which is what git's blame uses by
+  default; a merge on the first-parent chain owns the lines it brought in.
+  Blaming a file computes the records of the versions that lack one, back to
+  the newest that has one, so blaming it again, at the same revision or a
+  later one, costs one diff per new version. `braid blame <rev> <path>`
+  prints the short id, the agent or the author, the date, the line number
+  and the line; `--json` gives the same per line.
+
+Blame differs from git's on purpose in two ways, and the differential tests
+check that it differs in no other:
+
+- **Renames are not followed.** Git follows a file across whole-file renames,
+  and has no switch to turn that off. Braid's history of a path starts where
+  the path last appeared: a line that git traces back across a rename is the
+  changeset's that created the path.
+- **Several shortest diffs.** When a change can be written as more than one
+  shortest line diff, git's diff and imara-diff's may pick different ones.
+  Both delete and insert as many lines; they keep different copies of lines
+  that repeat, such as closing braces and blank lines, and blame gives those
+  copies to different changesets. On this repository's own history, fewer
+  than one line in a thousand differs this way. The tests replay git's own
+  diffs along the same versions, which must give git's blame line for line,
+  and check that at every version braid's diff inserts as many lines as
+  git's.
 
 ## Workspaces
 
@@ -267,10 +358,16 @@ in braid.
   file system shim that drops unsynced writes.
 - **Properties.** Encodings round-trip canonically; incremental tree updates
   equal building from scratch; disjoint landings commute; a changeset's change
-  list equals the diff of its trees.
+  list equals the diff of its trees; ancestry with derived data answers what
+  the walks answer on random histories; changed-path filters never miss a
+  path they hold; derived records do not depend on the order they are
+  computed in.
 - **Fuzzing** of every decoder, the git importer, path validation and merges.
 - **Differential tests with git as the oracle** on real histories: tree diffs,
-  path history, merge bases and three-way merges. Braid merging cleanly where
+  path history (`git log --first-parent -- <path>`), merge bases (`git
+  merge-base --all`), blame (`git blame --first-parent`, with the two
+  differences above checked as such) and three-way merges, on fixtures, on
+  random histories and on this repository's own. Braid merging cleanly where
   git reports a conflict is treated as a critical bug.
 - **Round trips** of real public repositories through import and export, bit
   for bit.
@@ -282,9 +379,12 @@ published benchmarks will only ever be ratios with the script that reproduces
 them.
 
 - Commit and land: proportional to the changed paths times the tree depth.
-- `log -- path`: proportional to the changes that touched the path.
-- Ancestry and merge base: logarithmic, using skip pointers and generation
-  numbers.
+- `log -- path`: proportional to the changes that touched the path, plus one
+  filter check per changeset walked.
+- Ancestry and merge base: logarithmic for first-parent ancestors, using skip
+  pointers; otherwise proportional to the changesets above the generation
+  looked for. Derived data is computed once, the first time.
+- Blame: one line diff per version of the file not blamed before.
 - A lazy sparse clone: proportional to the objects under the requested paths.
 - Store size: at most twice a garbage-collected git repository of the same
   history.

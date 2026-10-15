@@ -104,6 +104,8 @@ braid init /tmp/demo
 cd /tmp/demo
 braid git import /path/to/any/git/repository   # every branch and tag
 braid log main -n 5
+braid log main -- src/lib.rs     # only the changes to a path
+braid blame main src/lib.rs      # who last changed each line
 braid show main --json
 braid fsck
 ```
@@ -172,6 +174,12 @@ rebases the change and writes git-style conflict markers. Fix the file, then
 - `braid show` and `braid diff <from> <to>` list the files a change adds,
   modifies, deletes or turns into another type (`A`, `M`, `D`, `T`), as
   `git diff --name-status` does.
+- `braid log [rev] -- <path>...` lists the changesets that touched a path,
+  along first parents, and `braid blame <rev> <path>` names the changeset,
+  the agent and the date of each line. Both read derived data kept in the
+  store: generation numbers and skip pointers for ancestry, changed-path
+  filters, and blame records, computed the first time they are needed.
+  `braid derive --all` computes them ahead of time, after a large import.
 
 `braid status --help`, `braid land --help` and `braid update --help` describe
 every JSON field.
