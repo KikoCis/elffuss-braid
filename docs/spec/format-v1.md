@@ -235,6 +235,68 @@ while walking or writing, and never runs anything found in repository content.
 - During import, every commit is exported again and its git id compared with
   the original. Any difference stops the import.
 
+These rules decide the braid ids of imported objects, so two importers that
+follow them give the same ids. They are implemented in `crates/git`.
+
+**Trees.** An entry's kind comes from the file type bits of its octal mode:
+`100000` is a file, executable when the owner may execute it (so `100664` is a
+file and `100775` an executable); `120000` a symlink, whose blob is the target;
+`040000` a directory; `160000` a SHA-1 gitlink. Any other type stops the
+import, and so does a name section 5 refuses, checked before anything the tree
+names is read. Of entries with the same name, the braid tree keeps the last
+written, which is the one a git checkout uses.
+
+The *canonical* git tree of a braid tree lists its entries in git's order with
+the modes `100644`, `100755`, `120000`, `40000` and `160000`, naming each
+subdirectory by its own canonical git tree. A git tree equal to the canonical
+git tree of its braid tree needs nothing more. Any other keeps its raw bytes in
+a blob, recorded against its git id, since several git trees can share one
+braid tree; a tree that names such a tree is not canonical either. The empty
+tree is read as present even when git did not store it.
+
+**Commits.** The changeset of a commit has: as parents, the changesets of the
+`parent` headers that follow the first header, `tree`, in their order; as root,
+the braid tree of `tree`; the change list against the first parent; the
+message, which is every byte after the first empty line; no extras; and as git
+origin the blob with the commit's bytes. Author and committer are the first
+`author` and `committer` headers, read as `Name <email> seconds ±HHMM`:
+
+- the name is everything before the first `<`, without surrounding ASCII
+  whitespace, and the email everything between it and the next `>`;
+- after the `>`, the first word is the time in seconds and the second the
+  offset, `±HHMM` read as a decimal number and turned into minutes; a missing
+  or unreadable value is 0;
+- a line without a `<` followed by a `>` is all name, with no email and time 0;
+  a missing header gives an empty signature.
+
+Annotated tags keep their raw bytes in a blob and record the object they point
+to. Replacement objects and grafts are ignored, and objects are read raw:
+no filters, no line-ending conversion, no LFS. Shallow and SHA-256
+repositories are refused for now.
+
+**Commits made in braid.** A changeset without a git origin is exported as
+`tree`, one `parent` per parent, `author` and `committer` written as
+`Name <email> seconds ±HHMM`, then one header per extra in order, a value with
+newlines continuing on lines that start with a space, an empty line and the
+message unchanged. A signature holding `<`, `>`, a newline or NUL, an offset
+beyond ±99 hours, or an extra that cannot be a header has no git form and is
+refused.
+
+**Map record.** The mapping is one derived record, versioned on its own:
+
+```
+"braid-git-map" u8 version = 1
+uv n, n × ([20] commit, [32] changeset)
+uv n, n × ([20] tree, [32] braid tree)
+uv n, n × ([20] tree, [32] blob with its raw bytes)          trees that are not canonical
+uv n, n × ([20] blob, [32] braid blob, uv size)
+uv n, n × ([20] tag, [32] blob with its raw bytes, [20] target, u8 kind)
+uv n, n × (bytes ref name, [20] tag)                         tag names
+```
+
+Each table is sorted by key without duplicates; target kinds are 1 commit,
+2 tree, 3 blob and 4 tag. The reverse mappings are rebuilt on load.
+
 ## 7. Storage (not hashed, versioned on its own)
 
 This section describes the planned on-disk layout of the local store. It can
