@@ -16,6 +16,7 @@ publish = false
 braid-format = { package = "elffuss-braid-format", path = "crates/format" }
 braid-store = { package = "elffuss-braid-store", path = "crates/store" }
 braid-repo = { package = "elffuss-braid-repo", path = "crates/repo" }
+braid-git = { package = "elffuss-braid-git", path = "crates/git" }
 anyhow = "1.0"
 blake3 = "1.8"
 clap = { version = "4.6", features = ["derive", "env"] }

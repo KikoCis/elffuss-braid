@@ -10,12 +10,16 @@
 
 #![forbid(unsafe_code)]
 
+mod git;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use braid_format::{ObjectId, Objects};
 use braid_store::{Options, Store};
+
+pub use git::{GitImport, MAP_REF, braid_ref_for_git, git_ref_for_braid};
 
 /// Name of the directory that holds a repository's data.
 pub const DIR: &str = ".braid";
@@ -39,6 +43,18 @@ pub enum Error {
     /// The store failed.
     #[error(transparent)]
     Store(#[from] braid_store::Error),
+    /// The git bridge failed.
+    #[error(transparent)]
+    Git(#[from] braid_git::Error),
+    /// The stored git map does not decode.
+    #[error("the stored git map is damaged: {0}")]
+    GitMap(braid_format::DecodeError),
+    /// A ref names an object the git bridge cannot export.
+    #[error("ref {name:?} points at an object that has no git form")]
+    NotExportable {
+        /// The ref.
+        name: String,
+    },
     /// The file system failed.
     #[error(transparent)]
     Io(#[from] io::Error),

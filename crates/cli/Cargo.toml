@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 braid-format.workspace = true
+braid-git.workspace = true
 braid-repo.workspace = true
 braid-store.workspace = true
 anyhow.workspace = true

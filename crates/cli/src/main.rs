@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use braid_format::{IdHasher, Kind, ObjectId, Objects};
+use braid_format::changeset::decode_change_list;
+use braid_format::{
+    Change, ChangeOp, Changes, Changeset, IdHasher, Kind, ObjectId, Objects, Signature,
+};
 use braid_repo::Repo;
 use braid_store::{FsckReport, Operation, RefUpdate};
 use clap::{Parser, Subcommand};
@@ -71,6 +74,26 @@ enum Command {
     },
     /// Revert the newest operation that is not already undone.
     Undo,
+    /// Show history, following first parents.
+    Log {
+        /// Where to start: a ref name or a full changeset id.
+        #[arg(default_value = "main")]
+        revision: String,
+        /// How many changesets to show.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show one changeset: parents, root, signatures, message, changed paths.
+    Show {
+        /// A ref name or a full changeset id.
+        #[arg(default_value = "main")]
+        revision: String,
+    },
+    /// Import from and export to git repositories.
+    Git {
+        #[command(subcommand)]
+        action: GitAction,
+    },
     /// Check every record, index, op log entry and ref of the store.
     Fsck,
 }
@@ -92,6 +115,25 @@ enum RefAction {
     Delete {
         /// Ref name.
         name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GitAction {
+    /// Import every branch and tag of a git repository. Running it again
+    /// imports only what is new.
+    Import {
+        /// The git repository (a working tree or a bare repository).
+        path: PathBuf,
+    },
+    /// Write braid refs, and everything they reach, into an existing git
+    /// repository. Git refs of the same names are overwritten.
+    Export {
+        /// The git repository.
+        path: PathBuf,
+        /// A braid ref to export; repeat for several (default: all).
+        #[arg(long = "ref", value_name = "NAME")]
+        refs: Vec<String>,
     },
 }
 
@@ -127,6 +169,14 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             action: OpAction::Log { limit },
         } => op_log(cli, *limit),
         Command::Undo => undo(cli),
+        Command::Log { revision, limit } => log(cli, revision, *limit),
+        Command::Show { revision } => show(cli, revision),
+        Command::Git {
+            action: GitAction::Import { path },
+        } => git_import(cli, path),
+        Command::Git {
+            action: GitAction::Export { path, refs },
+        } => git_export(cli, path, refs),
         Command::Fsck => fsck(cli),
     }
 }
@@ -446,6 +496,258 @@ fn fsck(cli: &Cli) -> Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+fn read_changeset(repo: &Repo, id: &ObjectId) -> Result<Changeset> {
+    match repo.store().get(id)? {
+        Some((Kind::Changeset, bytes)) => {
+            Ok(Changeset::decode(&bytes)
+                .with_context(|| format!("changeset {id} does not decode"))?)
+        }
+        Some((kind, _)) => bail!("{id} is a {kind}, not a changeset"),
+        None => bail!("changeset {id} is not in the store"),
+    }
+}
+
+fn read_changes(repo: &Repo, changeset: &Changeset) -> Result<Vec<Change>> {
+    match &changeset.changes {
+        Changes::Inline(changes) => Ok(changes.clone()),
+        Changes::External { list, .. } => {
+            let Some((_, bytes)) = repo.store().get(list)? else {
+                bail!("change list {list} is not in the store");
+            };
+            Ok(decode_change_list(&bytes)
+                .with_context(|| format!("change list {list} does not decode"))?)
+        }
+    }
+}
+
+fn signature_json(signature: &Signature) -> Value {
+    json!({
+        "name": String::from_utf8_lossy(&signature.name),
+        "email": String::from_utf8_lossy(&signature.email),
+        "seconds": signature.seconds,
+        "offset_minutes": signature.offset_minutes,
+        "time": format_signature_time(signature),
+    })
+}
+
+fn changeset_json(id: &ObjectId, changeset: &Changeset) -> Value {
+    json!({
+        "id": id.to_hex(),
+        "parents": changeset.parents.iter().map(ObjectId::to_hex).collect::<Vec<_>>(),
+        "root": changeset.root.to_hex(),
+        "author": signature_json(&changeset.author),
+        "committer": signature_json(&changeset.committer),
+        "message": String::from_utf8_lossy(&changeset.message),
+        "extras": changeset.extras.iter().map(|(k, v)| json!([
+            String::from_utf8_lossy(k), String::from_utf8_lossy(v)
+        ])).collect::<Vec<_>>(),
+        "git_origin": changeset.git_origin.map(|id| id.to_hex()),
+    })
+}
+
+fn subject(message: &[u8]) -> String {
+    let text = String::from_utf8_lossy(message);
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_owned()
+}
+
+fn log(cli: &Cli, revision: &str, limit: usize) -> Result<ExitCode> {
+    let repo = open_repo(cli)?;
+    let mut next = Some(repo.resolve(revision)?);
+    let mut entries = Vec::new();
+    while let Some(id) = next {
+        if entries.len() == limit {
+            break;
+        }
+        let changeset = read_changeset(&repo, &id)?;
+        next = changeset.parents.first().copied();
+        entries.push((id, changeset));
+    }
+    if cli.json {
+        print_json(&Value::Array(
+            entries
+                .iter()
+                .map(|(id, changeset)| changeset_json(id, changeset))
+                .collect(),
+        ))?;
+    } else {
+        let mut out = io::stdout().lock();
+        for (id, changeset) in &entries {
+            writeln!(
+                out,
+                "{}  {}  {}  {}",
+                id.short(),
+                format_signature_time(&changeset.author),
+                String::from_utf8_lossy(&changeset.author.name),
+                subject(&changeset.message)
+            )?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn change_json(change: &Change) -> Value {
+    let path = String::from_utf8_lossy(&change.path);
+    match &change.op {
+        ChangeOp::Delete => json!({ "path": path, "op": "delete" }),
+        ChangeOp::File { blob, size } => {
+            json!({ "path": path, "op": "file", "blob": blob.to_hex(), "size": size })
+        }
+        ChangeOp::Executable { blob, size } => {
+            json!({ "path": path, "op": "executable", "blob": blob.to_hex(), "size": size })
+        }
+        ChangeOp::Symlink { blob, size } => {
+            json!({ "path": path, "op": "symlink", "blob": blob.to_hex(), "size": size })
+        }
+        ChangeOp::Gitlink { commit } => json!({
+            "path": path,
+            "op": "gitlink",
+            "commit": commit.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        }),
+    }
+}
+
+fn show(cli: &Cli, revision: &str) -> Result<ExitCode> {
+    let repo = open_repo(cli)?;
+    let id = repo.resolve(revision)?;
+    let changeset = read_changeset(&repo, &id)?;
+    let changes = read_changes(&repo, &changeset)?;
+    if cli.json {
+        let mut value = changeset_json(&id, &changeset);
+        value["changes"] = Value::Array(changes.iter().map(change_json).collect());
+        print_json(&value)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut out = io::stdout().lock();
+    writeln!(out, "changeset {id}")?;
+    for parent in &changeset.parents {
+        writeln!(out, "parent    {parent}")?;
+    }
+    writeln!(out, "root      {}", changeset.root)?;
+    for (label, signature) in [
+        ("author", &changeset.author),
+        ("committer", &changeset.committer),
+    ] {
+        writeln!(
+            out,
+            "{label:<9} {} <{}>  {}",
+            String::from_utf8_lossy(&signature.name),
+            String::from_utf8_lossy(&signature.email),
+            format_signature_time(signature)
+        )?;
+    }
+    writeln!(out)?;
+    for line in String::from_utf8_lossy(&changeset.message).lines() {
+        writeln!(out, "    {line}")?;
+    }
+    writeln!(out)?;
+    for change in &changes {
+        let op = match change.op {
+            ChangeOp::Delete => "delete",
+            ChangeOp::File { .. } => "file",
+            ChangeOp::Executable { .. } => "exec",
+            ChangeOp::Symlink { .. } => "link",
+            ChangeOp::Gitlink { .. } => "gitlink",
+        };
+        writeln!(out, "{op:<8} {}", String::from_utf8_lossy(&change.path))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn git_import(cli: &Cli, path: &Path) -> Result<ExitCode> {
+    let repo = open_repo(cli)?;
+    let import = repo.git_import(path, &cli.agent)?;
+    let report = &import.report;
+    let refs: Vec<Value> = report
+        .refs
+        .iter()
+        .map(|r| {
+            json!({
+                "git": String::from_utf8_lossy(&r.name),
+                "braid": braid_repo::braid_ref_for_git(&r.name),
+                "id": r.braid.to_hex(),
+            })
+        })
+        .collect();
+    if cli.json {
+        print_json(&json!({
+            "commits": report.commits,
+            "trees": report.trees,
+            "raw_trees": report.raw_trees,
+            "blobs": report.blobs,
+            "tags": report.tags,
+            "refs": refs,
+            "operation": import.operation.as_ref().map(|op| op.seq),
+        }))?;
+    } else {
+        println!(
+            "Imported {} commits, {} trees, {} blobs, {} tags; {} refs",
+            report.commits,
+            report.trees,
+            report.blobs,
+            report.tags,
+            report.refs.len()
+        );
+        if import.operation.is_none() {
+            println!("Nothing changed.");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn git_export(cli: &Cli, path: &Path, names: &[String]) -> Result<ExitCode> {
+    let repo = open_repo(cli)?;
+    let report = repo.git_export(path, names)?;
+    if cli.json {
+        print_json(&json!({
+            "commits": report.commits,
+            "trees": report.trees,
+            "blobs": report.blobs,
+            "tags": report.tags,
+            "refs": report.refs.iter().map(|(name, oid)| json!({
+                "name": String::from_utf8_lossy(name),
+                "id": oid.to_string(),
+            })).collect::<Vec<_>>(),
+        }))?;
+    } else {
+        println!(
+            "Wrote {} commits, {} trees, {} blobs, {} tags; {} refs",
+            report.commits,
+            report.trees,
+            report.blobs,
+            report.tags,
+            report.refs.len()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Formats a signature's time in its own offset: `YYYY-MM-DD HH:MM ±HHMM`.
+fn format_signature_time(signature: &Signature) -> String {
+    let local = signature
+        .seconds
+        .saturating_add(signature.offset_minutes.saturating_mul(60));
+    let days = local.div_euclid(86_400);
+    let of_day = local.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let sign = if signature.offset_minutes < 0 {
+        '-'
+    } else {
+        '+'
+    };
+    let offset = signature.offset_minutes.unsigned_abs();
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} {sign}{:02}{:02}",
+        of_day / 3600,
+        of_day % 3600 / 60,
+        offset / 60,
+        offset % 60
+    )
 }
 
 /// Formats milliseconds since the Unix epoch as `YYYY-MM-DD HH:MM:SS UTC`.

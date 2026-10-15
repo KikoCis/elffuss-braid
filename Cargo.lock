@@ -401,6 +401,7 @@ dependencies = [
  "anyhow",
  "clap",
  "elffuss-braid-format",
+ "elffuss-braid-git",
  "elffuss-braid-repo",
  "elffuss-braid-store",
  "serde_json",
@@ -430,6 +431,7 @@ name = "elffuss-braid-repo"
 version = "0.0.1"
 dependencies = [
  "elffuss-braid-format",
+ "elffuss-braid-git",
  "elffuss-braid-store",
  "tempfile",
  "thiserror",

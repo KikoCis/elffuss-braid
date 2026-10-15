@@ -175,3 +175,91 @@ fn commands_outside_a_repository_fail_clearly() {
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("not inside a braid repository"), "{err}");
 }
+
+/// Runs git with a fixed identity and dates, ignoring the user's config.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.org")
+        .env("GIT_COMMITTER_NAME", "Ada")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.org")
+        .env("GIT_AUTHOR_DATE", "1700000000 +0100")
+        .env("GIT_COMMITTER_DATE", "1700000000 +0100")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn git_import_log_show_export() {
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, &["init", "-q", "-b", "main"]);
+    std::fs::write(src.join("README.md"), "hello\n").unwrap();
+    git(&src, &["add", "README.md"]);
+    git(&src, &["commit", "-q", "-m", "First"]);
+    std::fs::create_dir(src.join("src")).unwrap();
+    std::fs::write(src.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+    git(&src, &["add", "src/lib.rs"]);
+    git(&src, &["commit", "-q", "-m", "Second\n\nWith a body."]);
+    git(&src, &["tag", "-a", "v1", "-m", "Version 1"]);
+
+    let repo = work.path().join("braid");
+    assert!(
+        braid()
+            .arg("init")
+            .arg(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let import = run_json(braid_in(&repo).args(["git", "import"]).arg(&src));
+    assert_eq!(import["commits"], 2);
+    assert_eq!(import["tags"], 1);
+    // Importing again finds nothing new and moves no ref.
+    let again = run_json(braid_in(&repo).args(["git", "import"]).arg(&src));
+    assert_eq!(again["commits"], 0);
+    assert!(again["operation"].is_null());
+
+    let log = run_json(braid_in(&repo).args(["log", "main"]));
+    let log = log.as_array().unwrap();
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0]["message"], "Second\n\nWith a body.\n");
+    assert_eq!(log[0]["author"]["email"], "ada@example.org");
+    assert_eq!(log[0]["author"]["offset_minutes"], 60);
+
+    let show = run_json(braid_in(&repo).args(["show", "main"]));
+    assert_eq!(show["changes"][0]["path"], "src/lib.rs");
+    assert_eq!(show["changes"][0]["op"], "file");
+    assert!(show["git_origin"].is_string());
+
+    // Export into an empty repository: the same commit and tag ids.
+    let mirror = work.path().join("mirror.git");
+    std::fs::create_dir(&mirror).unwrap();
+    git(&mirror, &["init", "-q", "--bare"]);
+    run_json(braid_in(&repo).args(["git", "export"]).arg(&mirror));
+    for name in ["refs/heads/main", "refs/tags/v1"] {
+        assert_eq!(
+            git(&src, &["rev-parse", name]),
+            git(&mirror, &["rev-parse", name]),
+            "{name}"
+        );
+    }
+
+    // The import is one operation: undo takes every ref back.
+    run_json(braid_in(&repo).arg("undo"));
+    let refs = run_json(braid_in(&repo).arg("refs"));
+    assert!(refs["refs"].as_object().unwrap().is_empty());
+    assert_eq!(run_json(braid_in(&repo).arg("fsck"))["clean"], true);
+}
