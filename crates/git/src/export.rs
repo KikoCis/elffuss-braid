@@ -441,7 +441,7 @@ pub enum RefTarget {
     Git(GitOid),
 }
 
-/// A ref to set in [`write_to_repo`].
+/// A ref to set in [`write_to_repo`], which overwrites it without a lease.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RefUpdate {
     /// The full ref name, such as `refs/heads/main`.
@@ -466,8 +466,12 @@ pub struct WriteReport {
 }
 
 /// Writes into the git repository at `git_repo` every object the refs need,
-/// then points the refs at them in one transaction, whatever they pointed to
-/// before.
+/// then points the refs at them in one transaction.
+///
+/// Refs are overwritten, whatever they pointed to before: there is no lease
+/// and no fast-forward check here. That is meant for local exports; updating
+/// a shared repository with a lease, as a fast-forward, is the job of
+/// `git sync`, which comes later.
 ///
 /// Objects the repository already has are not written again, and neither is
 /// anything they reach. Objects are written after everything they reach, so an
