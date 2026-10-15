@@ -59,10 +59,10 @@ pub enum LandOutcome {
         /// The paths both sides changed, merged line by line or by kind.
         merged_paths: Vec<Vec<u8>>,
     },
-    /// The head already has everything the change does: the change itself
-    /// is on the head's first-parent chain, or, rebased, it would change no
-    /// file and every parent it has besides its base is already an ancestor
-    /// of the head. Nothing was stored.
+    /// The head already has everything the change does: the change itself,
+    /// or a changeset rebased from it, is on the head's first-parent chain,
+    /// or, rebased, it would change no file and every parent it has besides
+    /// its base is already an ancestor of the head. Nothing was stored.
     AlreadyApplied,
     /// The change conflicts with the head. Nothing was stored, and the branch
     /// does not move.
@@ -148,8 +148,11 @@ impl ConflictKind {
 /// first-parent chain, or else the branch is empty and the change has no
 /// parents; otherwise this fails with [`Error::BaseNotOnBranch`].
 ///
-/// If `change` is already on the head's first-parent chain, it has landed
-/// before, and the outcome is [`AlreadyApplied`](LandOutcome::AlreadyApplied).
+/// If `change` is already on the head's first-parent chain, or a changeset
+/// rebased from it (one whose [`REBASED_FROM`] names it) is on the chain
+/// above its base, it has landed before, and the outcome is
+/// [`AlreadyApplied`](LandOutcome::AlreadyApplied): a request sent again
+/// after a lost answer never lands twice.
 /// If its base is the head, the branch fast-forwards to `change`, whatever it
 /// contains. Otherwise the change is rebased onto the head: the new changeset
 /// has the parents `[head] + change.parents[1..]`, the merged tree, the change
@@ -180,7 +183,8 @@ pub fn land<O: Objects>(
         (Some(head), Some(base)) if head == base => return Ok(LandOutcome::FastForward(change)),
         (Some(head), Some(base)) => match locate(objects, head, base, change)? {
             OnChain::Base => (head, base),
-            // Landed already, by a fast-forward: nothing to do again.
+            // Landed already, by a fast-forward or a rebase: nothing to do
+            // again.
             OnChain::Change => return Ok(LandOutcome::AlreadyApplied),
             OnChain::Neither => {
                 return Err(Error::BaseNotOnBranch {
@@ -247,20 +251,23 @@ pub fn land<O: Objects>(
 enum OnChain {
     /// The change's base.
     Base,
-    /// The change itself, which is above its base.
+    /// The change itself, or a changeset rebased from it; either is above
+    /// its base.
     Change,
     /// Neither, down to the first changeset.
     Neither,
 }
 
-/// Walks the first parents of `head` until it meets `base` or `change`. The
-/// cost follows the distance from the head to the base.
+/// Walks the first parents of `head` until it meets `base`, `change`, or a
+/// changeset rebased from `change`. The cost follows the distance from the
+/// head to the base.
 fn locate<O: Objects>(
     objects: &O,
     head: ObjectId,
     base: ObjectId,
     change: ObjectId,
 ) -> Result<OnChain, Error> {
+    let origin = change.to_hex().into_bytes();
     let mut current = head;
     loop {
         if current == change {
@@ -269,7 +276,15 @@ fn locate<O: Objects>(
         if current == base {
             return Ok(OnChain::Base);
         }
-        match read_changeset(objects, current)?.parents.first() {
+        let changeset = read_changeset(objects, current)?;
+        if changeset
+            .extras
+            .iter()
+            .any(|(key, value)| key.as_slice() == REBASED_FROM && *value == origin)
+        {
+            return Ok(OnChain::Change);
+        }
+        match changeset.parents.first() {
             Some(parent) => current = *parent,
             None => return Ok(OnChain::Neither),
         }
@@ -788,6 +803,30 @@ mod tests {
             land(objects, Some(root), root, signature("x")).unwrap(),
             LandOutcome::AlreadyApplied
         );
+    }
+
+    #[test]
+    fn landing_again_after_a_rebase_is_already_applied() {
+        let s = setup(
+            &[("a", "1"), ("b", "1")],
+            |r| vec![r.set("a", "2")],
+            |r| vec![r.set("b", "2")],
+        );
+        let (rebased, _) = rebased(&s);
+        let objects = &s.repo.objects;
+        assert_eq!(
+            land(objects, Some(rebased), s.change, signature("x")).unwrap(),
+            LandOutcome::AlreadyApplied
+        );
+        // Neither a later edit of the same file nor putting it back makes
+        // the change land a second time.
+        for content in ["3", "1"] {
+            let later = s.repo.commit(&[rebased], vec![s.repo.set("b", content)]);
+            assert_eq!(
+                land(objects, Some(later), s.change, signature("x")).unwrap(),
+                LandOutcome::AlreadyApplied
+            );
+        }
     }
 
     #[test]
