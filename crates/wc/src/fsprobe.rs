@@ -3,13 +3,13 @@
 
 //! What a workspace's file system considers the same name.
 //!
-//! Many file systems ignore letter case (the defaults on macOS and Windows),
-//! and some ignore Unicode normalisation too (macOS). A tree that holds
-//! `README` and `readme`, or `café` written two ways, is valid, but on such
-//! a file system the two names are one file: writing both would let the
-//! second overwrite the first, or write through a symlink the first one
-//! made. Each workspace finds out once, when it is created, by creating a
-//! file and looking it up under other spellings.
+//! Many file systems ignore letter case, including the default ones of two
+//! common desktop systems, and some ignore Unicode normalisation too. A tree
+//! that holds `README` and `readme`, or `café` written two ways, is valid,
+//! but on such a file system the two names are one file: writing both would
+//! let the second overwrite the first, or write through a symlink the first
+//! one made. Each workspace finds out once, when it is created, by creating
+//! a file and looking it up under other spellings.
 
 use std::borrow::Cow;
 use std::hash::{BuildHasher, Hasher};
