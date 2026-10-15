@@ -58,7 +58,7 @@ mod testing;
 
 pub use access::{
     EMPTY_TREE, entry_at, read_blob, read_changes, read_changeset, read_object, read_tree,
-    write_tree,
+    stat_object, write_tree,
 };
 pub use ancestry::{first_parent_chain_contains, merge_base, merge_bases};
 pub use apply::apply;

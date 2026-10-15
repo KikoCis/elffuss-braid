@@ -8,7 +8,7 @@ use braid_format::changeset::Assembled;
 use braid_format::{Change, ChangeOp, ChangesetParts, Kind, ObjectId, Objects, Signature};
 
 use crate::access::{
-    EMPTY_TREE, Trees, empty_tree_node, read_changes, read_changeset, read_object,
+    EMPTY_TREE, Trees, empty_tree_node, read_changes, read_changeset, stat_object,
 };
 use crate::apply::{apply, apply_sorted, check_nodes, first_problem};
 use crate::error::{Error, store_error};
@@ -80,7 +80,8 @@ pub(crate) fn store_assembled<O: Objects>(objects: &O, assembled: &Assembled) ->
 /// directory the change rebuilds, byte for byte.
 ///
 /// The cost follows the size of the change: only the directories on changed
-/// paths are read, plus the blobs the changes refer to.
+/// paths are read. Blobs are checked by kind and size with
+/// [`Objects::stat`], never read.
 ///
 /// Returns `Ok(())` when the changeset is admissible. An error other than
 /// [`Error::Store`] says why it is not.
@@ -119,7 +120,7 @@ pub fn admit<O: Objects>(
     }
     if applied.nodes.is_empty() {
         // Nothing was rebuilt: the root is the base root, which must be here.
-        read_object(objects, changeset.root, Kind::Tree)?;
+        stat_object(objects, changeset.root, Kind::Tree)?;
     }
     check_nodes(objects, &applied.nodes)?;
 
@@ -132,14 +133,15 @@ pub fn admit<O: Objects>(
         }
     }
     if let Some(origin) = changeset.git_origin {
-        read_object(objects, origin, Kind::Blob)?;
+        stat_object(objects, origin, Kind::Blob)?;
     }
     Ok(())
 }
 
-/// Checks that a blob is stored with the size an entry gives it.
+/// Checks that a blob is stored with the size an entry gives it, without
+/// reading it.
 fn check_blob<O: Objects>(objects: &O, blob: ObjectId, size: u64) -> Result<(), Error> {
-    let actual = read_object(objects, blob, Kind::Blob)?.len() as u64;
+    let actual = stat_object(objects, blob, Kind::Blob)?;
     if actual != size {
         return Err(Error::BlobSize {
             blob,
@@ -158,7 +160,8 @@ mod tests {
     use crate::path::MAX_PATH_DEPTH;
     use crate::testing::{Repo, deep_path, delete, signature, text_map};
     use braid_format::changeset::{MAX_INLINE_CHANGES_BYTES, encode_change_list};
-    use braid_format::{Changes, Changeset, ChangesetError};
+    use braid_format::{Changes, Changeset, ChangesetError, MemoryObjects};
+    use std::cell::Cell;
 
     fn admitted(ids: &[ObjectId]) -> impl Fn(&ObjectId) -> bool + '_ {
         move |id| ids.contains(id)
@@ -476,5 +479,52 @@ mod tests {
         store_assembled(&repo.objects, &forged).unwrap();
         let result = admit(&repo.objects, forged.id, admitted(&[first]));
         assert!(matches!(result, Err(Error::TooDeep { .. })), "{result:?}");
+    }
+
+    /// A store that counts the blobs read in full.
+    struct Counting<'a> {
+        inner: &'a MemoryObjects,
+        blob_reads: Cell<usize>,
+    }
+
+    impl Objects for Counting<'_> {
+        type Error = core::convert::Infallible;
+
+        fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Self::Error> {
+            let found = self.inner.get(id)?;
+            if matches!(found, Some((Kind::Blob, _))) {
+                self.blob_reads.set(self.blob_reads.get() + 1);
+            }
+            Ok(found)
+        }
+
+        fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Self::Error> {
+            self.inner.put(kind, payload)
+        }
+
+        fn stat(&self, id: &ObjectId) -> Result<Option<(Kind, u64)>, Self::Error> {
+            self.inner.stat(id)
+        }
+    }
+
+    #[test]
+    fn admission_checks_blobs_without_reading_them() {
+        let repo = Repo::new();
+        let first = repo.commit(
+            &[],
+            vec![
+                repo.set("a", "1"),
+                repo.exec("b", "2"),
+                repo.symlink("c", "a"),
+            ],
+        );
+        let second = repo.commit(&[first], vec![repo.set("a", "3"), repo.set("d/e", "4")]);
+        let counting = Counting {
+            inner: &repo.objects,
+            blob_reads: Cell::new(0),
+        };
+        admit(&counting, first, admitted(&[])).unwrap();
+        admit(&counting, second, admitted(&[first])).unwrap();
+        assert_eq!(counting.blob_reads.get(), 0);
     }
 }

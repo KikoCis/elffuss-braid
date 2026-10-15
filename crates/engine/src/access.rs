@@ -43,6 +43,20 @@ pub fn read_object<O: Objects>(objects: &O, id: ObjectId, kind: Kind) -> Result<
     }
 }
 
+/// The size of an object that must be stored as `kind`, from
+/// [`Objects::stat`]: the content is not read, if the store can avoid it.
+pub fn stat_object<O: Objects>(objects: &O, id: ObjectId, kind: Kind) -> Result<u64, Error> {
+    match objects.stat(&id).map_err(store_error)? {
+        None => Err(Error::Missing { id, kind }),
+        Some((found, size)) if found == kind => Ok(size),
+        Some((found, _)) => Err(Error::WrongKind {
+            id,
+            expected: kind,
+            found,
+        }),
+    }
+}
+
 /// Reads the content of a blob.
 pub fn read_blob<O: Objects>(objects: &O, id: ObjectId) -> Result<Vec<u8>, Error> {
     read_object(objects, id, Kind::Blob)
