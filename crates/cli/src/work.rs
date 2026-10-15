@@ -170,7 +170,7 @@ impl Target {
 }
 
 fn identity(args: &IdentityArgs, repo: &Repo) -> Result<Identity> {
-    Ok(Identity::resolve(args.author.as_deref(), repo.root())?)
+    Ok(Identity::resolve(args.author.as_deref(), repo)?)
 }
 
 /// Paths given on the command line, as paths of the workspace.

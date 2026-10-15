@@ -159,7 +159,7 @@ pub enum Error {
 
     /// No author is configured.
     #[error(
-        "no author: pass --author \"Name <email>\", set BRAID_AUTHOR, or put name and email in .braid/config"
+        "no author: pass --author \"Name <email>\", set BRAID_AUTHOR, or set name and email in .braid/config"
     )]
     NoAuthor,
 

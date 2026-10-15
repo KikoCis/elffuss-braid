@@ -69,7 +69,7 @@ mod workspace;
 pub use change::{ChangeRequest, Expect, create_change, land_change};
 pub use error::Error;
 pub use fsprobe::FileSystem;
-pub use identity::{CONFIG_FILE, Identity};
+pub use identity::Identity;
 pub use paths::workspace_path;
 pub use state::{Checkout, Rebase, RecordedConflict, State};
 pub use status::{ChangeKind, GUARD_SIZE, PathChange, Status, is_guarded};

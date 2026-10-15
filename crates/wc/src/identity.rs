@@ -1,31 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 UtopiaIA
 
-//! Who makes a change: from `--author`, `BRAID_AUTHOR`, or the repository's
-//! `.braid/config`.
-//!
-//! The config is a small text file of `key = value` lines; `#` starts a
-//! comment. Two keys are read:
-//!
-//! ```text
-//! name = Ada Lovelace
-//! email = ada@example.org
-//! ```
+//! Who makes a change: from `--author`, then `BRAID_AUTHOR`, then the
+//! `name` and `email` of the repository's `.braid/config` (see
+//! [`braid_repo::Config`]).
 //!
 //! Signatures record the current time with an offset of zero: braid does
 //! not work out the local time zone yet, so times read as UTC.
 
-use std::fs;
-use std::io;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use braid_format::Signature;
+use braid_repo::Repo;
 
 use crate::error::Error;
-
-/// The repository's settings file, inside `.braid`.
-pub const CONFIG_FILE: &str = "config";
 
 /// A name and an e-mail address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,47 +59,29 @@ impl Identity {
         })
     }
 
-    /// The identity in the config of the repository whose root is
-    /// `repo_root`, if it names one.
-    pub fn from_config(repo_root: &Path) -> Result<Option<Identity>, Error> {
-        let path = repo_root.join(braid_repo::DIR).join(CONFIG_FILE);
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(Error::io("read", &path)(err)),
+    /// The identity that the repository's `.braid/config` sets, if it sets
+    /// a name. It must set an email address too.
+    pub fn from_config(repo: &Repo) -> Result<Option<Identity>, Error> {
+        let config = repo.config()?;
+        let Some(name) = config.name else {
+            return Ok(None);
         };
-        let mut name = None;
-        let mut email = None;
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            match key.trim() {
-                "name" => name = Some(value.trim().to_owned()),
-                "email" => email = Some(value.trim().to_owned()),
-                _ => {}
-            }
-        }
-        match (name, email) {
-            (Some(name), Some(email)) => {
-                Identity::new(&name, &email)
-                    .map(Some)
-                    .map_err(|reason| Error::InvalidAuthor {
-                        text: format!("{name} <{email}>"),
-                        reason,
-                    })
-            }
-            _ => Ok(None),
-        }
+        let invalid = |reason| Error::InvalidAuthor {
+            text: format!("name = {name} in .braid/config"),
+            reason,
+        };
+        let email = config
+            .email
+            .ok_or_else(|| invalid("the config sets a name but no email"))?;
+        Identity::new(&name, &email).map(Some).map_err(invalid)
     }
 
     /// The identity given (by `--author` or `BRAID_AUTHOR`), or else the
     /// one in the repository's config.
-    pub fn resolve(given: Option<&str>, repo_root: &Path) -> Result<Identity, Error> {
+    pub fn resolve(given: Option<&str>, repo: &Repo) -> Result<Identity, Error> {
         match given {
             Some(text) => Identity::parse(text),
-            None => Identity::from_config(repo_root)?.ok_or(Error::NoAuthor),
+            None => Identity::from_config(repo)?.ok_or(Error::NoAuthor),
         }
     }
 
@@ -155,21 +125,30 @@ mod tests {
     #[test]
     fn config() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(Identity::from_config(dir.path()).unwrap(), None);
+        let repo = Repo::init(dir.path()).unwrap();
+        assert_eq!(Identity::from_config(&repo).unwrap(), None);
         assert!(matches!(
-            Identity::resolve(None, dir.path()),
+            Identity::resolve(None, &repo),
             Err(Error::NoAuthor)
         ));
-        fs::create_dir(dir.path().join(braid_repo::DIR)).unwrap();
-        fs::write(
-            dir.path().join(braid_repo::DIR).join(CONFIG_FILE),
-            "# who commits\nname = Grace Hopper\nemail = grace@example.org # work\n",
+        let config = dir
+            .path()
+            .join(braid_repo::DIR)
+            .join(braid_repo::CONFIG_FILE);
+        std::fs::write(&config, "# who commits\nname = Grace Hopper\n").unwrap();
+        assert!(matches!(
+            Identity::resolve(None, &repo),
+            Err(Error::InvalidAuthor { .. })
+        ));
+        std::fs::write(
+            &config,
+            "# who commits\nname = Grace Hopper\nemail = grace@example.org\n",
         )
         .unwrap();
-        let grace = Identity::resolve(None, dir.path()).unwrap();
+        let grace = Identity::resolve(None, &repo).unwrap();
         assert_eq!(grace.name, "Grace Hopper");
         assert_eq!(grace.email, "grace@example.org");
-        let given = Identity::resolve(Some("Ada <ada@example.org>"), dir.path()).unwrap();
+        let given = Identity::resolve(Some("Ada <ada@example.org>"), &repo).unwrap();
         assert_eq!(given.name, "Ada");
     }
 }
