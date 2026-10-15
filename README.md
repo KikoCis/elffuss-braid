@@ -136,8 +136,16 @@ Repositories come in with their whole history and keep a git mirror.
 - `braid git import` reads a git repository through
   [gitoxide](https://github.com/GitoxideLabs/gitoxide). Each commit is exported
   again and compared with the original, so the round trip is bit for bit.
-- `braid git export` and `braid git sync` keep GitHub or Gitea up to date as a
-  fast-forward with a lease. Braid never force-pushes.
+- `braid git sync` keeps a branch of GitHub, Gitea or any git remote in step
+  with a braid branch: it fetches and imports the remote branch, then
+  fast-forwards braid, or pushes braid's branch as a fast-forward with a
+  lease, merging first when both moved. Conflicts move nothing and exit with
+  status 2. Braid never force-pushes.
+
+  ```bash
+  braid git sync https://github.com/you/project.git --branch main
+  braid git sync https://github.com/you/project.git --dry-run --json
+  ```
 - Braid contains no code from git itself, which is GPLv2. It reads and writes
   git data with gitoxide (MIT or Apache-2.0) and runs the `git` binary only as
   a subprocess to push.
