@@ -69,13 +69,15 @@ process dies, atomic rename, and ordered syncs.
   full segment is sealed with a sorted index; compaction can merge indexes.
   Only files that can no longer change are memory-mapped.
 - **Deltas.** Writers say which object a new one is probably close to: the
-  engine names the directory node a rebuilt one replaces, a workspace commit
-  the file's previous blob, and the git import the first parent's blob or
-  tree at the same path. A blob under 4 MiB or a tree is then stored as a zstd
-  frame against that object when this takes at most a quarter of the bytes. Deltas are
-  one level deep: a base is always stored whole, so a read applies at most one
-  delta, never a chain. The price is size: each delta holds every change since
-  its base, until a version is stored whole again.
+  engine names the directory node a rebuilt one replaces and, for a merged
+  file, the branch's version; a workspace commit names the file's previous
+  blob; the git import names the first parent's blob or tree at the same
+  path, and its raw commit; a new git map names the one it grew from. A blob
+  under 4 MiB, a tree or a derived object is then stored as a zstd frame
+  against that object when this takes at most a quarter of the bytes.
+  Deltas are one level deep: a base is always stored whole, so a read
+  applies at most one delta, never a chain. The price is size: each delta
+  holds every change since its base, until a version is stored whole again.
 - **Large files.** Blobs of 4 MiB or more are cut into content-defined chunks
   (FastCDC), each a blob of its own, so versions of a large file, such as a
   model's weights, share every chunk an edit did not touch, with no side

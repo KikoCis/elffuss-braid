@@ -389,15 +389,19 @@ them.
 | 0 raw | the object as it is (`stored_len == raw_len`) | payloads up to 64 bytes, and larger ones zstd does not make smaller |
 | 1 zstd | one zstd frame, level 3 | other objects stored whole |
 | 2 | reserved: zstd with a dictionary | not written yet |
-| 3 delta | one zstd frame against the raw payload of the base the header names | blobs under 4 MiB and trees, given a similar object |
+| 3 delta | one zstd frame against the raw payload of the base the header names | blobs under 4 MiB, trees and derived objects, given a similar object |
 | 4 chunked | the chunk list | blobs only, of 4 MiB or more |
 
 **Deltas (codec 3).** A writer may say which object a new one is probably
-close to: the same path in the parent, for blobs and trees. A blob under 4 MiB
-or a tree is then compressed with zstd at level 3, with the raw payload of the
-base as a reference prefix (`ZSTD_CCtx_refPrefix`), a window that holds the
-base and the object together (at most 2²⁷ bytes, so that any decoder accepts
-it), and long-distance matching. The frame is kept only when it and the 32
+close to. Braid names, for each new tree node and file, the one at the same
+path in the parent (for a merged file, the branch's version); for an imported
+commit's raw bytes, the first parent's; for the git map, the map it grew from.
+A blob under 4 MiB, a tree or a derived object is then compressed with zstd at
+level 3, with the raw payload of the base as a reference prefix
+(`ZSTD_CCtx_refPrefix`), a window that holds the base and the object together
+(at most 2²⁷ bytes, so that any decoder accepts it), and long-distance
+matching. Changesets are never deltas: against their first parent, imported
+histories gave none that met the cut below. The frame is kept only when it and the 32
 bytes of the base id take at most a quarter of the bytes of the object stored
 on its own (codec 0 or 1); otherwise the object is stored on its own.
 
