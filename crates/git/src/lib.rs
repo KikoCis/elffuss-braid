@@ -45,3 +45,14 @@ pub use import::{ImportOptions, ImportReport, ImportedRef, import};
 pub use map::{GitMap, MapCounts, TagEntry};
 pub use oid::{GitKind, GitOid, ParseGitOidError};
 pub use roundtrip::{RoundTripReport, verify_round_trip, verify_round_trip_with};
+
+/// The parsers of raw git objects, for the fuzz targets in `fuzz/`. Not part
+/// of the stable API.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::raw::{
+        CommitFields, EntryType, RawEntry, encode_commit, parse_commit, parse_signature, parse_tag,
+        parse_tree,
+    };
+}

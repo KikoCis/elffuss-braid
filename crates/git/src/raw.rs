@@ -20,11 +20,16 @@ use crate::oid::GitOid;
 
 /// What a git tree entry is, by the file type bits of its mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EntryType {
+pub enum EntryType {
+    /// A regular file.
     File,
+    /// A regular file the owner may execute.
     Executable,
+    /// A symlink; its blob is the target.
     Symlink,
+    /// A directory.
     Tree,
+    /// A submodule commit.
     Gitlink,
 }
 
@@ -33,7 +38,7 @@ impl EntryType {
     /// A regular file is executable when the owner may execute it, so a
     /// non-canonical mode such as `100664` still has a type; `None` means the
     /// file type bits name nothing git can store.
-    pub(crate) fn from_mode(mode: &[u8]) -> Option<EntryType> {
+    pub fn from_mode(mode: &[u8]) -> Option<EntryType> {
         let value = parse_octal(mode)?;
         match value & 0o170_000 {
             0o100_000 if value & 0o100 != 0 => Some(EntryType::Executable),
@@ -69,14 +74,17 @@ fn parse_octal(digits: &[u8]) -> Option<u32> {
 
 /// One entry of a git tree, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RawEntry<'a> {
+pub struct RawEntry<'a> {
+    /// The mode, in octal digits.
     pub mode: &'a [u8],
+    /// The name.
     pub name: &'a [u8],
+    /// The object the entry names.
     pub oid: GitOid,
 }
 
 /// Splits a tree into its entries, in the order they are written.
-pub(crate) fn parse_tree(data: &[u8]) -> Result<Vec<RawEntry<'_>>, &'static str> {
+pub fn parse_tree(data: &[u8]) -> Result<Vec<RawEntry<'_>>, &'static str> {
     let mut entries = Vec::new();
     let mut rest = data;
     while !rest.is_empty() {
@@ -145,11 +153,16 @@ pub(crate) fn git_order(a: &[u8], a_dir: bool, b: &[u8], b_dir: bool) -> Orderin
 
 /// The fields of a commit that braid reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CommitFields<'a> {
+pub struct CommitFields<'a> {
+    /// The tree.
     pub tree: GitOid,
+    /// The parents, in order.
     pub parents: Vec<GitOid>,
+    /// The value of the first `author` header.
     pub author: Option<&'a [u8]>,
+    /// The value of the first `committer` header.
     pub committer: Option<&'a [u8]>,
+    /// Everything after the first empty line.
     pub message: &'a [u8],
 }
 
@@ -183,7 +196,7 @@ fn header_lines(headers: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
 /// The tree is the first header and the parents are the `parent` headers right
 /// after it. The author and committer are the first headers with those names,
 /// wherever they are; the message is everything after the first empty line.
-pub(crate) fn parse_commit(data: &[u8]) -> Result<CommitFields<'_>, &'static str> {
+pub fn parse_commit(data: &[u8]) -> Result<CommitFields<'_>, &'static str> {
     let (headers, message) = split_message(data);
     let mut lines = header_lines(headers).peekable();
     let tree = match lines.next() {
@@ -216,7 +229,7 @@ pub(crate) fn parse_commit(data: &[u8]) -> Result<CommitFields<'_>, &'static str
 }
 
 /// Reads the object an annotated tag points to: its first header.
-pub(crate) fn parse_tag(data: &[u8]) -> Result<GitOid, &'static str> {
+pub fn parse_tag(data: &[u8]) -> Result<GitOid, &'static str> {
     let (headers, _) = split_message(data);
     match header_lines(headers).next() {
         Some((b"object", value)) => {
@@ -237,7 +250,7 @@ pub(crate) fn parse_tag(data: &[u8]) -> Result<GitOid, &'static str> {
 /// - A line without `<` and a later `>` is all name, with no email and time 0.
 ///
 /// Nothing is lost: the original line stays in the commit bytes.
-pub(crate) fn parse_signature(line: &[u8]) -> Signature {
+pub fn parse_signature(line: &[u8]) -> Signature {
     let parts = find_byte(line, b'<').and_then(|open| {
         let close = open + 1 + find_byte(&line[open + 1..], b'>')?;
         Some((&line[..open], &line[open + 1..close], &line[close + 1..]))
@@ -331,7 +344,7 @@ const RESERVED_HEADERS: [&[u8]; 4] = [b"tree", b"parent", b"author", b"committer
 /// The headers are `tree`, `parent` for each parent, `author`, `committer`,
 /// then one header per extra in order, a multi-line value continuing on lines
 /// that start with a space; then an empty line and the message, unchanged.
-pub(crate) fn encode_commit(
+pub fn encode_commit(
     tree: GitOid,
     parents: &[GitOid],
     author: &Signature,
