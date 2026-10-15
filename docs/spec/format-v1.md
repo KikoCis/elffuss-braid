@@ -237,40 +237,106 @@ while walking or writing, and never runs anything found in repository content.
 
 ## 7. Storage (not hashed, versioned on its own)
 
-This section describes the planned on-disk layout of the local store. It can
-change without changing any id.
+This is the on-disk layout of the local store as implemented in
+`crates/store`. It is not hashed: it can change without changing any id.
+Fixed-size integers are little-endian; `uv`, `sv` and `bytes` are the codec of
+section 1.
 
 ```
-.braid/store/format                 object-format=blake3-dk-v1
-.braid/store/seg/<uuid>.seg         object records, append-only
-.braid/store/seg/<uuid>.jrn         live journal of a segment that is still open
-.braid/store/seg/<uuid>.idx         sorted index of a sealed segment
-.braid/store/midx/<id>.midx         merged index written by compaction
-.braid/store/oplog/                 lock, log and checkpoints for refs and operations
-.braid/ws/<name>/                   one workspace per agent
+.braid/store/format            object-format=blake3-dk-v1
+.braid/store/seg/<name>.seg    object records, append-only
+.braid/store/seg/<name>.jrn    journal of a segment that is still open
+.braid/store/seg/<name>.idx    sorted index of a sealed segment
+.braid/store/oplog/lock        empty; locked exclusively by transactions, shared by readers
+.braid/store/oplog/log         operation records, append-only
+.braid/store/oplog/ckpt.<seq>  every ref as of operation <seq>
 ```
 
-Object record (8-byte aligned):
+Segment names are 32 random lowercase hex digits. Files whose names start with
+`tmp-` are still being written, or were left by a writer that died; they are
+never read, and are removed once they are a minute old and unlocked.
+
+**Sharing.** A writer appends only to a segment it holds an exclusive,
+non-blocking lock on: an unlocked open segment if there is one, else a new one
+made with an exclusive create. The kernel releases the lock when the writer
+dies, and the next writer resumes after what the segment's journal lists.
+Segments are never truncated, since others may be reading them. A segment past
+the size threshold is sealed: flushed, given a sorted index through a temporary
+file and a rename, and its journal removed; it is never written again.
+
+**Publish order.** Objects are written and synced before the op log records an
+operation that refers to them, so the op log never points at an object that is
+not durable.
+
+**Object record**, starting at a multiple of 8 bytes:
 
 ```
-u32 sync = 0xB7A1D5E9 | u8 kind | u8 codec (0 raw, 1 zstd, 2 zstd + dictionary, 3 zstd + reference)
-u16 flags | u32 stored_len | u64 raw_len | [32] id
-codec 2–3: [32] dictionary or reference object id
-payload | u32 crc32c over everything from sync to the end of the payload
+u32 sync = 0xB7A1D5E9 | u8 kind | u8 codec | u16 flags = 0
+u32 stored_len | u64 raw_len | [32] id
+[32] dictionary or base id, codecs 2 and 3 only
+payload, stored_len bytes
+u32 crc32c of everything from the sync word to the end of the payload
+zero padding to a multiple of 8 bytes
 ```
 
-Journal entry, 64 bytes, each with its own CRC:
-`[32] id, u64 offset, u32 stored_len, u8 kind, u8 codec, u16 0, u64 raw_len, u32 record crc, u32 entry crc`.
+Codec 0 is raw (`stored_len == raw_len`) and 1 is one zstd frame; 2 (zstd with
+a dictionary) and 3 (zstd against a reference object) are reserved. Payloads up
+to 64 bytes are stored raw, larger ones compressed at zstd level 3 when that
+makes them smaller. After a crash, the next writer appends at the next multiple
+of 8 after the end of the file, so the remains of a cut append stay in place and
+scans step over them.
 
-Index (`.idx`, `.midx`): header, a fan-out table, sorted ids, locations, kinds,
-a binary fuse filter for fast misses, and a footer with offsets and a BLAKE3
-checksum.
+**Journal entry**, 64 bytes at a multiple of 64, written after its record:
 
-Storage policy (tunable at any time):
+```
+[32] id | u64 offset | u32 stored_len | u8 kind | u8 codec | u16 0
+u64 raw_len | u32 record crc | u32 crc32c of the 60 bytes before it
+```
 
-- Payloads up to 64 bytes are stored raw.
-- Blobs under 4 MiB and all trees are zstd-compressed, or stored as a one-level
-  zstd delta against the same path in the first parent when that is at most half
-  the standalone size. Delta chains never exceed one level.
-- Blobs of 4 MiB or more are split with FastCDC (16/64/256 KiB chunks; larger
-  chunks above 256 MiB). Chunks that do not compress are stored raw.
+Entries that fail their CRC are skipped, and a new lease holder writes after the
+last valid one.
+
+**Index**, written once when a segment is sealed:
+
+```
+[8] "braididx" | u32 version = 1 | u32 0 | u64 count | u64 segment length
+256 × u32 fan-out: entry b counts the ids whose first byte is at most b
+count × [32] ids, strictly ascending
+count × (u64 offset | u32 stored_len | u8 kind | u8 codec | u16 0
+         u64 raw_len | u32 record crc | u32 0), in id order
+[32] BLAKE3 hash of everything before it
+```
+
+Only entries whose record checks out go in, and the first copy of an object
+wins.
+
+**Operation record**:
+
+```
+u32 magic = 0xB7A10910 | u32 body_len | body | u32 body_len + 16
+u32 crc32c of everything before it
+
+body:   u8 version = 1 | uv seq | sv milliseconds since the Unix epoch
+        bytes agent | bytes description | uv seq undone, 0 for none
+        uv n | n × (bytes ref name | u8 which | [32] old | [32] new)
+```
+
+`which` has bit 0 set when `old` is present and bit 1 when `new` is; absent
+values take no bytes. The length at the end lets readers walk the log
+backwards. Sequence numbers start at 1 and have no gaps. A record cut short by a
+crash is skipped by readers and cut off by the next transaction, but only when
+no whole record follows it.
+
+**Checkpoint**, written through a temporary file and a rename every
+`checkpoint_interval` operations; the newest two are kept:
+
+```
+[8] "braidckp" | u32 version = 1 | u32 0 | u64 seq | u64 where record seq ends
+uv n | n × (bytes ref name | [32] id), names strictly ascending
+[32] BLAKE3 hash of everything before it
+```
+
+**Planned, not implemented yet:** a binary fuse filter in indexes for fast
+misses, merged indexes, one-level zstd deltas against the same path in the
+first parent (codec 3), per-repository dictionaries (codec 2), and FastCDC
+chunking of blobs of 4 MiB or more.
