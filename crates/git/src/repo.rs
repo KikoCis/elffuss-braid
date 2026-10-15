@@ -20,6 +20,15 @@ use crate::oid::{GitKind, GitOid};
 /// Memory for the cache of decoded pack deltas, per open repository.
 const PACK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Whether `name` can be the name of a git branch: `refs/heads/<name>`
+/// follows git's rules for ref names (no `..`, no `:`, `?`, `*`, `[`, `\`,
+/// `^`, `~`, space or control character, no component that starts with `.`
+/// or ends with `.lock`, and so on), and is not `refs/heads/HEAD`.
+pub fn is_branch_name(name: &str) -> bool {
+    let full = format!("refs/heads/{name}");
+    gix::validate::reference::branch_name(full.as_bytes().as_bstr()).is_ok()
+}
+
 /// The id of the empty tree.
 const EMPTY_TREE: GitOid = GitOid::from_bytes([
     0x4b, 0x82, 0x5d, 0xc6, 0x42, 0xcb, 0x6e, 0xb9, 0xa0, 0x60, 0xe5, 0x4b, 0xf8, 0xd6, 0x92, 0x88,
@@ -233,5 +242,23 @@ impl GitRepo {
             .edit_references(edits)
             .map_err(|err| Error::git("cannot update refs", err))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_names() {
+        for good in ["main", "feature/x", "v1.0", "a-b_c", "caf\u{e9}"] {
+            assert!(is_branch_name(good), "{good}");
+        }
+        for bad in [
+            "", "a b", "a:b", "a..b", "a*", "a?", "a[b", "a\\b", "a^", "a~1", "/a", "a/", "a//b",
+            ".a", "a/.b", "a.lock", "a.", "a@{1}", "HEAD", "a\nb", "a\0b",
+        ] {
+            assert!(!is_branch_name(bad), "{bad:?}");
+        }
     }
 }

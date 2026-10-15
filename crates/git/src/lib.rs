@@ -12,7 +12,9 @@
 //! - The [`Exporter`] turns braid objects back into git objects: imported ones
 //!   byte for byte, from the raw bytes they keep, and new ones
 //!   deterministically. [`write_to_repo`] writes them into a git repository
-//!   and points refs at them.
+//!   and points refs at them; [`write_to_repo_recording`] also records in the
+//!   [`GitMap`] the objects it generated for changesets made in braid, so
+//!   that importing them back gives the same changesets.
 //! - [`verify_round_trip`] imports a repository, exports it into a fresh one,
 //!   and checks that every id matches.
 //!
@@ -39,11 +41,12 @@ mod roundtrip;
 pub use error::{BoxError, Error};
 pub use export::{
     Exporter, RefTarget, RefUpdate, WriteReport, export_blob, export_commit, export_object,
-    export_tree, write_to_repo,
+    export_tree, write_to_repo, write_to_repo_recording,
 };
 pub use import::{ImportOptions, ImportReport, ImportedRef, import};
-pub use map::{GitMap, MapCounts, TagEntry};
+pub use map::{GitMap, MapCounts, Pairings, TagEntry};
 pub use oid::{GitKind, GitOid, ParseGitOidError};
+pub use repo::is_branch_name;
 pub use roundtrip::{RoundTripReport, verify_round_trip, verify_round_trip_with};
 
 /// The parsers of raw git objects, for the fuzz targets in `fuzz/`. Not part
