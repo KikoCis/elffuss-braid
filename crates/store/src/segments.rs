@@ -243,6 +243,19 @@ impl Segments {
         Ok(self.find(id)?.is_some())
     }
 
+    /// The ids this handle knows of that `wanted` accepts, in no particular
+    /// order. Nothing is read from disk: see [`Segments::rescan`].
+    pub fn ids_where(&self, mut wanted: impl FnMut(&ObjectId) -> bool) -> Vec<ObjectId> {
+        self.catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .objects
+            .keys()
+            .filter(|id| wanted(id))
+            .copied()
+            .collect()
+    }
+
     /// Flushes everything this handle wrote: segments first, then journals.
     pub fn sync(&self) -> Result<(), Error> {
         let mut writer = self.lock_writer();

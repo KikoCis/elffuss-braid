@@ -585,6 +585,78 @@ fn transactions_compare_and_swap() {
 }
 
 #[test]
+fn a_transaction_can_say_what_it_found() {
+    let (_dir, store) = new_store(Options::default());
+    let a = store.put(Kind::Changeset, b"a").unwrap();
+    store.sync().unwrap();
+    let op = store
+        .transact_with("agent-1", |refs| {
+            let found = match refs.get("main") {
+                Some(_) => "there",
+                None => "absent",
+            };
+            Ok::<_, Infallible>((set("main", None, Some(a)), format!("main was {found}")))
+        })
+        .unwrap();
+    assert_eq!(op.description, "main was absent");
+    assert_eq!(store.log(1).unwrap()[0].description, "main was absent");
+
+    // A description over the limit is refused, and nothing is recorded.
+    let err = store
+        .transact_with("agent-1", |refs| {
+            let long = "x".repeat((64 << 10) + 1);
+            Ok::<_, Infallible>((set("main", refs.get("main"), None), long))
+        })
+        .unwrap_err();
+    assert!(matches!(err, TransactError::Store(Error::TooLong { .. })));
+    assert_eq!(store.refs().unwrap().get("main"), Some(a));
+    assert_eq!(store.log(10).unwrap().len(), 1);
+}
+
+#[test]
+fn short_ids_find_objects_by_hex_prefix() {
+    let (_dir, a) = new_store(options(4096, 1000));
+    // Objects in sealed segments and in the open one.
+    let ids: Vec<ObjectId> = payloads(60)
+        .iter()
+        .map(|(kind, payload)| a.put(*kind, payload).unwrap())
+        .collect();
+    a.sync().unwrap();
+    assert!(!segment_files(&a, "idx").is_empty());
+    for id in &ids {
+        let hex = id.to_hex();
+        for len in [6, 7, 12, 64] {
+            assert_eq!(a.ids_with_prefix(&hex[..len], 10).unwrap(), [*id], "{len}");
+        }
+    }
+    // Sorted, and cut at the limit.
+    let mut all = ids.clone();
+    all.sort();
+    assert_eq!(a.ids_with_prefix("", usize::MAX).unwrap(), all);
+    assert_eq!(a.ids_with_prefix("", 3).unwrap(), all[..3]);
+    let digit = &all[0].to_hex()[..1];
+    let starting: Vec<ObjectId> = all
+        .iter()
+        .filter(|id| id.to_hex().starts_with(digit))
+        .copied()
+        .collect();
+    assert_eq!(a.ids_with_prefix(digit, usize::MAX).unwrap(), starting);
+    // Anything but lowercase hex digits matches nothing.
+    for bad in ["ABCDEF", "xyz123", " 01234", &"0".repeat(65)] {
+        assert!(a.ids_with_prefix(bad, 10).unwrap().is_empty(), "{bad:?}");
+    }
+
+    // What another handle wrote after this one opened is found on a miss.
+    let b = Store::open(a.root(), options(4096, 1000)).unwrap();
+    let fresh = a.put(Kind::Blob, b"written after b opened").unwrap();
+    a.sync().unwrap();
+    assert_eq!(
+        b.ids_with_prefix(&fresh.to_hex()[..8], 10).unwrap(),
+        [fresh]
+    );
+}
+
+#[test]
 fn the_op_log_cannot_be_used_inside_a_transaction() {
     let (_dir, store) = new_store(Options::default());
     let err = store

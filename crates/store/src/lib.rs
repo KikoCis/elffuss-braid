@@ -56,7 +56,8 @@
 //!   index through a temporary file and a rename, and its journal removed. It
 //!   is never written again.
 //! - Each handle maps ids to records from the indexes and journals, and on a
-//!   miss reads the directory again once.
+//!   miss reads the directory again once. Short ids, hex prefixes of ids,
+//!   are looked up in the same map ([`Store::ids_with_prefix`]).
 //! - Transactions hold an exclusive lock on `oplog/lock`; readers of the op
 //!   log hold it shared, so they never see an operation before it is
 //!   durable.
@@ -159,6 +160,7 @@ mod fsutil;
 mod index;
 mod journal;
 mod oplog;
+mod prefix;
 mod record;
 mod scan;
 mod segments;
@@ -324,6 +326,29 @@ impl Store {
     /// looked. Lookups that miss do this by themselves.
     pub fn rescan(&self) -> Result<(), Error> {
         self.segments.rescan()
+    }
+
+    /// The ids of the stored objects whose hex form starts with `prefix`,
+    /// sorted, at most `limit` of them: how a short id is looked up.
+    ///
+    /// `prefix` is lowercase hex digits, at most 64 of them; anything else
+    /// matches nothing, and the empty prefix matches every object. The ids
+    /// come from the indexes and journals this handle has read, and no record
+    /// is read; when none matches, the directory is read again once, as a
+    /// lookup by id does on a miss. The cost follows the number of objects
+    /// the handle knows of.
+    pub fn ids_with_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<ObjectId>, Error> {
+        let Some(prefix) = prefix::HexPrefix::parse(prefix) else {
+            return Ok(Vec::new());
+        };
+        let mut found = self.segments.ids_where(|id| prefix.matches(id));
+        if found.is_empty() {
+            self.segments.rescan()?;
+            found = self.segments.ids_where(|id| prefix.matches(id));
+        }
+        found.sort_unstable();
+        found.truncate(limit);
+        Ok(found)
     }
 }
 

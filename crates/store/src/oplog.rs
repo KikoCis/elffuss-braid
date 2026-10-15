@@ -265,17 +265,33 @@ impl Store {
     {
         not_in_transaction()?;
         check_labels(agent, description)?;
+        self.transact_with(agent, |refs| {
+            f(refs).map(|updates| (updates, description.to_owned()))
+        })
+    }
+
+    /// Records one operation whose description depends on what `f` finds:
+    /// like [`Store::transact`], except that `f` returns the description
+    /// with the updates, so that the record can say what the operation did,
+    /// such as how a landing went.
+    pub fn transact_with<F, E>(&self, agent: &str, f: F) -> Result<Operation, TransactError<E>>
+    where
+        F: FnOnce(&Refs) -> Result<(Vec<RefUpdate>, String), E>,
+    {
+        not_in_transaction()?;
+        check_labels(agent, "")?;
         // Flush this handle's objects before taking the lock, to keep the
         // critical section short.
         self.segments.sync()?;
         let lock = self.oplog.lock(true)?;
         let log = self.oplog.open_for_write()?;
         let mut state = self.oplog.load_for_write(&log)?;
-        let updates = {
+        let (updates, description) = {
             let _inside = InTransaction::enter();
             f(&state.refs).map_err(TransactError::Aborted)?
         };
-        let op = self.commit(&log, &mut state, agent, description, None, updates)?;
+        check_labels(agent, &description)?;
+        let op = self.commit(&log, &mut state, agent, &description, None, updates)?;
         drop(log);
         drop(lock);
         self.oplog.maybe_checkpoint(&state);
