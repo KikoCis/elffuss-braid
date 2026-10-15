@@ -91,16 +91,35 @@ flowchart LR
 
 ## Quick start
 
-Today braid computes object ids, and its hashed format is frozen and verified.
-Storing data arrives with milestone 2.
+Today braid stores history and moves it in and out of git bit for bit.
+Workspaces and landing for many agents arrive with milestone 4.
 
 ```bash
 git clone https://github.com/KikoCis/elffuss-braid
 cd elffuss-braid
 cargo build --release
-./target/release/braid --version
-./target/release/braid hash-object README.md
-./target/release/braid hash-object --json README.md
+export PATH="$PWD/target/release:$PATH"
+
+braid init /tmp/demo
+cd /tmp/demo
+braid git import /path/to/any/git/repository   # every branch and tag
+braid log main -n 5
+braid show main --json
+braid fsck
+```
+
+Exporting writes the same commits back, with the same ids:
+
+```bash
+git init --bare /tmp/mirror.git
+braid git export /tmp/mirror.git
+```
+
+Every operation is in the op log, and any of them can be undone:
+
+```bash
+braid op log      # who did what, newest first
+braid undo        # takes the whole import back
 ```
 
 Ids can be checked with any BLAKE3 implementation, for example the reference
@@ -136,10 +155,10 @@ Repositories come in with their whole history and keep a git mirror.
 |---|---|---|
 | 0 | Public repository, CI, object ids, `braid hash-object` | ✅ done |
 | 1 | Format v1: canonical codec, trees (flat and split), changesets, name rules; frozen | ✅ done |
-| 2 | Local store and op log: many processes, crash-safe, `fsck`, `undo` | next |
-| 3 | History and the git bridge: import, export, `log`, `show`, `diff`, `blame` | planned |
-| 4 | Many agents on one machine: workspaces, `land`, conflicts, `git sync` | planned |
-| 5 | Performance: deltas, chunking, derived indexes, benchmarks against git | planned |
+| 2 | Local store and op log: many processes, crash-safe, `fsck`, `undo` | ✅ done |
+| 3 | History and the git bridge: import, export, `log`, `show` | ✅ done |
+| 4 | Many agents on one machine: workspaces, `land`, conflicts, `git sync` | next |
+| 5 | Performance: deltas, chunking, derived indexes, `blame`, benchmarks against git | planned |
 | 6 | Server: lazy sparse clones, tokens, caching tiers | planned |
 | 7 | Daemon, virtual file system, WebAssembly core | planned |
 
@@ -150,9 +169,9 @@ landing.
 
 ## What is honest about this
 
-- **It is pre-alpha.** Today it computes object ids and encodes the frozen
-  format; it does not store anything yet. Do not keep anything in it that you
-  cannot afford to lose.
+- **It is pre-alpha.** Today it stores history and round-trips git
+  repositories, but it has no workspaces yet. Keep your git repository as the
+  source of truth, and do not keep anything only in braid.
 - **No performance claims yet.** When benchmarks land they will be ratios
   against git on the same machine, with the script that reproduces them, never
   numbers nobody can check.
@@ -213,6 +232,6 @@ Parte de las ideas que Anthropic contó en público sobre Scion, su sistema inte
 Es una implementación independiente, sin código de Anthropic y sin relación con
 la empresa.
 
-Hoy está en pre-alfa: calcula ids y tiene el formato v1 congelado y verificado,
-pero todavía no guarda datos. Las [fases](#status-and-roadmap)
+Hoy está en pre-alfa: guarda historia y la mete y saca de git bit a bit, pero aún
+no tiene espacios de trabajo para agentes. Las [fases](#status-and-roadmap)
 dicen qué llega después y qué pruebas tiene que pasar cada una.

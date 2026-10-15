@@ -44,14 +44,14 @@ jobs:
       - run: cargo check --workspace --locked
 
   wasm:
-    name: format crate on WebAssembly
+    name: format and engine on WebAssembly
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - run: cargo check -p elffuss-braid-format --target wasm32-unknown-unknown --locked
+      - run: cargo check -p elffuss-braid-format -p elffuss-braid-engine --target wasm32-unknown-unknown --locked
 
   deny:
     name: licences and advisories
