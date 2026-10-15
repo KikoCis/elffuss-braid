@@ -496,6 +496,7 @@ dependencies = [
 name = "elffuss-braid-engine"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "elffuss-braid-format",
  "imara-diff",
  "proptest",

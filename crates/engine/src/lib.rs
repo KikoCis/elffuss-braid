@@ -14,7 +14,10 @@
 //! - [`commit`] and [`admit`]: creating a changeset, and the check a store
 //!   runs before it accepts one.
 //! - [`first_parent_chain_contains`], [`is_ancestor`] and [`merge_base`]:
-//!   ancestry.
+//!   ancestry, walking history.
+//! - [`History`]: the same ancestry queries with generation numbers and skip
+//!   pointers, answered with derived data ([`DerivedKey`], [`DerivedIndex`])
+//!   computed when missing.
 //! - [`merge3`]: three-way merges of file contents.
 //! - [`land`]: landing a change on a branch, with conflicts reported as data.
 //! - [`merge`]: merging two changesets into a merge changeset, with the same
@@ -40,8 +43,9 @@
 //! [`apply`], [`diff`], [`admit`], [`land`] and [`merge`] read only the
 //! directories on the changed paths, so their cost follows the size of the
 //! change times the depth of the tree, plus the size of each directory they
-//! touch. Ancestry queries walk history and are proportional to the distance
-//! they cover.
+//! touch. The free ancestry functions walk history and are proportional to
+//! the distance they cover; [`History`] reads derived data instead, so its
+//! queries cost what they visit once that data exists.
 //!
 //! [`Objects`]: braid_format::Objects
 
@@ -51,8 +55,10 @@ mod access;
 mod ancestry;
 mod apply;
 mod commit;
+mod derived;
 mod diff;
 mod error;
+mod history;
 mod land;
 mod merge;
 mod path;
@@ -65,11 +71,15 @@ pub use access::{
     EMPTY_TREE, entry_at, read_blob, read_changes, read_changeset, read_object, read_tree,
     stat_object, write_tree,
 };
-pub use ancestry::{first_parent_chain_contains, is_ancestor, merge_base, merge_bases};
+pub use ancestry::{
+    GraphNode, first_parent_chain_contains, is_ancestor, merge_base, merge_bases, skip_height,
+};
 pub use apply::apply;
 pub use commit::{admit, commit};
+pub use derived::{DerivedIndex, DerivedKey, MemoryIndex};
 pub use diff::diff;
 pub use error::{ApplyProblem, Error, StoreError};
+pub use history::History;
 pub use land::{AGENT, Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
 pub use merge::{BINARY_SNIFF_BYTES, ConflictHunk, HunkSide, MergeResult, is_binary, merge3};
 pub use path::MAX_PATH_DEPTH;
