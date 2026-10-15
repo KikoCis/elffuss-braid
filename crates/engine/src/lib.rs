@@ -4,10 +4,61 @@
 //! The semantic core of elffuss-braid: what a change list means, and what
 //! committing, admitting and landing a changeset do.
 //!
-//! This first part holds [`merge3`], the three-way merge of file contents.
+//! Everything here reads and writes through the [`Objects`] trait and does no
+//! I/O of its own, so the same code runs over the local store, a remote one, or
+//! memory.
+//!
+//! - [`read_tree`], [`write_tree`], [`read_changeset`], [`read_changes`]:
+//!   typed access to stored objects.
+//! - [`apply`] and [`diff`]: a change list, and the two trees it connects.
+//! - [`commit`] and [`admit`]: creating a changeset, and the check a store
+//!   runs before it accepts one.
+//! - [`first_parent_chain_contains`] and [`merge_base`]: ancestry.
+//! - [`merge3`]: three-way merges of file contents.
+//! - [`land`]: landing a change on a branch, with conflicts reported as data.
+//!
+//! # Files and directories
+//!
+//! A change list is per file: each change sets one path to a file, an
+//! executable, a symlink or a gitlink, or deletes it. Directories follow from
+//! the files: a change below a missing directory creates it, and a directory
+//! left without entries by a change is removed, as git has no empty
+//! directories. A tree that holds an empty subdirectory can be stored and read,
+//! but no change list produces one, so [`apply`] and [`diff`] only round-trip
+//! trees without empty subdirectories.
+//!
+//! # Costs
+//!
+//! [`apply`], [`diff`], [`admit`] and [`land`] read only the directories on the
+//! changed paths, so their cost follows the size of the change times the depth
+//! of the tree, plus the size of each directory they touch. Ancestry queries
+//! walk history and are proportional to the distance they cover.
+//!
+//! [`Objects`]: braid_format::Objects
 
 #![forbid(unsafe_code)]
 
+mod access;
+mod ancestry;
+mod apply;
+mod commit;
+mod diff;
+mod error;
+mod land;
 mod merge;
+mod path;
 
+#[cfg(test)]
+mod testing;
+
+pub use access::{
+    EMPTY_TREE, entry_at, read_blob, read_changes, read_changeset, read_object, read_tree,
+    write_tree,
+};
+pub use ancestry::{first_parent_chain_contains, merge_base, merge_bases};
+pub use apply::apply;
+pub use commit::{admit, commit};
+pub use diff::diff;
+pub use error::{ApplyProblem, Error, StoreError};
+pub use land::{Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
 pub use merge::{BINARY_SNIFF_BYTES, ConflictHunk, HunkSide, MergeResult, is_binary, merge3};
