@@ -256,6 +256,8 @@ dependencies = [
  "anyhow",
  "clap",
  "elffuss-braid-format",
+ "elffuss-braid-repo",
+ "elffuss-braid-store",
  "serde_json",
  "tempfile",
 ]
@@ -267,6 +269,16 @@ dependencies = [
  "blake3",
  "proptest",
  "unicode-normalization",
+]
+
+[[package]]
+name = "elffuss-braid-repo"
+version = "0.0.1"
+dependencies = [
+ "elffuss-braid-format",
+ "elffuss-braid-store",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
