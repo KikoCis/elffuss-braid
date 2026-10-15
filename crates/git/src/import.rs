@@ -182,8 +182,8 @@ struct Importer<'r, 'o, 'm, O: Objects> {
     objects: &'o O,
     map: &'m mut GitMap,
     report: ImportReport,
-    /// Root trees of the changesets seen in this import.
-    roots: HashMap<ObjectId, ObjectId>,
+    /// Root trees and git origins of the changesets seen in this import.
+    roots: HashMap<ObjectId, (ObjectId, Option<ObjectId>)>,
     /// The braid id of the empty directory.
     empty_tree: ObjectId,
 }
@@ -381,15 +381,19 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                 id: parent.to_hex(),
             })?);
         }
-        let base = match parents.first() {
-            Some(parent) => Some(self.root_of(parent)?),
-            None => None,
+        let (base, base_origin) = match parents.first() {
+            Some(parent) => {
+                let (root, origin) = self.root_of(parent)?;
+                (Some(root), origin)
+            }
+            None => (None, None),
         };
-        // What the first parent has at each path is what the store may keep
-        // new trees and blobs as deltas against.
+        // What the first parent has at each path, and its own raw bytes, are
+        // what the store may keep new trees, blobs and bytes as deltas
+        // against.
         let root = self.convert_tree(fields.tree, oid, base)?;
         let changes = diff::changes(self.objects, base, root)?;
-        let origin = fetch::put(self.objects, Kind::Blob, &bytes)?;
+        let origin = fetch::put_hinted(self.objects, Kind::Blob, &bytes, base_origin.as_ref())?;
         let unknown = || Signature {
             name: Vec::new(),
             email: Vec::new(),
@@ -436,18 +440,20 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             .map_err(|err| verification(format!("its tree: {err}")))?;
 
         self.map.insert_commit(oid, changeset);
-        self.roots.insert(changeset, root);
+        self.roots.insert(changeset, (root, Some(origin)));
         self.report.commits += 1;
         Ok(())
     }
 
-    fn root_of(&mut self, changeset: &ObjectId) -> Result<ObjectId, Error> {
-        if let Some(root) = self.roots.get(changeset) {
-            return Ok(*root);
+    /// The root tree and the git origin of a changeset.
+    fn root_of(&mut self, changeset: &ObjectId) -> Result<(ObjectId, Option<ObjectId>), Error> {
+        if let Some(found) = self.roots.get(changeset) {
+            return Ok(*found);
         }
-        let root = fetch::changeset(self.objects, changeset)?.root;
-        self.roots.insert(*changeset, root);
-        Ok(root)
+        let read = fetch::changeset(self.objects, changeset)?;
+        let found = (read.root, read.git_origin);
+        self.roots.insert(*changeset, found);
+        Ok(found)
     }
 
     /// Converts a git tree and everything below it, and returns its braid
