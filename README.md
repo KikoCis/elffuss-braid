@@ -224,8 +224,8 @@ Repositories come in with their whole history and keep a git mirror.
 | 1 | Format v1: canonical codec, trees (flat and split), changesets, name rules; frozen | ✅ done |
 | 2 | Local store and op log: many processes, crash-safe, `fsck`, `undo` | ✅ done |
 | 3 | History and the git bridge: import, export, `log`, `show` | ✅ done |
-| 4 | Many agents on one machine: workspaces, `land`, conflicts, `git sync` | next |
-| 5 | Performance: deltas, chunking, derived indexes, `blame`, benchmarks against git | planned |
+| 4 | Many agents on one machine: workspaces, `land`, conflicts, `git sync` | ✅ done |
+| 5 | Performance: deltas, chunking, derived indexes, `blame`, benchmarks against git | next |
 | 6 | Server: lazy sparse clones, tokens, caching tiers | planned |
 | 7 | Daemon, virtual file system, WebAssembly core | planned |
 
