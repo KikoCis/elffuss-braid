@@ -1,9 +1,17 @@
 # Braid format v1
 
-**Status: draft.** Sections marked *implemented* exist in code and are pinned by
-golden vectors in the tests. Everything else is the design that milestone 1
-implements. The format freezes when milestone 1 closes; after that, any change
-to hashed bytes needs a new format version.
+**Status: frozen.** Sections 1 to 5 (ids, the codec, trees, changesets and
+names) are implemented in `crates/format` and frozen: any change to hashed bytes
+needs a new format version. Sections 6 and 7 describe the git mapping and the
+on-disk storage, which are not hashed and can still change.
+
+Every golden vector below is pinned by the Rust tests and recomputed by
+[`check_vectors.py`](check_vectors.py), a second implementation written from
+this document alone. It needs the reference `b3sum` tool:
+
+```bash
+python3 docs/spec/check_vectors.py
+```
 
 This document covers what is **hashed**: ids, trees, changesets and names. How
 the store keeps objects on disk (records, indexes, compression, deltas, chunks)
@@ -108,9 +116,21 @@ node.** A larger one must be split:
 `H(level, name) = BLAKE3-derive-key("elffuss-braid 2026 tree-split v1", u8 level ‖ name)`.
 
 Boundaries depend only on names, so changing a file's content never moves them,
-and an edit only rewrites the nodes on its path. An incremental update must
-always produce the same bytes as building the directory from scratch; the tests
-check this for random edit sequences.
+and an edit never rewrites the leaves before it. Any way of updating a directory
+must produce exactly the nodes of building it from scratch.
+
+A reader checks a split directory by collecting its entries and building them
+again: the root must come out identical. A flat node may hold at most 1,024
+entries, a leaf or internal node at least 1 and at most 512, and an internal
+node's children must be one level below it.
+
+Golden vectors:
+
+| Tree | Id |
+|---|---|
+| empty (`01 00 00`) | `3136b0f18562ee73b840ea348c54ae3c7e97e4cc3e547ea9dd03fa1cd8b384cf` |
+| small: `README.md` (file, `hello\n`), `latest` (symlink to `README.md`), `run.sh` (executable, `#!/bin/sh\n`), `src` (the empty tree), `vendor` (SHA-1 gitlink, twenty `11` bytes) | `a6c6d54bb7663d576e8f7a702e0670927e22098d6c15c10475e06b51dc3d8c1b` |
+| large: 5,000 files `f00000` … `f04999`, each the one-byte blob `x`; 30 nodes | `2c88a412664c1fd862c3487e1313a045a20fe4f7bdeaf1bb71e08564edc7dcce` |
 
 ## 4. Changesets
 
@@ -147,9 +167,12 @@ Rules:
   compared against the empty tree.
 - Changes are per file. A directory replaced by a file is a delete for every
   file below it plus one set for the new file.
-- The list is stored inline when its encoding is at most 64 KiB, and as a
-  separate blob otherwise, so a huge import does not make every history walk
-  read a huge object.
+- A symlink cannot take a name that must not be a symlink (section 5).
+- The list is stored inline when its encoding (`uv n, n × change`) is at most
+  64 KiB, and otherwise as a blob holding exactly that encoding, so a huge
+  import does not make every history walk read a huge object. A decoder rejects
+  an inline list over the limit; the store rejects an external list that would
+  have fit inline.
 - **Admission check.** A store accepts a changeset only if applying its change
   list to `parent[0]`'s root tree yields exactly `root_tree`, every referenced
   object is present, and every parent was already accepted. The check costs
@@ -159,6 +182,24 @@ Rules:
 - `git_origin` points at the original commit bytes for changesets imported from
   git, so export can reproduce the commit bit for bit. The reference is part of
   the hash.
+
+Golden vector: no parents; root = the empty tree; two changes, `README.md`
+set to the file `hello\n` (6 bytes) and `src/lib.rs` set to the empty file;
+author and committer `Ada Lovelace <ada@example.org>` at second 1,700,000,000
+with offset +60; message `Initial import\n`; no extras; no git origin.
+
+```
+01 00 3136b0f18562ee73b840ea348c54ae3c7e97e4cc3e547ea9dd03fa1cd8b384cf
+00 02 09 524541444d452e6d64 01 6acd5cdf880a325d2df716699943aae586ad77d54fb2ed0c5a3f53c76fa56f89 06
+      0a 7372632f6c69622e7273 01 ff9c212a7ef64fa38f0c411b3a68d523a20fd197ee3ba03fa4a44b7c5e99c958 00
+0c 416461204c6f76656c616365 0f 616461406578616d706c652e6f7267 80c49fd50c 78
+0c 416461204c6f76656c616365 0f 616461406578616d706c652e6f7267 80c49fd50c 78
+0f 496e697469616c20696d706f72740a
+00
+00
+```
+
+Id: `4f8d49034a95a2938d30d13bee5508100211d04e1c125ef567a0c41c27f777d1`.
 
 ## 5. Names
 

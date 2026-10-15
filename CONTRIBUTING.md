@@ -31,8 +31,9 @@ check in `scripts/privacy-check.sh`.
   list of accepted licences.
 - **Hashed formats are specified first.** A change to the bytes of an id, a
   tree or a changeset needs an update to `docs/spec/format-v1.md` and to its
-  golden vectors in the same pull request. After milestone 1 such a change
-  needs a new format version.
+  golden vectors in the same pull request, and `docs/spec/check_vectors.py`
+  must still pass. Format v1 is frozen, so such a change needs a new format
+  version.
 - **Performance claims come with a reproducible script** and are stated as a
   ratio against git on the same machine. Do not publish absolute timings or
   describe your hardware.

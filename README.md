@@ -91,7 +91,8 @@ flowchart LR
 
 ## Quick start
 
-Today braid computes object ids. Everything else arrives milestone by milestone.
+Today braid computes object ids, and its hashed format is frozen and verified.
+Storing data arrives with milestone 2.
 
 ```bash
 git clone https://github.com/KikoCis/elffuss-braid
@@ -134,8 +135,8 @@ Repositories come in with their whole history and keep a git mirror.
 | Milestone | Scope | State |
 |---|---|---|
 | 0 | Public repository, CI, object ids, `braid hash-object` | ✅ done |
-| 1 | Format v1: canonical codec, trees (flat and split), changesets, name rules; then frozen | in progress |
-| 2 | Local store and op log: many processes, crash-safe, `fsck`, `undo` | planned |
+| 1 | Format v1: canonical codec, trees (flat and split), changesets, name rules; frozen | ✅ done |
+| 2 | Local store and op log: many processes, crash-safe, `fsck`, `undo` | next |
 | 3 | History and the git bridge: import, export, `log`, `show`, `diff`, `blame` | planned |
 | 4 | Many agents on one machine: workspaces, `land`, conflicts, `git sync` | planned |
 | 5 | Performance: deltas, chunking, derived indexes, benchmarks against git | planned |
@@ -149,12 +150,15 @@ landing.
 
 ## What is honest about this
 
-- **It is pre-alpha.** Today it computes object ids and nothing else. Do not
-  keep anything in it that you cannot afford to lose.
+- **It is pre-alpha.** Today it computes object ids and encodes the frozen
+  format; it does not store anything yet. Do not keep anything in it that you
+  cannot afford to lose.
 - **No performance claims yet.** When benchmarks land they will be ratios
   against git on the same machine, with the script that reproduces them, never
   numbers nobody can check.
-- **The format can still change** until milestone 1 freezes it.
+- **The hashed format is frozen** and every golden vector is recomputed by a
+  second implementation written from the specification alone. Storage and
+  protocols can still change.
 - **Braid is not Scion.** It starts from the ideas Anthropic described in
   public about its own source control system. It is an independent
   implementation, contains no code from Anthropic, and is not affiliated with
@@ -209,5 +213,6 @@ Parte de las ideas que Anthropic contó en público sobre Scion, su sistema inte
 Es una implementación independiente, sin código de Anthropic y sin relación con
 la empresa.
 
-Hoy está en pre-alfa: solo calcula ids de objetos. Las [fases](#status-and-roadmap)
+Hoy está en pre-alfa: calcula ids y tiene el formato v1 congelado y verificado,
+pero todavía no guarda datos. Las [fases](#status-and-roadmap)
 dicen qué llega después y qué pruebas tiene que pasar cada una.

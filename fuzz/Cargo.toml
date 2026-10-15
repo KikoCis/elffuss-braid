@@ -1,0 +1,37 @@
+[package]
+name = "elffuss-braid-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+braid-format = { package = "elffuss-braid-format", path = "../crates/format" }
+
+[[bin]]
+name = "decode_tree"
+path = "fuzz_targets/decode_tree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_changeset"
+path = "fuzz_targets/decode_changeset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "names"
+path = "fuzz_targets/names.rs"
+test = false
+doc = false
+bench = false

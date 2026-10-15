@@ -64,3 +64,29 @@ jobs:
         with:
           fetch-depth: 0
       - run: scripts/privacy-check.sh
+
+  spec:
+    name: spec vectors (independent implementation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install b3sum --locked
+      - run: python3 docs/spec/check_vectors.py
+
+  fuzz:
+    name: fuzz smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: run every target for one minute
+        working-directory: fuzz
+        run: |
+          for target in decode_tree decode_changeset names; do
+            cargo fuzz run "$target" -- -max_total_time=60
+          done
