@@ -16,6 +16,8 @@ name = "braid_repo"
 braid-format.workspace = true
 braid-store.workspace = true
 braid-git.workspace = true
+braid-engine.workspace = true
+blake3.workspace = true
 thiserror = "2"
 
 [dev-dependencies]
