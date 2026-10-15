@@ -286,6 +286,15 @@ message unchanged. A signature holding `<`, `>`, a newline or NUL, an offset
 beyond ±99 hours, or an extra that cannot be a header has no git form and is
 refused.
 
+An export records what it generated in the map, in the same tables as an
+import: the commit of each changeset, each canonical tree and each blob. An
+import that meets one of those commits again, from wherever it went, takes the
+changeset it was exported from instead of making a new one with a git origin.
+The map stays one to one: a pairing whose commit or changeset (tree, blob) is
+already mapped is not recorded, and a braid tree keeps the canonical git tree
+it has. Since exports are deterministic, the pairings of any changeset can be
+recomputed at any time and recorded again.
+
 **Map record.** The mapping is one derived record, versioned on its own:
 
 ```

@@ -7,7 +7,10 @@
 //! changeset, a tree a braid tree, a blob a braid blob, and an annotated tag
 //! the blob holding its raw bytes. The map records both directions, plus the
 //! raw bytes of the git trees that cannot be regenerated from their braid
-//! tree. It is derived data: importing the same repository again rebuilds it.
+//! tree. Objects made in braid enter the map when they are exported, so that
+//! importing them back gives the same braid objects. It is derived data:
+//! importing the same repository again, and exporting the same changesets
+//! again, rebuilds it.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -27,7 +30,7 @@ pub struct TagEntry {
     pub target_kind: GitKind,
 }
 
-/// How many objects of each kind a map holds.
+/// How many objects of each kind a map holds, or an operation added to it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MapCounts {
     /// Commits.
@@ -42,6 +45,44 @@ pub struct MapCounts {
     pub tags: usize,
     /// Tag names.
     pub tag_names: usize,
+}
+
+/// Git objects an export generated and the braid objects they come from:
+/// the commits of changesets, canonical trees, and blobs. Each list is
+/// sorted by git id.
+///
+/// [`Exporter::pairings`](crate::Exporter::pairings) collects them and
+/// [`GitMap::record`] adds them to a map. Exports are deterministic, so a
+/// pairing stays true wherever the git object goes: a commit that comes back
+/// from a remote is the export of its changeset, and importing it must give
+/// that changeset rather than a second one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pairings {
+    pub(crate) commits: Vec<(GitOid, ObjectId)>,
+    pub(crate) trees: Vec<(GitOid, ObjectId)>,
+    pub(crate) blobs: Vec<(GitOid, ObjectId, u64)>,
+}
+
+impl Pairings {
+    /// Each commit and the changeset it was exported from.
+    pub fn commits(&self) -> &[(GitOid, ObjectId)] {
+        &self.commits
+    }
+
+    /// Each git tree and the braid tree it is the canonical export of.
+    pub fn trees(&self) -> &[(GitOid, ObjectId)] {
+        &self.trees
+    }
+
+    /// Each git blob, its braid blob, and its size.
+    pub fn blobs(&self) -> &[(GitOid, ObjectId, u64)] {
+        &self.blobs
+    }
+
+    /// Whether there are no pairings.
+    pub fn is_empty(&self) -> bool {
+        self.commits.is_empty() && self.trees.is_empty() && self.blobs.is_empty()
+    }
 }
 
 /// The two-way mapping between imported git objects and braid objects.
@@ -155,6 +196,102 @@ impl GitMap {
             tags: self.tags.len(),
             tag_names: self.tag_names.len(),
         }
+    }
+
+    /// Adds the pairings an export computed, and returns how many of each
+    /// kind were new.
+    ///
+    /// The map stays one to one: a pairing is left out when the map already
+    /// maps either of its objects, and a tree when its braid tree already has
+    /// a canonical git tree. What the map knows wins.
+    pub fn record(&mut self, pairings: &Pairings) -> MapCounts {
+        let mut added = MapCounts::default();
+        for (commit, changeset) in &pairings.commits {
+            if self.add_commit(*commit, *changeset) {
+                added.commits += 1;
+            }
+        }
+        for (tree, braid) in &pairings.trees {
+            if self.add_tree(*tree, *braid, None) {
+                added.trees += 1;
+            }
+        }
+        for (blob, braid, size) in &pairings.blobs {
+            if self.add_blob(*blob, *braid, *size) {
+                added.blobs += 1;
+            }
+        }
+        added
+    }
+
+    /// Adds every entry of `other` that this map lacks, such as what another
+    /// process recorded since this map was read, and returns how many of each
+    /// kind were new. As in [`record`](Self::record), what this map knows
+    /// wins wherever the two disagree, so the result is still one to one.
+    pub fn absorb(&mut self, other: &GitMap) -> MapCounts {
+        let mut added = MapCounts::default();
+        for (commit, changeset) in &other.commits {
+            if self.add_commit(*commit, *changeset) {
+                added.commits += 1;
+            }
+        }
+        for (tree, braid) in &other.trees {
+            let raw = other.raw_trees.get(tree).copied();
+            if self.add_tree(*tree, *braid, raw) {
+                added.trees += 1;
+                if raw.is_some() {
+                    added.raw_trees += 1;
+                }
+            }
+        }
+        for (blob, (braid, size)) in &other.blobs {
+            if self.add_blob(*blob, *braid, *size) {
+                added.blobs += 1;
+            }
+        }
+        for (tag, entry) in &other.tags {
+            if !self.tags.contains_key(tag) && !self.tag_blobs.contains_key(&entry.raw) {
+                self.insert_tag(*tag, *entry);
+                added.tags += 1;
+            }
+        }
+        for (name, tag) in &other.tag_names {
+            if !self.tag_names.contains_key(name) && self.tags.contains_key(tag) {
+                self.set_tag_name(name.clone(), *tag);
+                added.tag_names += 1;
+            }
+        }
+        added
+    }
+
+    /// Inserts a commit unless either side is mapped already.
+    fn add_commit(&mut self, commit: GitOid, changeset: ObjectId) -> bool {
+        if self.commits.contains_key(&commit) || self.changesets.contains_key(&changeset) {
+            return false;
+        }
+        self.insert_commit(commit, changeset);
+        true
+    }
+
+    /// Inserts a tree unless it is mapped already, or it would be a second
+    /// canonical tree for its braid tree.
+    fn add_tree(&mut self, tree: GitOid, braid: ObjectId, raw: Option<ObjectId>) -> bool {
+        if self.trees.contains_key(&tree)
+            || (raw.is_none() && self.canonical_trees.contains_key(&braid))
+        {
+            return false;
+        }
+        self.insert_tree(tree, braid, raw);
+        true
+    }
+
+    /// Inserts a blob unless either side is mapped already.
+    fn add_blob(&mut self, blob: GitOid, braid: ObjectId, size: u64) -> bool {
+        if self.blobs.contains_key(&blob) || self.git_blobs.contains_key(&braid) {
+            return false;
+        }
+        self.insert_blob(blob, braid, size);
+        true
     }
 
     pub(crate) fn insert_commit(&mut self, commit: GitOid, changeset: ObjectId) {
@@ -470,5 +607,84 @@ mod tests {
         let (first, second) = swapped[start..start + 2 * row].split_at_mut(row);
         first.swap_with_slice(second);
         assert!(GitMap::from_bytes(&swapped).is_err());
+    }
+
+    #[test]
+    fn recording_keeps_the_map_one_to_one() {
+        let mut map = sample();
+        let pairings = Pairings {
+            commits: vec![
+                (oid(1), id("another changeset")),
+                (oid(8), id("c1")),
+                (oid(9), id("c9")),
+            ],
+            trees: vec![(oid(3), id("t9")), (oid(10), id("t1")), (oid(11), id("t3"))],
+            blobs: vec![
+                (oid(6), id("b9"), 1),
+                (oid(12), id("b1"), 42),
+                (oid(13), id("b2"), 7),
+            ],
+        };
+        assert!(!pairings.is_empty());
+        let added = map.record(&pairings);
+        assert_eq!(
+            added,
+            MapCounts {
+                commits: 1,
+                trees: 1,
+                blobs: 1,
+                ..MapCounts::default()
+            }
+        );
+        // What the map knew stays.
+        assert_eq!(map.changeset(&oid(1)), Some(id("c1")));
+        assert_eq!(map.changeset(&oid(8)), None);
+        assert_eq!(map.git_tree(&id("t1")), Some(oid(3)));
+        assert_eq!(map.tree(&oid(10)), None);
+        assert_eq!(map.blob(&oid(12)), None);
+        // The rest is added both ways.
+        assert_eq!(map.changeset(&oid(9)), Some(id("c9")));
+        assert_eq!(map.commit(&id("c9")), Some(oid(9)));
+        assert_eq!(map.git_tree(&id("t3")), Some(oid(11)));
+        assert_eq!(map.raw_tree(&oid(11)), None);
+        assert_eq!(map.blob(&oid(13)), Some((id("b2"), 7)));
+        assert_eq!(map.git_blob(&id("b2")), Some(oid(13)));
+        // The result still encodes, and recording again adds nothing.
+        assert_eq!(GitMap::from_bytes(&map.to_bytes()).unwrap(), map);
+        assert_eq!(map.record(&pairings), MapCounts::default());
+        assert!(Pairings::default().is_empty());
+    }
+
+    #[test]
+    fn absorbing_adds_what_is_missing() {
+        let theirs = sample();
+        let mut ours = GitMap::new();
+        ours.insert_commit(oid(1), id("c1"));
+        ours.insert_tree(oid(5), id("t2"), None);
+        assert_eq!(
+            ours.absorb(&theirs),
+            MapCounts {
+                commits: 1,
+                trees: 2,
+                raw_trees: 1,
+                blobs: 1,
+                tags: 1,
+                tag_names: 1,
+            }
+        );
+        assert_eq!(ours, theirs);
+        assert_eq!(ours.absorb(&theirs), MapCounts::default());
+
+        // Where the two disagree, this map wins and stays one to one.
+        let mut mine = GitMap::new();
+        mine.insert_commit(oid(2), id("mine"));
+        mine.insert_tree(oid(20), id("t1"), None);
+        mine.absorb(&theirs);
+        assert_eq!(mine.changeset(&oid(2)), Some(id("mine")));
+        assert_eq!(mine.commit(&id("c2")), None);
+        assert_eq!(mine.git_tree(&id("t1")), Some(oid(20)));
+        assert_eq!(mine.tree(&oid(3)), None);
+        assert_eq!(mine.raw_tree(&oid(4)), Some(id("raw t1")));
+        assert_eq!(GitMap::from_bytes(&mine.to_bytes()).unwrap(), mine);
     }
 }

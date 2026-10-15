@@ -163,6 +163,33 @@ pub enum Error {
         /// that a walk over a tree met.
         path: Vec<u8>,
     },
+
+    /// Two changesets to merge have no common ancestor.
+    #[error("changesets {} and {} have no common ancestor", .ours.short(), .theirs.short())]
+    UnrelatedHistories {
+        /// The changeset merged into.
+        ours: ObjectId,
+        /// The changeset merged.
+        theirs: ObjectId,
+    },
+
+    /// Two changesets to merge have several best common ancestors, as after
+    /// criss-cross merges, with different trees: the merge would depend on
+    /// which one it started from.
+    #[error(
+        "changesets {} and {} have {} best common ancestors with different trees",
+        .ours.short(),
+        .theirs.short(),
+        .bases.len()
+    )]
+    SeveralMergeBases {
+        /// The changeset merged into.
+        ours: ObjectId,
+        /// The changeset merged.
+        theirs: ObjectId,
+        /// The best common ancestors, sorted by id.
+        bases: Vec<ObjectId>,
+    },
 }
 
 impl Error {

@@ -441,6 +441,8 @@ dependencies = [
 name = "elffuss-braid-repo"
 version = "0.0.1"
 dependencies = [
+ "blake3",
+ "elffuss-braid-engine",
  "elffuss-braid-format",
  "elffuss-braid-git",
  "elffuss-braid-store",

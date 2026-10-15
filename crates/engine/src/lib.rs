@@ -17,6 +17,8 @@
 //!   ancestry.
 //! - [`merge3`]: three-way merges of file contents.
 //! - [`land`]: landing a change on a branch, with conflicts reported as data.
+//! - [`merge`]: merging two changesets into a merge changeset, with the same
+//!   rules and conflicts as landing.
 //!
 //! # Files and directories
 //!
@@ -35,10 +37,11 @@
 //!
 //! # Costs
 //!
-//! [`apply`], [`diff`], [`admit`] and [`land`] read only the directories on the
-//! changed paths, so their cost follows the size of the change times the depth
-//! of the tree, plus the size of each directory they touch. Ancestry queries
-//! walk history and are proportional to the distance they cover.
+//! [`apply`], [`diff`], [`admit`], [`land`] and [`merge`] read only the
+//! directories on the changed paths, so their cost follows the size of the
+//! change times the depth of the tree, plus the size of each directory they
+//! touch. Ancestry queries walk history and are proportional to the distance
+//! they cover.
 //!
 //! [`Objects`]: braid_format::Objects
 
@@ -53,6 +56,7 @@ mod error;
 mod land;
 mod merge;
 mod path;
+mod tree_merge;
 
 #[cfg(test)]
 mod testing;
@@ -69,3 +73,4 @@ pub use error::{ApplyProblem, Error, StoreError};
 pub use land::{Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
 pub use merge::{BINARY_SNIFF_BYTES, ConflictHunk, HunkSide, MergeResult, is_binary, merge3};
 pub use path::MAX_PATH_DEPTH;
+pub use tree_merge::{MergeOutcome, merge};

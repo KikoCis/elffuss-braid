@@ -3,8 +3,9 @@
 
 //! Property tests on random small repositories: `diff` is canonical and
 //! `apply` inverts it, admission accepts what `commit` makes and rejects
-//! tampering, and changes to unrelated paths land the same in either order.
-//! Plus properties of the three-way merge.
+//! tampering, changes to unrelated paths land the same in either order, and
+//! merging two changesets agrees with landing one on the other. Plus
+//! properties of the three-way merge.
 //!
 //! Trees are built here from scratch with `build_directory`, independently of
 //! the engine, and serve as the oracle.
@@ -12,8 +13,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use braid_engine::{
-    ApplyProblem, Error, LandOutcome, MergeResult, admit, apply, commit, diff, land, merge3,
-    read_changes, read_changeset,
+    ApplyProblem, Error, LandOutcome, MergeOutcome, MergeResult, admit, apply, commit, diff, land,
+    merge, merge3, read_changes, read_changeset,
 };
 use braid_format::{
     Change, ChangeOp, Changes, Changeset, ChangesetError, ChangesetParts, Entry, EntryKind, GitId,
@@ -407,6 +408,69 @@ fn check_commutation(
     Ok(())
 }
 
+/// Two changesets built on one start, related or not: merging the second
+/// into the first gives what landing the second on the first gives, the same
+/// conflicts or the same tree, and a merge that is admissible, whose change
+/// list is the diff from the first.
+fn check_merge_agrees_with_land(
+    start: &Files,
+    x_files: &Files,
+    y_files: &Files,
+) -> Result<(), TestCaseError> {
+    let objects = MemoryObjects::new();
+    store_all(&objects, start);
+    store_all(&objects, x_files);
+    store_all(&objects, y_files);
+    let root = commit_list(&objects, Vec::new(), changes(&Files::new(), start))?;
+    let x = commit_list(&objects, vec![root], changes(start, x_files))?;
+    let y = commit(
+        &objects,
+        vec![root],
+        changes(start, y_files),
+        signature(),
+        signature(),
+        b"other change\n".to_vec(),
+        Vec::new(),
+    )?;
+    let landed = land(&objects, Some(x), y, signature())?;
+    let merged = merge(&objects, x, y, signature(), b"merge\n".to_vec())?;
+    match (landed, merged) {
+        (LandOutcome::Conflicts(by_land), MergeOutcome::Conflicts(by_merge)) => {
+            prop_assert_eq!(by_land, by_merge);
+        }
+        (
+            landed @ (LandOutcome::Rebased { .. } | LandOutcome::AlreadyApplied),
+            MergeOutcome::Merged {
+                changeset,
+                merged_paths,
+            },
+        ) => {
+            let new = read_changeset(&objects, changeset)?;
+            prop_assert_eq!(&new.parents, &vec![x, y]);
+            admit(&objects, changeset, |id| *id == x || *id == y)?;
+            let x_root = read_changeset(&objects, x)?.root;
+            let list = read_changes(&objects, changeset, &new)?.into_owned();
+            prop_assert_eq!(list, diff(&objects, x_root, new.root)?);
+            match landed {
+                LandOutcome::Rebased {
+                    changeset: rebased,
+                    merged_paths: rebased_paths,
+                } => {
+                    prop_assert_eq!(new.root, read_changeset(&objects, rebased)?.root);
+                    prop_assert_eq!(merged_paths, rebased_paths);
+                }
+                _ => prop_assert_eq!(new.root, x_root),
+            }
+        }
+        (landed, merged) => {
+            return Err(TestCaseError::fail(format!(
+                "landing gave {landed:?}, merging gave {merged:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A directory of about a thousand files, on either side of the split
 /// limit, and a few other files.
 fn wide() -> impl Strategy<Value = Files> {
@@ -552,6 +616,15 @@ proptest! {
         y_edits in edits(),
     ) {
         check_commutation(&start, &edit(&start, &x_edits), &edit(&start, &y_edits))?;
+    }
+
+    #[test]
+    fn merging_agrees_with_landing(
+        start in files(),
+        x_edits in edits(),
+        y_edits in edits(),
+    ) {
+        check_merge_agrees_with_land(&start, &edit(&start, &x_edits), &edit(&start, &y_edits))?;
     }
 }
 
