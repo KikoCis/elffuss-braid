@@ -29,8 +29,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Repository root (default: the current directory or its nearest parent
-    /// holding a `.braid` directory).
+    /// The repository's root directory (default: found from the current
+    /// directory, the nearest one, itself or a parent, that holds a `.braid`
+    /// directory, or, inside a workspace, its `.braid` file, which names
+    /// the repository).
     #[arg(long, global = true, value_name = "DIR")]
     repo: Option<PathBuf>,
 
@@ -113,6 +115,7 @@ enum Command {
         action: work::WorkspaceAction,
     },
     /// Show how the workspace differs from its base and its branch.
+    #[command(long_about = work::STATUS_HELP)]
     Status,
     /// Record the workspace's changes as a changeset on its base.
     Commit(work::CommitArgs),
@@ -881,6 +884,12 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_status_help_states_the_walk_limit() {
+        let limit = format!("more than {}", braid_wc::BEHIND_LIMIT);
+        assert!(work::STATUS_HELP.contains(&limit));
+    }
 
     #[test]
     fn time_formatting() {

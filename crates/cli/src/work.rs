@@ -17,8 +17,8 @@ use braid_engine::{Conflict, ConflictKind, HunkSide};
 use braid_format::{ChangeOp, EntryKind, ObjectId};
 use braid_repo::{Location, Repo};
 use braid_wc::{
-    ChangeRequest, CommitRequest, Expect, Identity, LandReport, Landed, Placed, RebaseProgress,
-    UpdateReport, Updated, Workspace,
+    BEHIND_LIMIT, Blocker, ChangeRequest, CommitRequest, Expect, Identity, LandReport, Landed,
+    Placed, RebaseProgress, UpdateReport, Updated, Workspace,
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -67,6 +67,47 @@ change create --land prints it as \"land\", without base and updated_paths.
 Ids in JSON are full; text output shows their first 12 hex digits."
     };
 }
+
+/// The long help of `status`.
+pub(crate) const STATUS_HELP: &str = "Show how the workspace differs from its base and its branch.
+
+With --json, status prints one object:
+
+  workspace        the workspace's name
+  path             its directory
+  branch           the branch it lands on and updates from
+  base             the changeset its working copy is at, or null
+  head             the branch's head, or null when the branch does not exist
+  behind           whether the branch has changesets the workspace does not
+  behind_by        how many: the changesets from the branch's head down to
+                   the one the workspace's own start from, along first
+                   parents; null when there are more than 5000
+  unlanded         the workspace's own changesets that the branch does not
+                   have, oldest first; while a rebase is in progress, also
+                   the changeset being rebased and those waiting after it
+  clean            whether no change would be committed
+  changes          what a commit would record, by path: kind (added,
+                   modified, deleted or typechange), op, and blob and size
+  added, modified, deleted, typechanged
+                   the paths of changes, by kind
+  needs_track      new files the secrets guard holds back until `braid
+                   track`: names like .env*, *.pem or id_*, or files larger
+                   than 1 MiB
+  ready_to_commit  whether `braid commit` would record a changeset now:
+                   there are changes, or a rebase to finish, and nothing
+                   blocks it
+  blocking         why `braid commit` would refuse, each {reason, path,
+                   message}: markers (conflict markers remain in the file),
+                   unresolved (a conflict that is not about content, not
+                   marked resolved with `braid resolve`), both with the
+                   conflict's kind, or needs_track; commit refuses with the
+                   same list, unless --force
+  rebase           null, or the rebase in progress: change (the changeset
+                   being rebased), onto, pending (those waiting after it),
+                   and conflicts, each {path, kind, markers, markers_remain,
+                   resolved}
+
+Ids in JSON are full; text output shows their first 12 hex digits.";
 
 /// The long help of `land`.
 pub(crate) const LAND_HELP: &str = concat!(
@@ -143,12 +184,12 @@ pub(crate) struct IdentityArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct CommitArgs {
-    /// The message (while a rebase is in progress, the rebased changeset's
-    /// message by default).
+    /// The message. While a rebase is in progress it may be left out, and
+    /// the rebased changeset's own is kept; one given replaces it.
     #[arg(short, long)]
     message: Option<String>,
     /// Commit even if conflict markers remain or conflicts are not marked
-    /// resolved.
+    /// resolved; new files waiting for `braid track` stay out.
     #[arg(long)]
     force: bool,
     #[command(flatten)]
@@ -399,6 +440,8 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
             "branch": state.branch,
             "base": hex(state.base),
             "head": hex(report.head),
+            "behind": report.behind(),
+            "behind_by": report.behind_by,
             "clean": status.is_clean(),
             "unlanded": report.unlanded.iter().map(ObjectId::to_hex).collect::<Vec<_>>(),
             "changes": status.changes.iter().map(|change| {
@@ -414,6 +457,8 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
             "deleted": by_kind(braid_wc::ChangeKind::Deleted),
             "typechanged": by_kind(braid_wc::ChangeKind::TypeChanged),
             "needs_track": status.needs_track.iter().map(|p| show(p)).collect::<Vec<_>>(),
+            "ready_to_commit": report.ready_to_commit(),
+            "blocking": report.blocking.iter().map(blocker_json).collect::<Vec<_>>(),
             "rebase": rebase,
         }))?;
         return Ok(ExitCode::SUCCESS);
@@ -433,10 +478,15 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
             count(report.unlanded.len(), "changeset"),
             state.branch
         )?;
-    } else if report.head.is_some() && report.head != state.base {
+    }
+    if report.behind() {
+        let ahead = match report.behind_by {
+            Some(n) => count(n, "changeset"),
+            None => format!("more than {BEHIND_LIMIT} changesets"),
+        };
         writeln!(
             out,
-            "{} has moved on to {}: run `braid update`",
+            "{} is {ahead} ahead, at {}: run `braid update`",
             state.branch,
             short(report.head)
         )?;
@@ -478,7 +528,29 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
             writeln!(out, "  {}", show(path))?;
         }
     }
+    if !report.blocking.is_empty() {
+        writeln!(out, "Not ready to commit:")?;
+        for blocker in &report.blocking {
+            writeln!(out, "  - {blocker}")?;
+        }
+    } else if report.ready_to_commit() {
+        writeln!(out, "Ready to commit.")?;
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// One reason a commit would be refused, as data: what it is, the path,
+/// the kind of conflict it comes from, and what to do.
+fn blocker_json(blocker: &Blocker) -> Value {
+    let mut value = json!({
+        "reason": blocker.code(),
+        "path": show(blocker.path()),
+        "message": blocker.to_string(),
+    });
+    if let Some(kind) = blocker.conflict() {
+        value["kind"] = Value::String(kind.to_owned());
+    }
+    value
 }
 
 fn progress_json(progress: &RebaseProgress) -> Value {
@@ -510,6 +582,7 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
         print_json(&json!({
             "changeset": hex(outcome.changeset),
             "changes": outcome.changes,
+            "message_replaced": outcome.message_replaced,
             "rebase": progress_json(&outcome.rebase),
         }))?;
     } else {
@@ -520,6 +593,9 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
                 count(outcome.changes, "path")
             ),
             None => println!("Nothing left to record for this changeset"),
+        }
+        if outcome.message_replaced {
+            println!("The message given replaces the rebased changeset's own.");
         }
         match &outcome.rebase {
             RebaseProgress::None => {}

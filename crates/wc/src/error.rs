@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use braid_format::ObjectId;
 
+use crate::blocker::Blocker;
 use crate::paths::show;
 
 /// Why a workspace operation failed.
@@ -141,13 +142,11 @@ pub enum Error {
         reason: &'static str,
     },
 
-    /// Conflict markers remain in files with content conflicts.
-    #[error("conflict markers remain in {}; edit them out, or commit with --force", show_list(.0))]
-    MarkersRemain(Vec<Vec<u8>>),
-
-    /// Conflicts that are not about content are not marked resolved.
-    #[error("unresolved conflicts at {}; run `braid resolve <path>` once each is settled, or commit with --force", show_list(.0))]
-    Unresolved(Vec<Vec<u8>>),
+    /// The working copy cannot be committed as it is: conflict markers
+    /// remain, conflicts are not marked resolved, or new files wait for
+    /// `braid track`. Every reason is listed, as `status` lists them.
+    #[error("cannot commit yet:\n{}\nSettle these first, or commit anyway with --force: files waiting for `braid track` stay out.", reasons(.0))]
+    Blocked(Vec<Blocker>),
 
     /// There is nothing to commit.
     #[error("nothing to commit")]
@@ -224,14 +223,20 @@ impl Error {
     }
 }
 
-fn show_list(paths: &[Vec<u8>]) -> String {
-    let mut shown: Vec<String> = paths
+/// How many reasons a refusal lists, at most.
+const REASONS_SHOWN: usize = 20;
+
+fn reasons(blockers: &[Blocker]) -> String {
+    let mut shown: Vec<String> = blockers
         .iter()
-        .take(5)
-        .map(|p| format!("{:?}", show(p)))
+        .take(REASONS_SHOWN)
+        .map(|blocker| format!("  - {blocker}"))
         .collect();
-    if paths.len() > 5 {
-        shown.push(format!("and {} more", paths.len() - 5));
+    if blockers.len() > REASONS_SHOWN {
+        shown.push(format!(
+            "  - and {} more: see `braid status`",
+            blockers.len() - REASONS_SHOWN
+        ));
     }
-    shown.join(", ")
+    shown.join("\n")
 }

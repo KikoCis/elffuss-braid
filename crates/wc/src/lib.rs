@@ -45,10 +45,13 @@
 //!
 //! New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are
 //! larger than 1 MiB are not committed until [`Workspace::track`] marks
-//! them.
+//! them: [`Workspace::commit`] refuses while they wait, listing them with
+//! the other reasons it has (see [`Blocker`]), unless it is forced, and then
+//! leaves them out.
 
 #![forbid(unsafe_code)]
 
+mod blocker;
 mod cache;
 mod change;
 mod checkout;
@@ -66,6 +69,7 @@ mod status;
 mod tree;
 mod workspace;
 
+pub use blocker::Blocker;
 pub use change::{ChangeRequest, Expect, create_change, land_change};
 pub use error::Error;
 pub use fsprobe::FileSystem;
@@ -74,6 +78,6 @@ pub use paths::workspace_path;
 pub use state::{Checkout, Rebase, RecordedConflict, State};
 pub use status::{ChangeKind, GUARD_SIZE, PathChange, Status, is_guarded};
 pub use workspace::{
-    CommitOutcome, CommitRequest, LandReport, Landed, Placed, RebaseProgress, StatusReport,
-    UpdateReport, Updated, Workspace,
+    BEHIND_LIMIT, CommitOutcome, CommitRequest, LandReport, Landed, Placed, RebaseProgress,
+    StatusReport, UpdateReport, Updated, Workspace,
 };

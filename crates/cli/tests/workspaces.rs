@@ -175,9 +175,18 @@ fn disjoint_workspaces_land_in_either_order() {
         let (first, second) = if a_first { (&a, &b) } else { (&b, &a) };
         let landed = json(first, &["land"]);
         assert_eq!(landed["outcome"], "fast-forward");
+        let before = status(second);
+        assert_eq!(before["behind"], true);
+        assert_eq!(before["behind_by"], 1);
+        assert_eq!(before["unlanded"].as_array().unwrap().len(), 1);
         let landed = json(second, &["land"]);
         assert_eq!(landed["outcome"], "rebased");
         assert_eq!(landed["head_before"], json(first, &["status"])["base"]);
+        // Now the first one is behind, by the second's change.
+        let behind = status(first);
+        assert_eq!(behind["behind"], true);
+        assert_eq!(behind["behind_by"], 1);
+        assert_eq!(behind["unlanded"], serde_json::json!([]));
 
         // Both changes are on main, once each, on a linear history.
         let log = history(&repo);
@@ -220,7 +229,8 @@ fn same_lines_conflict_then_resolve() {
     write(&a, "shared.txt", "one\nTWO from a\nthree\n");
     write(&b, "shared.txt", "one\nTWO from b\nthree\n");
     json(&a, &["commit", "-m", "a's two"]);
-    json(&b, &["commit", "-m", "b's two"]);
+    let b_change = json(&b, &["commit", "-m", "b's two"]);
+    assert_eq!(b_change["message_replaced"], false);
     json(&a, &["land"]);
     let main_before = repo.main();
 
@@ -247,18 +257,35 @@ fn same_lines_conflict_then_resolve() {
         merged.contains("TWO from a\n=======\nTWO from b\n"),
         "{merged}"
     );
+    assert_eq!(updated["next"], "braid commit");
+    assert_eq!(updated["updated_paths"], serde_json::json!(["shared.txt"]));
     let now = status(&b);
     assert_eq!(now["rebase"]["conflicts"][0]["markers_remain"], true);
     assert_eq!(now["base"].as_str(), main_before.as_deref());
+    // The changeset being rebased has not landed yet.
+    assert_eq!(now["unlanded"], serde_json::json!([b_change["changeset"]]));
+    assert_eq!(now["behind"], false);
+    assert_eq!(now["behind_by"], 0);
+    // Nor can it be committed while the markers are there: status and
+    // commit give the same reason.
+    assert_eq!(now["ready_to_commit"], false);
+    assert_eq!(now["blocking"][0]["reason"], "markers");
+    assert_eq!(now["blocking"][0]["path"], "shared.txt");
+    assert_eq!(now["blocking"][0]["kind"], "CONTENT");
+    let reason = now["blocking"][0]["message"].as_str().unwrap();
+    let refused = fails(&b, &["commit", "-m", "resolved"]);
+    assert!(refused.contains("conflict markers remain"), "{refused}");
+    assert!(refused.contains(reason), "{refused}");
     // Landing waits for the rebase.
     assert!(fails(&b, &["land"]).contains("rebase is in progress"));
 
-    // Committing with the markers still there is refused.
-    let refused = fails(&b, &["commit", "-m", "resolved"]);
-    assert!(refused.contains("conflict markers remain"), "{refused}");
-
     write(&b, "shared.txt", "one\nTWO from a and b\nthree\n");
+    let now = status(&b);
+    assert_eq!(now["ready_to_commit"], true);
+    assert_eq!(now["blocking"], serde_json::json!([]));
+    // A message given replaces the rebased changeset's own.
     let committed = json(&b, &["commit", "-m", "both twos"]);
+    assert_eq!(committed["message_replaced"], true);
     assert_eq!(committed["rebase"]["outcome"], "finished");
     let landed = json(&b, &["land"]);
     assert_eq!(landed["outcome"], "fast-forward");
@@ -268,6 +295,7 @@ fn same_lines_conflict_then_resolve() {
     let log = history(&repo);
     assert_eq!(log[0]["parents"][0].as_str(), main_before.as_deref());
     assert!(rebased_from(&log[0]).is_some());
+    assert_eq!(log[0]["message"], "both twos");
     assert_eq!(read(&b, "shared.txt"), "one\nTWO from a and b\nthree\n");
     assert!(repo.fsck_is_clean());
 }
@@ -336,15 +364,28 @@ fn the_secrets_guard() {
     write(&ws, "keys/id_ed25519", "private\n");
     std::fs::write(ws.join("big.bin"), vec![7u8; (1 << 20) + 1]).unwrap();
     write(&ws, "notes.txt", "fine\n");
+    let guarded = [".env", "big.bin", "keys/id_ed25519", "keys/server.pem"];
 
     let now = status(&ws);
     assert_eq!(now["added"], serde_json::json!(["notes.txt"]));
-    assert_eq!(
-        now["needs_track"],
-        serde_json::json!([".env", "big.bin", "keys/id_ed25519", "keys/server.pem"])
-    );
-    // Only the ordinary file is committed.
-    let committed = json(&ws, &["commit", "-m", "notes"]);
+    assert_eq!(now["needs_track"], serde_json::json!(guarded));
+    // They stop a commit of everything, and status says so first.
+    assert_eq!(now["ready_to_commit"], false);
+    let blocking: Vec<(&str, &str)> = now["blocking"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| (b["reason"].as_str().unwrap(), b["path"].as_str().unwrap()))
+        .collect();
+    let expected: Vec<(&str, &str)> = guarded.iter().map(|p| ("needs_track", *p)).collect();
+    assert_eq!(blocking, expected);
+    let refused = fails(&ws, &["commit", "-m", "notes"]);
+    for path in guarded {
+        assert!(refused.contains(path), "{refused}");
+    }
+    assert!(refused.contains("braid track"), "{refused}");
+    // The ordinary file alone is committed.
+    let committed = json(&ws, &["commit", "-m", "notes", "notes.txt"]);
     assert_eq!(committed["changes"], 1);
     let show = json(
         &repo.root,
@@ -354,7 +395,7 @@ fn the_secrets_guard() {
     // Guarded files are not uncommitted changes: landing goes ahead.
     json(&ws, &["land"]);
 
-    // Marked, they are committed.
+    // Marked, they are committed; with --force, the big file stays out.
     json(&ws, &["track", ".env", "keys"]);
     let now = status(&ws);
     assert_eq!(now["needs_track"], serde_json::json!(["big.bin"]));
@@ -362,11 +403,19 @@ fn the_secrets_guard() {
         now["added"],
         serde_json::json!([".env", "keys/id_ed25519", "keys/server.pem"])
     );
-    let committed = json(&ws, &["commit", "-m", "keys"]);
+    assert_eq!(now["blocking"][0]["path"], "big.bin");
+    let committed = json(&ws, &["commit", "-m", "keys", "--force"]);
     assert_eq!(committed["changes"], 3);
-    assert_eq!(status(&ws)["needs_track"], serde_json::json!(["big.bin"]));
+    let now = status(&ws);
+    assert_eq!(now["needs_track"], serde_json::json!(["big.bin"]));
+    assert_eq!(now["ready_to_commit"], false);
     // Nothing else to commit while only guarded files remain.
-    assert!(fails(&ws, &["commit", "-m", "nothing"]).contains("nothing to commit"));
+    assert!(fails(&ws, &["commit", "-m", "nothing"]).contains("big.bin"));
+    assert!(fails(&ws, &["commit", "-m", "nothing", "--force"]).contains("nothing to commit"));
+    json(&ws, &["track", "big.bin"]);
+    let now = status(&ws);
+    assert_eq!(now["ready_to_commit"], true);
+    assert_eq!(now["blocking"], serde_json::json!([]));
 }
 
 #[test]
@@ -841,10 +890,18 @@ fn a_conflict_that_is_not_about_content_needs_resolve() {
     assert_eq!(updated["conflicts"][0]["kind"], "MODIFY_DELETE");
     // The head's version stays: deleted.
     assert!(!b.join("gone.txt").exists());
+    let now = status(&b);
+    assert_eq!(now["blocking"][0]["reason"], "unresolved");
+    assert_eq!(now["blocking"][0]["kind"], "MODIFY_DELETE");
+    assert_eq!(now["ready_to_commit"], false);
     let refused = fails(&b, &["commit", "-m", "x"]);
     assert!(refused.contains("braid resolve"), "{refused}");
     let resolved = json(&b, &["resolve", "gone.txt"]);
     assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    // Nothing to record, but a rebase to finish: commit can go ahead.
+    let now = status(&b);
+    assert_eq!(now["clean"], true);
+    assert_eq!(now["ready_to_commit"], true);
     // Keeping the deletion leaves nothing of the change: the rebase ends
     // without a changeset.
     let committed = json(&b, &["commit"]);

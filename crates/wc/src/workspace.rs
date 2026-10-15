@@ -20,6 +20,7 @@ use braid_format::{Change, ChangeOp, Kind, ObjectId, Objects, Signature};
 use braid_repo::{DIR, Repo, WORKSPACES_DIR, WorkspaceLink};
 use braid_store::{RefUpdate, Store, TransactError};
 
+use crate::blocker::{Blocker, blockers};
 use crate::cache::Cache;
 use crate::checkout::{self, Mode, Plan};
 use crate::error::Error;
@@ -43,6 +44,10 @@ pub struct Workspace<'r> {
     state_dir: PathBuf,
 }
 
+/// How far `status` walks the branch's history to count how far ahead of
+/// the workspace it is.
+pub const BEHIND_LIMIT: usize = 5000;
+
 /// What `status` reports.
 #[derive(Clone, Debug)]
 pub struct StatusReport {
@@ -53,11 +58,34 @@ pub struct StatusReport {
     /// The head of the workspace's branch, if the branch exists.
     pub head: Option<ObjectId>,
     /// The workspace's own changesets that the branch does not have yet,
-    /// oldest first.
+    /// oldest first. While a rebase is in progress they include the
+    /// changeset being rebased and those waiting after it, by the ids they
+    /// had before the rebase: none of them has landed.
     pub unlanded: Vec<ObjectId>,
+    /// How many changesets the branch's head is ahead of the workspace:
+    /// those from the head down to the changeset the workspace's own start
+    /// from, along first parents. `None` when there are more than
+    /// [`BEHIND_LIMIT`].
+    pub behind_by: Option<usize>,
     /// For a rebase in progress: the conflicts, each with whether conflict
     /// markers remain in its file.
     pub conflicts: Vec<(RecordedConflict, bool)>,
+    /// What stops [`Workspace::commit`] from recording the working copy as
+    /// it is: the reasons it refuses with.
+    pub blocking: Vec<Blocker>,
+}
+
+impl StatusReport {
+    /// Whether the branch has changesets that the workspace does not.
+    pub fn behind(&self) -> bool {
+        self.behind_by != Some(0)
+    }
+
+    /// Whether [`Workspace::commit`] would record a changeset now: there is
+    /// something to commit, or a rebase to finish, and nothing blocks it.
+    pub fn ready_to_commit(&self) -> bool {
+        self.blocking.is_empty() && (!self.status.is_clean() || self.state.rebase.is_some())
+    }
 }
 
 /// What `commit` asks for.
@@ -78,7 +106,7 @@ pub struct CommitRequest {
     /// the rebased changeset's own agent stays, if it names one.
     pub agent: String,
     /// Commit even if conflict markers remain or conflicts are not marked
-    /// resolved.
+    /// resolved; new files waiting for `braid track` stay out.
     pub force: bool,
 }
 
@@ -109,6 +137,9 @@ pub struct CommitOutcome {
     pub changeset: Option<ObjectId>,
     /// How many paths it changed.
     pub changes: usize,
+    /// Whether it finished a rebase with the message given instead of the
+    /// rebased changeset's own.
+    pub message_replaced: bool,
     /// Where the rebase in progress, if any, stands now.
     pub rebase: RebaseProgress,
 }
@@ -618,55 +649,70 @@ impl<'r> Workspace<'r> {
         let status = self.scan_status(&root, &state)?;
         let store = self.store();
         let head = store.refs()?.get(&state.branch);
-        let unlanded = find_stack(store, head, state.base, state.upstream)?;
-        let mut conflicts = Vec::new();
+        let mut unlanded = find_stack(store, head, state.base, state.upstream)?;
+        // The changeset the workspace's own start from.
+        let fork = match unlanded.first() {
+            Some(&oldest) => read_changeset(store, oldest)?.parents.first().copied(),
+            None => state.base,
+        };
+        let behind_by = distance(store, head, fork, BEHIND_LIMIT)?;
         if let Some(rebase) = &state.rebase {
-            for conflict in &rebase.conflicts {
-                let remain = conflict.markers && markers_remain(&root, &conflict.path)?;
-                conflicts.push((conflict.clone(), remain));
-            }
+            unlanded.push(rebase.change);
+            unlanded.extend(&rebase.pending);
         }
+        let conflicts = conflict_states(&root, state.rebase.as_ref())?;
+        let blocking = blockers(&conflicts, &status.needs_track, |_| true);
         Ok(StatusReport {
             state,
             status,
             head,
             unlanded,
+            behind_by,
             conflicts,
+            blocking,
         })
     }
 
     /// Records the working copy as a changeset on the base, and makes it
     /// the new base. There is no staging area: every change counts, or
-    /// every change at or below `paths`, except new files that the secrets
-    /// guard holds back until `braid track` marks them.
+    /// every change at or below `paths`.
     ///
-    /// While a rebase is in progress the changeset is the resolution: it is
-    /// refused while conflict markers remain in files with content
-    /// conflicts or other conflicts are not marked resolved (unless
-    /// `force`), it takes no paths, and once it is made, the changesets
-    /// that were waiting are rebased onto it.
+    /// It is refused with [`Error::Blocked`], which lists every reason as
+    /// [`StatusReport::blocking`] does, while new files at or below `paths`
+    /// wait for `braid track`, and, during a rebase, while conflict markers
+    /// remain in files with content conflicts or other conflicts are not
+    /// marked resolved. With `force` it goes ahead, and the files waiting
+    /// for `braid track` stay out.
+    ///
+    /// While a rebase is in progress the changeset is the resolution: it
+    /// takes no paths, keeps the rebased changeset's author, extra fields
+    /// and message unless one is given, and once it is made, the
+    /// changesets that were waiting are rebased onto it.
     pub fn commit(&self, request: &CommitRequest) -> Result<CommitOutcome, Error> {
         let (_lock, mut state, root) = self.begin()?;
         let store = self.store();
         let status = self.scan_status(&root, &state)?;
-        let original = match &state.rebase {
-            Some(rebase) => {
-                if !request.paths.is_empty() {
-                    return Err(Error::PathsDuringRebase);
-                }
-                if !request.force {
-                    check_resolved(&root, rebase)?;
-                }
-                Some(read_changeset(store, rebase.change)?)
+        if state.rebase.is_some() && !request.paths.is_empty() {
+            return Err(Error::PathsDuringRebase);
+        }
+        let in_scope = |path: &[u8]| {
+            request.paths.is_empty() || request.paths.iter().any(|p| is_within(path, p))
+        };
+        if !request.force {
+            let conflicts = conflict_states(&root, state.rebase.as_ref())?;
+            let blocking = blockers(&conflicts, &status.needs_track, in_scope);
+            if !blocking.is_empty() {
+                return Err(Error::Blocked(blocking));
             }
+        }
+        let original = match &state.rebase {
+            Some(rebase) => Some(read_changeset(store, rebase.change)?),
             None => None,
         };
         let selected: Vec<&status::PathChange> = status
             .changes
             .iter()
-            .filter(|change| {
-                request.paths.is_empty() || request.paths.iter().any(|p| is_within(&change.path, p))
-            })
+            .filter(|change| in_scope(&change.path))
             .collect();
 
         if selected.is_empty() {
@@ -686,6 +732,7 @@ impl<'r> Workspace<'r> {
             return Ok(CommitOutcome {
                 changeset: None,
                 changes: 0,
+                message_replaced: false,
                 rebase: progress,
             });
         }
@@ -695,6 +742,7 @@ impl<'r> Workspace<'r> {
             (None, Some(original)) => original.message.clone(),
             (None, None) => return Err(Error::NoMessage),
         };
+        let message_replaced = request.message.is_some() && original.is_some();
         let mut changes = Vec::with_capacity(selected.len());
         for change in &selected {
             let op = match &change.op {
@@ -750,6 +798,7 @@ impl<'r> Workspace<'r> {
         Ok(CommitOutcome {
             changeset: Some(id),
             changes: count,
+            message_replaced,
             rebase: progress,
         })
     }
@@ -1222,27 +1271,42 @@ fn clear(dir: &Path) {
     }
 }
 
-/// Fails unless every conflict of the rebase is settled: no markers left in
-/// the files that had them, and every other conflict marked resolved.
-fn check_resolved(root: &Root, rebase: &Rebase) -> Result<(), Error> {
-    let mut with_markers = Vec::new();
-    let mut unresolved = Vec::new();
-    for conflict in &rebase.conflicts {
-        if conflict.markers {
-            if markers_remain(root, &conflict.path)? {
-                with_markers.push(conflict.path.clone());
-            }
-        } else if !conflict.resolved {
-            unresolved.push(conflict.path.clone());
+/// The conflicts of the rebase in progress, if any, each with whether
+/// conflict markers remain in its file.
+fn conflict_states(
+    root: &Root,
+    rebase: Option<&Rebase>,
+) -> Result<Vec<(RecordedConflict, bool)>, Error> {
+    let mut states = Vec::new();
+    for conflict in rebase.map_or(&[][..], |rebase| &rebase.conflicts) {
+        let remain = conflict.markers && markers_remain(root, &conflict.path)?;
+        states.push((conflict.clone(), remain));
+    }
+    Ok(states)
+}
+
+/// How many changesets lie on the first-parent chain of `head` above
+/// `fork`: 0 when they are the same, the whole chain when `fork` is not on
+/// it, and `None` past `limit`.
+fn distance<O: Objects>(
+    objects: &O,
+    head: Option<ObjectId>,
+    fork: Option<ObjectId>,
+    limit: usize,
+) -> Result<Option<usize>, Error> {
+    let mut count = 0;
+    let mut current = head;
+    while current != fork {
+        let Some(id) = current else {
+            break;
+        };
+        if count == limit {
+            return Ok(None);
         }
+        count += 1;
+        current = read_changeset(objects, id)?.parents.first().copied();
     }
-    if !with_markers.is_empty() {
-        return Err(Error::MarkersRemain(with_markers));
-    }
-    if !unresolved.is_empty() {
-        return Err(Error::Unresolved(unresolved));
-    }
-    Ok(())
+    Ok(Some(count))
 }
 
 /// Whether the regular file at `path` still holds conflict markers. A file
@@ -1349,10 +1413,55 @@ pub(crate) fn find_stack<O: Objects>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use braid_format::Kind;
+    use braid_format::{Kind, MemoryObjects};
 
     fn id(n: u8) -> ObjectId {
         ObjectId::hash(Kind::Changeset, &[n])
+    }
+
+    #[test]
+    fn distances_along_first_parents() {
+        let objects = MemoryObjects::new();
+        let signature = Signature {
+            name: b"Ada".to_vec(),
+            email: b"ada@example.org".to_vec(),
+            seconds: 1_700_000_000,
+            offset_minutes: 0,
+        };
+        let mut chain = Vec::new();
+        for n in 0..10u8 {
+            let blob = objects.put(Kind::Blob, &[n]).unwrap();
+            let change = Change {
+                path: b"f".to_vec(),
+                op: ChangeOp::File { blob, size: 1 },
+            };
+            let id = braid_engine::commit(
+                &objects,
+                chain.last().copied().into_iter().collect(),
+                vec![change],
+                signature.clone(),
+                signature.clone(),
+                vec![n],
+                Vec::new(),
+            )
+            .unwrap();
+            chain.push(id);
+        }
+        let head = Some(chain[9]);
+        let walk = |fork, limit| distance(&objects, head, fork, limit).unwrap();
+        assert_eq!(walk(Some(chain[9]), 100), Some(0));
+        assert_eq!(walk(Some(chain[6]), 100), Some(3));
+        // Without a fork, or with one off the chain, the whole chain counts.
+        assert_eq!(walk(None, 100), Some(10));
+        assert_eq!(walk(Some(id(0)), 100), Some(10));
+        // The walk stops at the limit.
+        assert_eq!(walk(Some(chain[6]), 3), Some(3));
+        assert_eq!(walk(Some(chain[6]), 2), None);
+        // A branch that does not exist is not ahead of anything.
+        assert_eq!(
+            distance(&objects, None, Some(chain[0]), 5).unwrap(),
+            Some(0)
+        );
     }
 
     #[test]
