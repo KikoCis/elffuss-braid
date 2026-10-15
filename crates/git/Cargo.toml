@@ -1,0 +1,29 @@
+[package]
+name = "elffuss-braid-git"
+description = "Git bridge of elffuss-braid: bit-for-bit import and export of git history through gitoxide."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lib]
+name = "braid_git"
+
+[dependencies]
+braid-format.workspace = true
+# Local repositories only: no network, no TLS. `sha256` is there so that a
+# SHA-256 repository opens and can be refused with a clear error.
+gix = { version = "0.89", default-features = false, features = [
+    "sha1",
+    "sha256",
+    "pack-cache-lru-dynamic",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
