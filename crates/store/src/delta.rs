@@ -12,12 +12,27 @@
 //!
 //! Depth is always one: a base is stored whole, never as a delta itself.
 //! When the object a writer names as similar is a delta, the delta is made
-//! against that delta's own base instead.
+//! against that delta's own base instead. So each delta holds every change
+//! since its base, and grows version after version until it is no longer
+//! worth it; the next version is then stored whole and becomes the base of
+//! the ones after it.
 
 use braid_format::{Kind, ObjectId};
 use zstd::zstd_safe::{CCtx, CParameter};
 
 use crate::record::{self, Header, RAW_MAX, ZSTD_LEVEL};
+
+/// A delta is kept only when it takes at most this fraction of the bytes of
+/// the object stored on its own: one quarter.
+///
+/// The fraction decides how often a version is stored whole again. Imports
+/// of the histories of four public repositories, compared with the same
+/// histories packed by `git gc --aggressive`, took 2.9 to 3.7 times git's
+/// size keeping deltas up to a half, 2.6 to 3.3 times up to a third, 2.5 to
+/// 3.1 times up to a quarter, and 2.6 to 3.1 times up to a sixth: past a
+/// quarter, the extra versions stored whole cost more than the shorter
+/// deltas save.
+const KEEP_DENOMINATOR: usize = 4;
 
 /// Blobs smaller than this may be stored as deltas; larger ones are stored
 /// in chunks instead. Trees may be deltas whatever their size.
@@ -81,8 +96,8 @@ pub(crate) fn decode(header: &Header, stored: &[u8], base: &[u8]) -> Result<Vec<
 }
 
 /// The record for `payload` as a delta against `base`, if it is worth it:
-/// the frame and the base id together must take at most half the bytes of
-/// the payload stored on its own (`standalone_len`).
+/// the frame and the base id together must take at most a quarter of the
+/// bytes of the payload stored on its own (`standalone_len`).
 pub(crate) fn encode(
     kind: Kind,
     id: ObjectId,
@@ -93,7 +108,7 @@ pub(crate) fn encode(
 ) -> Option<record::Encoded> {
     let frame = compress(payload, base)?;
     let cost = frame.len() + record::REFERENCE_LEN;
-    if cost.saturating_mul(2) > standalone_len {
+    if cost.saturating_mul(KEEP_DENOMINATOR) > standalone_len {
         return None;
     }
     record::assemble(

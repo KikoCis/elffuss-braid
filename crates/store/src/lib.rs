@@ -128,8 +128,8 @@
 //! raw payload of the base as a reference prefix, a window that holds the
 //! base and the object together (at most 2²⁷ bytes), and long-distance
 //! matching. The record names the base in its header. The delta is kept
-//! only when it and the base id take at most half the bytes of the object
-//! stored on its own; otherwise the object is stored whole. Depth is always
+//! only when it and the base id take at most a quarter of the bytes of the
+//! object stored on its own; otherwise the object is stored whole. Depth is always
 //! one: a base is stored whole, and when the similar object is a delta, the
 //! new one is made against that delta's base instead. Reading a delta reads
 //! its base and applies one delta, never a chain; each handle keeps the
@@ -507,7 +507,7 @@ impl Objects for Store {
 
     /// Appends an object like [`Objects::put`], as a delta against
     /// `similar` (or against its base, if it is a delta itself) when it is a
-    /// blob under 4 MiB or a tree and the delta takes at most half the
+    /// blob under 4 MiB or a tree and the delta takes at most a quarter of the
     /// bytes. A hint naming an object that is missing or cannot serve as a
     /// base is ignored.
     fn put_similar(

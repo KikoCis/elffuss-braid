@@ -152,7 +152,7 @@ fn an_imported_history_keeps_versions_as_deltas() {
     assert_eq!(whole_report.delta_records, 0);
     // Eleven later versions of the file, and of most tree nodes on the path
     // to the files that changed: a node may stay whole when a delta would
-    // not save half of it.
+    // not take a quarter of it or less.
     assert!(report.delta_records >= 11 * 2, "{report:?}");
     assert_eq!(report.objects, whole_report.objects);
     let stats = deltas.stats().unwrap();

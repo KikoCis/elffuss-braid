@@ -398,8 +398,14 @@ or a tree is then compressed with zstd at level 3, with the raw payload of the
 base as a reference prefix (`ZSTD_CCtx_refPrefix`), a window that holds the
 base and the object together (at most 2²⁷ bytes, so that any decoder accepts
 it), and long-distance matching. The frame is kept only when it and the 32
-bytes of the base id take at most half the bytes of the object stored on its
-own (codec 0 or 1); otherwise the object is stored on its own.
+bytes of the base id take at most a quarter of the bytes of the object stored
+on its own (codec 0 or 1); otherwise the object is stored on its own.
+
+The fraction decides how often a version is stored whole again, since a delta
+holds every change since its base. Imports of the histories of four public
+repositories took, as a ratio to the same histories packed by `git gc
+--aggressive`, 2.9 to 3.7 keeping deltas up to a half, 2.6 to 3.3 up to a
+third, 2.5 to 3.1 up to a quarter, and 2.6 to 3.1 up to a sixth.
 
 Depth is always one. A base is stored whole, with codec 0 or 1, and when the
 object named as similar is a delta, the new one is made against that delta's

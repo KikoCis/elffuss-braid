@@ -72,7 +72,7 @@ process dies, atomic rename, and ordered syncs.
   engine names the directory node a rebuilt one replaces, a workspace commit
   the file's previous blob, and the git import the first parent's blob or
   tree at the same path. A blob under 4 MiB or a tree is then stored as a zstd
-  frame against that object when this takes at most half the bytes. Deltas are
+  frame against that object when this takes at most a quarter of the bytes. Deltas are
   one level deep: a base is always stored whole, so a read applies at most one
   delta, never a chain. The price is size: each delta holds every change since
   its base, until a version is stored whole again.
