@@ -672,6 +672,121 @@ fn changesets_name_the_agent_that_made_them() {
     assert!(text.contains("  Ada (agent-b)  b's two"), "{text}");
 }
 
+/// Statuses by path, from the changes of `show --json` or `diff --json`.
+fn statuses(changes: &Value) -> Vec<(String, String)> {
+    changes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["path"].as_str().unwrap().to_owned(),
+                c["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(path, status)| (path.to_string(), status.to_string()))
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn show_and_diff_tell_added_modified_deleted_and_type_changes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    let seeded = seed(
+        &repo,
+        &[
+            ("dir/x", "x\n"),
+            ("edit.txt", "1\n"),
+            ("flip", "a file\n"),
+            ("gone.txt", "g\n"),
+            ("run.sh", "#!/bin/sh\n"),
+        ],
+    );
+    let ws = repo.workspace("ws");
+    write(&ws, "edit.txt", "2\n");
+    std::fs::remove_file(ws.join("gone.txt")).unwrap();
+    write(&ws, "new.txt", "n\n");
+    std::fs::set_permissions(ws.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_file(ws.join("flip")).unwrap();
+    std::os::unix::fs::symlink("edit.txt", ws.join("flip")).unwrap();
+    std::fs::remove_dir_all(ws.join("dir")).unwrap();
+    write(&ws, "dir", "now a file\n");
+    let committed = json(&ws, &["commit", "-m", "every kind"]);
+    let id = committed["changeset"].as_str().unwrap();
+
+    let expected = pairs(&[
+        ("dir", "A"),
+        ("dir/x", "D"),
+        ("edit.txt", "M"),
+        ("flip", "T"),
+        ("gone.txt", "D"),
+        ("new.txt", "A"),
+        ("run.sh", "M"),
+    ]);
+    let shown = json(&repo.root, &["show", id]);
+    assert_eq!(statuses(&shown["changes"]), expected);
+    // What each path held before is there too.
+    let edit = &shown["changes"][2];
+    assert_eq!(edit["op"], "file");
+    assert_eq!(edit["old"]["op"], "file");
+    assert_eq!(edit["old"]["size"], 2);
+    assert_ne!(edit["old"]["blob"], edit["blob"]);
+    assert_eq!(shown["changes"][0]["old"], Value::Null);
+    assert_eq!(shown["changes"][6]["op"], "executable");
+    // The text form is git's --name-status.
+    let text = String::from_utf8(braid(&repo.root, &["show", id]).stdout).unwrap();
+    let listed: Vec<&str> = text.lines().filter(|line| line.contains('\t')).collect();
+    assert_eq!(
+        listed,
+        [
+            "A\tdir",
+            "D\tdir/x",
+            "M\tedit.txt",
+            "T\tflip",
+            "D\tgone.txt",
+            "A\tnew.txt",
+            "M\trun.sh"
+        ]
+    );
+
+    // diff says the same between the two changesets, and the opposite the
+    // other way round.
+    let diffed = json(&repo.root, &["diff", &seeded[..10], id]);
+    assert_eq!(diffed["from"], seeded.as_str());
+    assert_eq!(diffed["to"], id);
+    assert_eq!(statuses(&diffed["changes"]), expected);
+    let back = json(&repo.root, &["diff", id, "main"]);
+    assert_eq!(
+        statuses(&back["changes"]),
+        pairs(&[
+            ("dir", "D"),
+            ("dir/x", "A"),
+            ("edit.txt", "M"),
+            ("flip", "T"),
+            ("gone.txt", "A"),
+            ("new.txt", "D"),
+            ("run.sh", "M"),
+        ])
+    );
+    let text = String::from_utf8(braid(&repo.root, &["diff", "main", id]).stdout).unwrap();
+    assert_eq!(text.lines().count(), 7);
+    assert!(text.starts_with("A\tdir\nD\tdir/x\n"), "{text}");
+    assert!(
+        json(&repo.root, &["diff", id, id])["changes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn removing_a_workspace() {
     let repo = Repo::new();

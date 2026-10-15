@@ -6,6 +6,7 @@
 mod sync;
 mod work;
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -96,11 +97,22 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
     },
-    /// Show one changeset: parents, root, signatures, message, changed paths.
+    /// Show one changeset: parents, root, signatures, agent, message, and
+    /// the files it changes against its first parent, as A, M, D or T.
     Show {
         /// A ref, a changeset id, or a short id (6 hex digits or more).
         #[arg(default_value = "main")]
         revision: String,
+    },
+    /// Show the files that differ between two changesets: A (added), M
+    /// (modified), D (deleted) or T (type changed), as `git diff
+    /// --name-status` does.
+    #[command(long_about = DIFF_HELP)]
+    Diff {
+        /// The changeset to compare from: a ref, an id, or a short id.
+        from: String,
+        /// The changeset to compare to: a ref, an id, or a short id.
+        to: String,
     },
     /// Import from and export to git repositories.
     Git {
@@ -238,6 +250,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Undo => undo(cli),
         Command::Log { revision, limit } => log(cli, revision, *limit),
         Command::Show { revision } => show(cli, revision),
+        Command::Diff { from, to } => diff(cli, from, to),
         Command::Git {
             action: GitAction::Import { path },
         } => git_import(cli, path),
@@ -712,14 +725,126 @@ fn change_json(change: &Change) -> Value {
     }
 }
 
+/// How a path changed, as `git diff --name-status` says it: `A` added, `M`
+/// modified (content or executable bit), `D` deleted, or `T` for a change
+/// between a regular file, a symlink and a gitlink. `old` is what was there
+/// before, if a file was.
+fn change_status(old: Option<&ChangeOp>, new: &ChangeOp) -> &'static str {
+    let class = |op: &ChangeOp| match op {
+        ChangeOp::File { .. } | ChangeOp::Executable { .. } => 0,
+        ChangeOp::Symlink { .. } => 1,
+        ChangeOp::Gitlink { .. } => 2,
+        ChangeOp::Delete => 3,
+    };
+    match (old, new) {
+        (_, ChangeOp::Delete) => "D",
+        (None, _) => "A",
+        (Some(old), new) if class(old) == class(new) => "M",
+        (Some(_), _) => "T",
+    }
+}
+
+/// What the tree `old` has at each path where the tree `new` differs from
+/// it: the change list of the diff back from `new` to `old`, one walk over
+/// the difference.
+fn old_entries(repo: &Repo, old: ObjectId, new: ObjectId) -> Result<HashMap<Vec<u8>, ChangeOp>> {
+    Ok(braid_engine::diff(repo.store(), new, old)?
+        .into_iter()
+        .filter(|change| !matches!(change.op, ChangeOp::Delete))
+        .map(|change| (change.path, change.op))
+        .collect())
+}
+
+/// A change as JSON, with its status and the file it replaced.
+fn change_with_status_json(change: &Change, old: Option<&ChangeOp>) -> Value {
+    let mut value = change_json(change);
+    value["status"] = Value::String(change_status(old, &change.op).to_owned());
+    value["old"] = match old {
+        Some(op) => {
+            let mut old = change_json(&Change {
+                path: change.path.clone(),
+                op: op.clone(),
+            });
+            if let Some(fields) = old.as_object_mut() {
+                fields.remove("path");
+            }
+            old
+        }
+        None => Value::Null,
+    };
+    value
+}
+
+/// Prints changes as `git diff --name-status` does: the status, a tab and
+/// the path.
+fn write_name_status(
+    out: &mut impl Write,
+    changes: &[Change],
+    olds: &HashMap<Vec<u8>, ChangeOp>,
+) -> io::Result<()> {
+    for change in changes {
+        let status = change_status(olds.get(&change.path), &change.op);
+        writeln!(out, "{status}\t{}", String::from_utf8_lossy(&change.path))?;
+    }
+    Ok(())
+}
+
+/// The long help of `diff`.
+const DIFF_HELP: &str = "Show the files that differ between two changesets, one line each: a
+status, a tab and the path, as `git diff --name-status` prints them. The
+status is A (added), M (modified: content or executable bit), D (deleted)
+or T (type changed: between a regular file, a symlink and a gitlink). A
+directory that became a file, or the other way round, is a D for every
+file it had and an A for every file it has.
+
+With --json, diff prints from and to, the two changesets' full ids, and
+changes: one per path, sorted by path bytes, with path, status, op (file,
+executable, symlink, gitlink or delete) with blob and size, and old, what
+the path held before, or null.";
+
+fn diff(cli: &Cli, from: &str, to: &str) -> Result<ExitCode> {
+    let repo = open_repo(cli)?;
+    let from = resolve_changeset(&repo, from)?;
+    let to = resolve_changeset(&repo, to)?;
+    let (from_root, to_root) = (
+        read_changeset(&repo, &from)?.root,
+        read_changeset(&repo, &to)?.root,
+    );
+    let changes = braid_engine::diff(repo.store(), from_root, to_root)?;
+    let olds = old_entries(&repo, from_root, to_root)?;
+    if cli.json {
+        print_json(&json!({
+            "from": from.to_hex(),
+            "to": to.to_hex(),
+            "changes": changes
+                .iter()
+                .map(|change| change_with_status_json(change, olds.get(&change.path)))
+                .collect::<Vec<_>>(),
+        }))?;
+    } else {
+        write_name_status(&mut io::stdout().lock(), &changes, &olds)?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn show(cli: &Cli, revision: &str) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
     let id = resolve_changeset(&repo, revision)?;
     let changeset = read_changeset(&repo, &id)?;
     let changes = read_changes(&repo, &changeset)?;
+    // The change list is against the first parent: what that has at each
+    // path tells added from modified.
+    let parent_root = match changeset.parents.first() {
+        Some(parent) => read_changeset(&repo, parent)?.root,
+        None => braid_engine::EMPTY_TREE,
+    };
+    let olds = old_entries(&repo, parent_root, changeset.root)?;
     if cli.json {
         let mut value = changeset_json(&id, &changeset);
-        value["changes"] = Value::Array(changes.iter().map(change_json).collect());
+        value["changes"] = changes
+            .iter()
+            .map(|change| change_with_status_json(change, olds.get(&change.path)))
+            .collect();
         print_json(&value)?;
         return Ok(ExitCode::SUCCESS);
     }
@@ -749,16 +874,7 @@ fn show(cli: &Cli, revision: &str) -> Result<ExitCode> {
         writeln!(out, "    {line}")?;
     }
     writeln!(out)?;
-    for change in &changes {
-        let op = match change.op {
-            ChangeOp::Delete => "delete",
-            ChangeOp::File { .. } => "file",
-            ChangeOp::Executable { .. } => "exec",
-            ChangeOp::Symlink { .. } => "link",
-            ChangeOp::Gitlink { .. } => "gitlink",
-        };
-        writeln!(out, "{op:<8} {}", String::from_utf8_lossy(&change.path))?;
-    }
+    write_name_status(&mut out, &changes, &olds)?;
     Ok(ExitCode::SUCCESS)
 }
 
