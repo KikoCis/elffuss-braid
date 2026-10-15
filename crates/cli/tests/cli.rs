@@ -162,6 +162,91 @@ fn repository_round_trip() {
     assert_eq!(fsck["objects"], 1);
 }
 
+/// Two blob contents whose ids start with the same six hex digits or more.
+fn blob_twins() -> (Vec<u8>, Vec<u8>) {
+    let mut seen = std::collections::HashMap::new();
+    for n in 0u64.. {
+        let content = format!("twin {n}\n").into_bytes();
+        let id = ObjectId::hash(Kind::Blob, &content);
+        let start = id.to_hex()[..6].to_owned();
+        if let Some(other) = seen.insert(start, content.clone()) {
+            return (other, content);
+        }
+    }
+    unreachable!("the search ends")
+}
+
+#[test]
+fn short_ids_and_an_ambiguous_one() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        braid()
+            .arg("init")
+            .arg(dir.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let (one, two) = blob_twins();
+    let files = [dir.path().join("one"), dir.path().join("two")];
+    std::fs::write(&files[0], &one).unwrap();
+    std::fs::write(&files[1], &two).unwrap();
+    let written = run_json(
+        braid_in(dir.path())
+            .args(["hash-object", "-w"])
+            .args(&files),
+    );
+    let ids: Vec<String> = (0..2)
+        .map(|i| written[i]["id"].as_str().unwrap().to_owned())
+        .collect();
+    let shared = ids[0]
+        .bytes()
+        .zip(ids[1].bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(shared >= 6);
+
+    // Six digits name both: an error that lists them, and nothing printed.
+    let out = braid_in(dir.path())
+        .args(["cat-object", &ids[0][..6]])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("ambiguous"), "{err}");
+    for id in &ids {
+        assert!(err.contains(&id[..12]), "{err}");
+    }
+
+    // One digit more names one of them, wherever a revision is taken.
+    let unique: Vec<&str> = ids.iter().map(|id| &id[..shared + 1]).collect();
+    let cat = braid_in(dir.path())
+        .args(["cat-object", unique[1]])
+        .output()
+        .unwrap();
+    assert_eq!(cat.stdout, two);
+    let cat = run_json(braid_in(dir.path()).args(["cat-object", unique[0]]));
+    assert_eq!(cat["id"], ids[0].as_str());
+    let set = run_json(braid_in(dir.path()).args(["ref", "set", "pinned", unique[0]]));
+    assert_eq!(set["updates"][0]["new"], ids[0].as_str());
+    // A ref spelled like a short id wins over it.
+    run_json(braid_in(dir.path()).args(["ref", "set", &ids[1][..6], unique[1]]));
+    let cat = braid_in(dir.path())
+        .args(["cat-object", &ids[1][..6]])
+        .output()
+        .unwrap();
+    assert_eq!(cat.stdout, two);
+    // A short id is no changeset: show says what it is.
+    let out = braid_in(dir.path())
+        .args(["show", unique[0]])
+        .output()
+        .unwrap();
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("is a blob, not a changeset"), "{err}");
+}
+
 #[test]
 fn commands_outside_a_repository_fail_clearly() {
     let dir = tempfile::tempdir().unwrap();

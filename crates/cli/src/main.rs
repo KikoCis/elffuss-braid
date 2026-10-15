@@ -65,7 +65,7 @@ enum Command {
     },
     /// Write an object's raw payload to standard output.
     CatObject {
-        /// Ref name or full object id.
+        /// A ref, an object id, or a short id (6 hex digits or more).
         revision: String,
     },
     /// List refs and the objects they point at.
@@ -84,7 +84,8 @@ enum Command {
     Undo,
     /// Show history, following first parents.
     Log {
-        /// Where to start: a ref name or a full changeset id.
+        /// Where to start: a ref, a changeset id, or a short id (6 hex
+        /// digits or more).
         #[arg(default_value = "main")]
         revision: String,
         /// How many changesets to show.
@@ -93,7 +94,7 @@ enum Command {
     },
     /// Show one changeset: parents, root, signatures, message, changed paths.
     Show {
-        /// A ref name or a full changeset id.
+        /// A ref, a changeset id, or a short id (6 hex digits or more).
         #[arg(default_value = "main")]
         revision: String,
     },
@@ -144,7 +145,8 @@ enum RefAction {
     Set {
         /// Ref name.
         name: String,
-        /// Ref name or full object id to point at.
+        /// What to point at: a ref, an object id, or a short id (6 hex
+        /// digits or more).
         target: String,
         /// Only move the ref if it currently points at this id ("none" if it
         /// must not exist yet).
@@ -573,6 +575,11 @@ fn fsck(cli: &Cli) -> Result<ExitCode> {
     })
 }
 
+/// A changeset named by a ref, its id or a short id.
+pub(crate) fn resolve_changeset(repo: &Repo, revision: &str) -> Result<ObjectId> {
+    Ok(repo.resolve_kind(revision, Kind::Changeset)?)
+}
+
 fn read_changeset(repo: &Repo, id: &ObjectId) -> Result<Changeset> {
     match repo.store().get(id)? {
         Some((Kind::Changeset, bytes)) => {
@@ -633,7 +640,7 @@ fn subject(message: &[u8]) -> String {
 
 fn log(cli: &Cli, revision: &str, limit: usize) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
-    let mut next = Some(repo.resolve(revision)?);
+    let mut next = Some(resolve_changeset(&repo, revision)?);
     let mut entries = Vec::new();
     while let Some(id) = next {
         if entries.len() == limit {
@@ -689,7 +696,7 @@ fn change_json(change: &Change) -> Value {
 
 fn show(cli: &Cli, revision: &str) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
-    let id = repo.resolve(revision)?;
+    let id = resolve_changeset(&repo, revision)?;
     let changeset = read_changeset(&repo, &id)?;
     let changes = read_changes(&repo, &changeset)?;
     if cli.json {

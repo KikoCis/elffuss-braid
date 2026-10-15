@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use braid_engine::{Conflict, ConflictKind, HunkSide};
-use braid_format::{ChangeOp, EntryKind, Kind, ObjectId, Objects};
+use braid_format::{ChangeOp, EntryKind, ObjectId};
 use braid_repo::{Location, Repo};
 use braid_wc::{
     ChangeRequest, CommitRequest, Expect, Identity, LandReport, Landed, RebaseProgress, Updated,
@@ -23,7 +23,7 @@ use braid_wc::{
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 
-use crate::{Cli, change_json, open_repo, print_json};
+use crate::{Cli, change_json, open_repo, print_json, resolve_changeset};
 
 /// Exit status of a command that stopped on conflicts.
 const CONFLICTS: u8 = 2;
@@ -37,8 +37,9 @@ pub(crate) enum WorkspaceAction {
         /// Its directory, which must not exist or be empty (default:
         /// ./<name>).
         path: Option<PathBuf>,
-        /// The changeset to start at: a ref or a full id (default: the head
-        /// of the tracked branch, or nothing if it does not exist yet).
+        /// The changeset to start at: a ref, an id or a short id (default:
+        /// the head of the tracked branch, or nothing if it does not exist
+        /// yet).
         #[arg(long, value_name = "REV")]
         at: Option<String>,
         /// The branch the workspace lands on and updates from.
@@ -100,8 +101,8 @@ pub(crate) enum ChangeAction {
 
 #[derive(Debug, Args)]
 pub(crate) struct CreateArgs {
-    /// The changeset to build on: a ref, a full id, or "none" for a first
-    /// changeset.
+    /// The changeset to build on: a ref, an id, a short id (6 hex digits or
+    /// more), or "none" for a first changeset.
     #[arg(long, value_name = "REV")]
     base: String,
     /// Set a file: PATH=@FILE takes the content of FILE, PATH=@- reads
@@ -203,15 +204,6 @@ fn hex(id: Option<ObjectId>) -> Value {
 
 fn short(id: Option<ObjectId>) -> String {
     id.map_or_else(|| "(none)".to_owned(), |id| id.short())
-}
-
-/// A changeset named by a ref or a full id.
-fn resolve_changeset(repo: &Repo, revision: &str) -> Result<ObjectId> {
-    let id = repo.resolve(revision)?;
-    match repo.store().stat(&id)? {
-        Some((Kind::Changeset, _)) => Ok(id),
-        _ => bail!("{revision} is not a changeset"),
-    }
 }
 
 pub(crate) fn workspace(cli: &Cli, action: &WorkspaceAction) -> Result<ExitCode> {

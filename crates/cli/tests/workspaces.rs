@@ -485,6 +485,63 @@ fn change_create_with_expectations() {
 }
 
 #[test]
+fn the_short_id_commit_prints_works_everywhere() {
+    let repo = Repo::new();
+    seed(&repo, &[("README.md", "hello\n")]);
+    let ws = repo.workspace("ws");
+    write(&ws, "notes.txt", "notes\n");
+    let out = braid(&ws, &["commit", "-m", "notes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("Committed "), "{text}");
+    let short = text.split_whitespace().nth(1).unwrap().to_owned();
+    assert_eq!(short.len(), 12, "{text}");
+
+    // show and log take it, and give the full id in JSON.
+    let shown = json(&repo.root, &["show", &short]);
+    let full = shown["id"].as_str().unwrap().to_owned();
+    assert_eq!(full.len(), 64);
+    assert!(full.starts_with(&short));
+    assert_eq!(
+        json(&repo.root, &["log", &short[..6], "-n", "1"])[0]["id"],
+        full.as_str()
+    );
+    // So do --at and --base.
+    let other = repo.root.parent().unwrap().join("other");
+    let added = json(
+        &repo.root,
+        &[
+            "workspace",
+            "add",
+            "other",
+            other.to_str().unwrap(),
+            "--at",
+            &short[..8],
+        ],
+    );
+    assert_eq!(added["base"], full.as_str());
+    assert_eq!(read(&other, "notes.txt"), "notes\n");
+    let made = json(
+        &repo.root,
+        &[
+            "change",
+            "create",
+            "--base",
+            &short[..7],
+            "--delete",
+            "notes.txt",
+            "-m",
+            "no notes",
+        ],
+    );
+    assert_eq!(made["base"], full.as_str());
+    // commit --json gives the full id.
+    write(&ws, "more.txt", "more\n");
+    let committed = json(&ws, &["commit", "-m", "more"]);
+    assert_eq!(committed["changeset"].as_str().unwrap().len(), 64);
+}
+
+#[test]
 fn removing_a_workspace() {
     let repo = Repo::new();
     seed(&repo, &[("README.md", "hello\n")]);
