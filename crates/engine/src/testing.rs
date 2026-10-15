@@ -123,29 +123,35 @@ impl Repo {
     /// gitlinks as `gitlink:<first byte>`.
     pub(crate) fn files(&self, root: ObjectId) -> BTreeMap<String, String> {
         let mut files = BTreeMap::new();
-        self.collect(root, b"", &mut files);
+        let mut pending = vec![(Vec::new(), root)];
+        while let Some((dir, tree)) = pending.pop() {
+            for entry in read_tree(&self.objects, tree).unwrap() {
+                let path = join(&dir, &entry.name);
+                let text = |blob: ObjectId| {
+                    String::from_utf8(read_blob(&self.objects, blob).unwrap()).unwrap()
+                };
+                let value = match entry.kind {
+                    EntryKind::Tree { tree } => {
+                        pending.push((path, tree));
+                        continue;
+                    }
+                    EntryKind::File { blob, .. } => text(blob),
+                    EntryKind::Executable { blob, .. } => format!("exec:{}", text(blob)),
+                    EntryKind::Symlink { blob, .. } => format!("link:{}", text(blob)),
+                    EntryKind::Gitlink { commit } => format!("gitlink:{}", commit.as_bytes()[0]),
+                };
+                files.insert(String::from_utf8(path).unwrap(), value);
+            }
+        }
         files
     }
+}
 
-    fn collect(&self, tree: ObjectId, dir: &[u8], files: &mut BTreeMap<String, String>) {
-        for entry in read_tree(&self.objects, tree).unwrap() {
-            let path = join(dir, &entry.name);
-            let text = |blob: ObjectId| {
-                String::from_utf8(read_blob(&self.objects, blob).unwrap()).unwrap()
-            };
-            let value = match entry.kind {
-                EntryKind::Tree { tree } => {
-                    self.collect(tree, &path, files);
-                    continue;
-                }
-                EntryKind::File { blob, .. } => text(blob),
-                EntryKind::Executable { blob, .. } => format!("exec:{}", text(blob)),
-                EntryKind::Symlink { blob, .. } => format!("link:{}", text(blob)),
-                EntryKind::Gitlink { commit } => format!("gitlink:{}", commit.as_bytes()[0]),
-            };
-            files.insert(String::from_utf8(path).unwrap(), value);
-        }
-    }
+/// A path with `depth` names: `d/d/…/d/file`.
+pub(crate) fn deep_path(depth: usize) -> String {
+    let mut names = vec!["d"; depth - 1];
+    names.push("file");
+    names.join("/")
 }
 
 /// A map from path to text, for comparing with [`Repo::files`].

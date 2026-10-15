@@ -5,7 +5,8 @@
 //! changed paths are read and rebuilt; every other subtree is shared with the
 //! base tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
+use std::rc::Rc;
 
 use braid_format::name::forbidden_as_symlink;
 use braid_format::{
@@ -14,7 +15,7 @@ use braid_format::{
 
 use crate::access::{EMPTY_TREE, Trees, empty_tree_node, read_object};
 use crate::error::{ApplyProblem, Error, store_error};
-use crate::path::{join, last_name};
+use crate::path::{check_depth, join, last_name};
 
 /// Applies `changes` to the tree `base_root`, stores the directories it
 /// rebuilds, and returns the new root.
@@ -101,6 +102,10 @@ pub(crate) fn prepare(changes: &[Change]) -> Result<Vec<&Change>, Error> {
 /// anything. Structural problems are collected in `problems` and the walk
 /// goes on, so that a caller can report all of them; where there is one, the
 /// result keeps the base entry.
+///
+/// Paths deeper than [`MAX_PATH_DEPTH`](crate::MAX_PATH_DEPTH) are refused before the walk starts,
+/// and the walk keeps its own stack of directories rather than recursing, so
+/// it does not depend on the size of the thread's stack.
 pub(crate) fn apply_sorted<O: Objects>(
     trees: &mut Trees<'_, O>,
     base_root: ObjectId,
@@ -113,9 +118,13 @@ pub(crate) fn apply_sorted<O: Objects>(
             nodes: Vec::new(),
         });
     }
+    for change in changes {
+        check_depth(&change.path)?;
+    }
     let items = changes
         .iter()
         .map(|change| Item {
+            path: &change.path,
             rest: &change.path,
             op: &change.op,
         })
@@ -125,7 +134,7 @@ pub(crate) fn apply_sorted<O: Objects>(
         nodes: Vec::new(),
         problems,
     };
-    let root = match apply_dir(&mut ctx, b"", Some(base_root), items)? {
+    let root = match rebuild(&mut ctx, base_root, items)? {
         Some(root) => root,
         None => {
             ctx.nodes.push((EMPTY_TREE, empty_tree_node()));
@@ -165,9 +174,19 @@ pub(crate) fn check_nodes<O: Objects>(
 /// One change, seen from the directory being rebuilt.
 #[derive(Clone, Copy)]
 struct Item<'a> {
+    /// The full path.
+    path: &'a [u8],
     /// The part of the path below the directory.
     rest: &'a [u8],
     op: &'a ChangeOp,
+}
+
+impl<'a> Item<'a> {
+    /// The path of the directory the change is seen from; empty for the root.
+    fn dir(&self) -> &'a [u8] {
+        let cut = self.path.len() - self.rest.len();
+        &self.path[..cut.saturating_sub(1)]
+    }
 }
 
 /// The changes under one name of a directory.
@@ -186,130 +205,298 @@ struct Ctx<'t, 'o, O> {
 }
 
 impl<O> Ctx<'_, '_, O> {
-    /// Records a problem and returns `keep`, the entry to leave in place.
+    /// Records a problem at `dir/name` and returns `keep`, the entry to leave
+    /// in place.
     fn problem(
         &mut self,
-        path: Vec<u8>,
+        dir: &[u8],
+        name: &[u8],
         problem: ApplyProblem,
         keep: Option<EntryKind>,
     ) -> Option<EntryKind> {
-        self.problems.push(Problem { path, problem });
+        self.problems.push(Problem {
+            path: join(dir, name),
+            problem,
+        });
         keep
     }
 }
 
-/// Rebuilds the directory at `dir` (empty for the root), whose current tree
-/// is `base` (`None` if it does not exist), with `items`. Returns the new
-/// tree, or `None` if the directory ends up without entries.
-fn apply_dir<'a, O: Objects>(
+/// Rebuilds the root tree `base_root` with `items`, children before
+/// parents, and returns the new root, or `None` if it has no entries left.
+///
+/// Each directory on a changed path is a frame on an explicit stack: a frame
+/// resolves its names in order until one has to become a directory rebuilt
+/// first, opens a frame for it, and settles that name once the frame above
+/// it closes.
+fn rebuild<O: Objects>(
     ctx: &mut Ctx<'_, '_, O>,
-    dir: &[u8],
-    base: Option<ObjectId>,
-    items: Vec<Item<'a>>,
+    base_root: ObjectId,
+    items: Vec<Item<'_>>,
 ) -> Result<Option<ObjectId>, Error> {
-    let mut groups: BTreeMap<&'a [u8], Group<'a>> = BTreeMap::new();
-    for item in items {
-        match item.rest.iter().position(|byte| *byte == b'/') {
-            None => groups.entry(item.rest).or_default().direct = Some(item.op),
-            Some(slash) => groups
-                .entry(&item.rest[..slash])
-                .or_default()
-                .nested
-                .push(Item {
-                    rest: &item.rest[slash + 1..],
-                    ..item
-                }),
+    let mut stack = vec![Frame::open(ctx.trees, Some(base_root), items)?];
+    // What the frame closed last became, for the frame below it.
+    let mut closed = None;
+    while let Some(frame) = stack.last_mut() {
+        if let Some(directory) = closed.take() {
+            frame.settle(ctx, directory);
+        }
+        match frame.advance(ctx) {
+            Some((below, nested)) => {
+                let child = Frame::open(ctx.trees, below, nested)?;
+                stack.push(child);
+            }
+            None => {
+                if let Some(frame) = stack.pop() {
+                    closed = Some(frame.close(ctx)?);
+                }
+            }
+        }
+    }
+    Ok(closed.flatten())
+}
+
+/// A directory being rebuilt.
+struct Frame<'a> {
+    /// Its path; empty for the root.
+    dir: &'a [u8],
+    /// Its entries before the change, in name order.
+    existing: Rc<[Entry]>,
+    /// How many of `existing` are copied or replaced already.
+    next: usize,
+    /// The changes under each name not resolved yet, in name order.
+    groups: btree_map::IntoIter<&'a [u8], Group<'a>>,
+    /// Its entries after the change, so far.
+    entries: Vec<Entry>,
+    /// The name whose directory the frame above is rebuilding.
+    waiting: Option<Waiting<'a>>,
+}
+
+/// A name that must be, or become, a directory, waiting for it to be rebuilt.
+struct Waiting<'a> {
+    name: &'a [u8],
+    current: Option<EntryKind>,
+    direct: Option<&'a ChangeOp>,
+}
+
+/// What to do with one name of a directory.
+enum Step<'a> {
+    /// This is its new entry; `None` leaves it out.
+    Done(Option<EntryKind>),
+    /// Its directory must be rebuilt first, from the tree `below` (if there
+    /// is one) with the changes `nested`.
+    Descend {
+        below: Option<ObjectId>,
+        nested: Vec<Item<'a>>,
+        waiting: Waiting<'a>,
+    },
+}
+
+impl<'a> Frame<'a> {
+    /// Opens the directory whose tree is `base` (`None` if it does not
+    /// exist), to rebuild it with `items`, of which there is at least one.
+    fn open<O: Objects>(
+        trees: &mut Trees<'_, O>,
+        base: Option<ObjectId>,
+        items: Vec<Item<'a>>,
+    ) -> Result<Self, Error> {
+        let dir = items.first().map_or(&b""[..], Item::dir);
+        let mut groups: BTreeMap<&'a [u8], Group<'a>> = BTreeMap::new();
+        for item in items {
+            match item.rest.iter().position(|byte| *byte == b'/') {
+                None => groups.entry(item.rest).or_default().direct = Some(item.op),
+                Some(slash) => groups
+                    .entry(&item.rest[..slash])
+                    .or_default()
+                    .nested
+                    .push(Item {
+                        rest: &item.rest[slash + 1..],
+                        ..item
+                    }),
+            }
+        }
+        let existing = trees.read_or_empty(base)?;
+        Ok(Frame {
+            dir,
+            entries: Vec::with_capacity(existing.len() + groups.len()),
+            existing,
+            next: 0,
+            groups: groups.into_iter(),
+            waiting: None,
+        })
+    }
+
+    /// Resolves names in order until one must be a directory rebuilt first,
+    /// and returns what to rebuild it from.
+    fn advance<O>(
+        &mut self,
+        ctx: &mut Ctx<'_, '_, O>,
+    ) -> Option<(Option<ObjectId>, Vec<Item<'a>>)> {
+        while let Some((name, group)) = self.groups.next() {
+            let current = self.take(name);
+            match plan(ctx, self.dir, name, current, group) {
+                Step::Done(kind) => self.push(name, kind),
+                Step::Descend {
+                    below,
+                    nested,
+                    waiting,
+                } => {
+                    self.waiting = Some(waiting);
+                    return Some((below, nested));
+                }
+            }
+        }
+        None
+    }
+
+    /// The frame above rebuilt the directory this one waits for, as
+    /// `directory` (`None` if it has no entries left).
+    fn settle<O>(&mut self, ctx: &mut Ctx<'_, '_, O>, directory: Option<ObjectId>) {
+        if let Some(Waiting {
+            name,
+            current,
+            direct,
+        }) = self.waiting.take()
+        {
+            let kind = settle(ctx, self.dir, name, current, direct, directory);
+            self.push(name, kind);
         }
     }
 
-    let existing = ctx.trees.read_or_empty(base)?;
-    let mut entries = Vec::with_capacity(existing.len() + groups.len());
-    let mut old = existing.iter().peekable();
-    for (name, group) in groups {
-        while let Some(entry) = old.next_if(|entry| entry.name.as_slice() < name) {
-            entries.push(entry.clone());
+    /// Copies the entries named before `name`, and takes the one named
+    /// `name`, if there is one.
+    fn take(&mut self, name: &[u8]) -> Option<EntryKind> {
+        while let Some(entry) = self
+            .existing
+            .get(self.next)
+            .filter(|entry| entry.name.as_slice() < name)
+        {
+            self.entries.push(entry.clone());
+            self.next += 1;
         }
-        let current = old
-            .next_if(|entry| entry.name.as_slice() == name)
-            .map(|entry| &entry.kind);
-        if let Some(kind) = resolve(ctx, join(dir, name), current, group)? {
-            entries.push(Entry {
+        let entry = self
+            .existing
+            .get(self.next)
+            .filter(|entry| entry.name == name)?;
+        self.next += 1;
+        Some(entry.kind.clone())
+    }
+
+    fn push(&mut self, name: &[u8], kind: Option<EntryKind>) {
+        if let Some(kind) = kind {
+            self.entries.push(Entry {
                 name: name.to_vec(),
                 kind,
             });
         }
     }
-    entries.extend(old.cloned());
 
-    if entries.is_empty() {
-        return Ok(None);
+    /// Finishes the directory, and returns its new tree, or `None` if it has
+    /// no entries left.
+    fn close<O>(mut self, ctx: &mut Ctx<'_, '_, O>) -> Result<Option<ObjectId>, Error> {
+        self.entries
+            .extend(self.existing[self.next..].iter().cloned());
+        if self.entries.is_empty() {
+            return Ok(None);
+        }
+        let directory = build_directory(self.entries).map_err(Error::Entries)?;
+        let id = directory.root();
+        ctx.nodes.extend(directory.nodes);
+        Ok(Some(id))
     }
-    let directory = build_directory(entries).map_err(Error::Entries)?;
-    let id = directory.root();
-    ctx.nodes.extend(directory.nodes);
-    Ok(Some(id))
 }
 
-/// The new entry for one name of a directory, given its `current` entry and
-/// the changes to it and below it.
-fn resolve<O: Objects>(
+/// Decides what happens to the name `name` of the directory `dir`, given its
+/// `current` entry and the changes to it and below it.
+fn plan<'a, O>(
     ctx: &mut Ctx<'_, '_, O>,
-    path: Vec<u8>,
-    current: Option<&EntryKind>,
-    group: Group<'_>,
-) -> Result<Option<EntryKind>, Error> {
-    let keep = current.cloned();
+    dir: &[u8],
+    name: &'a [u8],
+    current: Option<EntryKind>,
+    group: Group<'a>,
+) -> Step<'a> {
     let Group { direct, nested } = group;
 
     if nested.is_empty() {
         // A change to this name only. A group always holds a change.
         let Some(op) = direct else {
-            return Ok(keep);
+            return Step::Done(current);
         };
-        return Ok(match (op.to_entry(), current) {
-            (None, None) => ctx.problem(path, ApplyProblem::DeleteMissing, keep),
-            (None, Some(EntryKind::Tree { .. })) => {
-                ctx.problem(path, ApplyProblem::IsADirectory, keep)
-            }
-            (None, Some(_)) => None,
+        let new = op.to_entry();
+        let problem = match (&new, &current) {
+            (None, None) => Some(ApplyProblem::DeleteMissing),
+            (None, Some(EntryKind::Tree { .. })) => Some(ApplyProblem::IsADirectory),
             (Some(_), Some(EntryKind::Tree { tree })) if *tree != EMPTY_TREE => {
-                ctx.problem(path, ApplyProblem::DirectoryNotEmpty, keep)
+                Some(ApplyProblem::DirectoryNotEmpty)
             }
-            (Some(new), Some(old)) if new == *old => ctx.problem(path, ApplyProblem::NoOp, keep),
-            (Some(new), _) => Some(new),
+            (Some(new), Some(old)) if new == old => Some(ApplyProblem::NoOp),
+            _ => None,
+        };
+        return Step::Done(match problem {
+            Some(problem) => ctx.problem(dir, name, problem, current),
+            None => new,
         });
     }
 
     // Changes below this name: it must be, or become, a directory. A file in
     // the way must be deleted by the same change list.
-    let below = match current {
+    let below = match &current {
         Some(EntryKind::Tree { tree }) => Some(*tree),
-        Some(_) if matches!(direct, Some(ChangeOp::Delete)) => None,
-        Some(_) => return Ok(ctx.problem(path, ApplyProblem::NotADirectory, keep)),
-        None => None,
+        _ => None,
     };
-    let directory = apply_dir(ctx, &path, below, nested)?;
-    Ok(match direct {
-        None => directory.map(|tree| EntryKind::Tree { tree }),
-        Some(ChangeOp::Delete) => match current {
-            None => ctx.problem(path, ApplyProblem::DeleteMissing, keep),
-            Some(EntryKind::Tree { .. }) => ctx.problem(path, ApplyProblem::IsADirectory, keep),
-            // A file replaced by a directory.
-            Some(_) => directory.map(|tree| EntryKind::Tree { tree }),
+    if current.is_some() && below.is_none() && !matches!(direct, Some(ChangeOp::Delete)) {
+        return Step::Done(ctx.problem(dir, name, ApplyProblem::NotADirectory, current));
+    }
+    Step::Descend {
+        below,
+        nested,
+        waiting: Waiting {
+            name,
+            current,
+            direct,
         },
+    }
+}
+
+/// The new entry for the name `name` of the directory `dir`, now that the
+/// directory below it is rebuilt as `directory` (`None` if it has no entries
+/// left).
+fn settle<O>(
+    ctx: &mut Ctx<'_, '_, O>,
+    dir: &[u8],
+    name: &[u8],
+    current: Option<EntryKind>,
+    direct: Option<&ChangeOp>,
+    directory: Option<ObjectId>,
+) -> Option<EntryKind> {
+    let tree = directory.map(|tree| EntryKind::Tree { tree });
+    let deletes = matches!(direct, Some(ChangeOp::Delete));
+    let problem = match (&current, &tree) {
+        (None, _) if deletes => Some(ApplyProblem::DeleteMissing),
+        (Some(EntryKind::Tree { .. }), _) if deletes => Some(ApplyProblem::IsADirectory),
         // A directory replaced by a file: nothing may be left below it.
-        Some(op) => match directory {
-            Some(_) => ctx.problem(path, ApplyProblem::DirectoryNotEmpty, keep),
-            None => op.to_entry(),
-        },
-    })
+        (_, Some(_)) if direct.is_some() && !deletes => Some(ApplyProblem::DirectoryNotEmpty),
+        _ => None,
+    };
+    if let Some(problem) = problem {
+        return ctx.problem(dir, name, problem, current);
+    }
+    match direct {
+        // The file that replaces the directory.
+        Some(op) if !deletes => op.to_entry(),
+        // The rebuilt directory, possibly replacing a deleted file, or
+        // nothing if it has no entries left.
+        _ => tree,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access::read_tree;
-    use crate::testing::{Repo, delete, gitlink, text_map};
+    use crate::access::{entry_at, read_tree};
+    use crate::diff::diff;
+    use crate::path::MAX_PATH_DEPTH;
+    use crate::testing::{Repo, deep_path, delete, gitlink, text_map};
 
     fn problem(result: Result<ObjectId, Error>) -> (String, ApplyProblem) {
         match result {
@@ -543,5 +730,70 @@ mod tests {
         let deletes: Vec<Change> = (0..1500).map(|i| delete(&format!("big/f{i:05}"))).collect();
         let small = apply(&repo.objects, base, &deletes).unwrap();
         assert_eq!(small, repo.tree(&refs[1500..]));
+    }
+
+    #[test]
+    fn paths_up_to_the_depth_limit() {
+        let repo = Repo::new();
+        let deepest = deep_path(MAX_PATH_DEPTH);
+        let root = apply(&repo.objects, EMPTY_TREE, &[repo.set(&deepest, "x")]).unwrap();
+        assert_eq!(repo.files(root), text_map(&[(&deepest, "x")]));
+        assert_eq!(
+            entry_at(&repo.objects, root, deepest.as_bytes()).unwrap(),
+            Some(repo.file_kind("x"))
+        );
+        // A sibling next to it, then everything deleted again.
+        let sibling = deepest.replace("/file", "/other");
+        let both = apply(&repo.objects, root, &[repo.set(&sibling, "y")]).unwrap();
+        let gone = apply(&repo.objects, both, &[delete(&deepest), delete(&sibling)]).unwrap();
+        assert_eq!(gone, EMPTY_TREE);
+
+        // One name more is refused before anything is walked or stored.
+        let deeper = deep_path(MAX_PATH_DEPTH + 1);
+        let stored = repo.objects.len();
+        let result = apply(
+            &repo.objects,
+            EMPTY_TREE,
+            &[repo.set("a", "1"), repo.set(&deeper, "x")],
+        );
+        assert!(
+            matches!(&result, Err(Error::TooDeep { path }) if *path == deeper.as_bytes()),
+            "{result:?}"
+        );
+        assert_eq!(
+            repo.objects.len(),
+            stored + 1,
+            "only the blob of `a` was added"
+        );
+        assert!(matches!(
+            entry_at(&repo.objects, root, deeper.as_bytes()),
+            Err(Error::TooDeep { .. })
+        ));
+    }
+
+    #[test]
+    fn deep_paths_need_little_stack() {
+        // The walks keep their own stacks. At the depth limit they fit in a
+        // small fraction of this thread stack, where recursing would need
+        // several megabytes.
+        let walk = || {
+            let repo = Repo::new();
+            let deepest = deep_path(MAX_PATH_DEPTH);
+            let root = apply(&repo.objects, EMPTY_TREE, &[repo.set(&deepest, "x")]).unwrap();
+            assert_eq!(
+                diff(&repo.objects, EMPTY_TREE, root).unwrap(),
+                [repo.set(&deepest, "x")]
+            );
+            assert_eq!(
+                diff(&repo.objects, root, EMPTY_TREE).unwrap(),
+                [delete(&deepest)]
+            );
+        };
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(walk)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

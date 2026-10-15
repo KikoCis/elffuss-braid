@@ -73,9 +73,11 @@ pub(crate) fn store_assembled<O: Objects>(objects: &O, assembled: &Assembled) ->
 /// list must be canonical: sorted, without duplicates or no-ops, and stored
 /// in its own blob only when it is too long to be inline. Applied to the root
 /// tree of the first parent (or the empty tree), it must give exactly the root
-/// the changeset declares. Every blob a change refers to must be stored, with
-/// the size the change gives it, as must the blob of the original git commit,
-/// and every directory the change rebuilds, byte for byte.
+/// the changeset declares, and no path may be deeper than
+/// [`MAX_PATH_DEPTH`](crate::MAX_PATH_DEPTH), so no admitted tree is deeper
+/// either. Every blob a change refers to must be stored, with the size the
+/// change gives it, as must the blob of the original git commit, and every
+/// directory the change rebuilds, byte for byte.
 ///
 /// The cost follows the size of the change: only the directories on changed
 /// paths are read, plus the blobs the changes refer to.
@@ -153,7 +155,8 @@ mod tests {
     use super::*;
     use crate::access::read_tree;
     use crate::error::ApplyProblem;
-    use crate::testing::{Repo, delete, signature, text_map};
+    use crate::path::MAX_PATH_DEPTH;
+    use crate::testing::{Repo, deep_path, delete, signature, text_map};
     use braid_format::changeset::{MAX_INLINE_CHANGES_BYTES, encode_change_list};
     use braid_format::{Changes, Changeset, ChangesetError};
 
@@ -436,5 +439,42 @@ mod tests {
             admit(&repo.objects, forge(&repo, &external), admitted(&[])),
             Err(Error::ExternalListFitsInline { .. })
         ));
+    }
+
+    #[test]
+    fn admission_enforces_the_depth_limit() {
+        let repo = Repo::new();
+        let deepest = deep_path(MAX_PATH_DEPTH);
+        let first = repo.commit(&[], vec![repo.set(&deepest, "x")]);
+        admit(&repo.objects, first, admitted(&[])).unwrap();
+
+        // `commit` refuses a deeper path...
+        let deeper = deep_path(MAX_PATH_DEPTH + 1);
+        let result = commit(
+            &repo.objects,
+            vec![first],
+            vec![repo.set(&deeper, "x")],
+            signature("a"),
+            signature("a"),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(matches!(result, Err(Error::TooDeep { .. })), "{result:?}");
+        // ...and a changeset made by hand with one is not admitted.
+        let forged = ChangesetParts {
+            parents: vec![first],
+            root: repo.root(first),
+            changes: vec![repo.set(&deeper, "x")],
+            author: signature("a"),
+            committer: signature("a"),
+            message: Vec::new(),
+            extras: Vec::new(),
+            git_origin: None,
+        }
+        .assemble()
+        .unwrap();
+        store_assembled(&repo.objects, &forged).unwrap();
+        let result = admit(&repo.objects, forged.id, admitted(&[first]));
+        assert!(matches!(result, Err(Error::TooDeep { .. })), "{result:?}");
     }
 }

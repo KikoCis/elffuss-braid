@@ -38,7 +38,7 @@ use crate::commit::store_assembled;
 use crate::diff::diff_trees;
 use crate::error::{ApplyProblem, Error, store_error};
 use crate::merge::{ConflictHunk, MergeResult, merge3};
-use crate::path::join;
+use crate::path::{check_depth, join};
 
 /// The extra field a rebased changeset carries: the id, in hex, of the
 /// changeset it was rebased from.
@@ -186,8 +186,13 @@ pub fn land<O: Objects>(
     let ours = read_changeset(objects, head_id)?;
     let base = read_changeset(objects, base_id)?;
 
+    let changes = read_changes(objects, change, &theirs)?;
+    // Every walk below follows these paths: refuse deep ones first.
+    for item in changes.iter() {
+        check_depth(&item.path)?;
+    }
     let mut rebase = Rebase::new(objects, base.root, ours.root, theirs.root);
-    for item in read_changes(objects, change, &theirs)?.iter() {
+    for item in changes.iter() {
         rebase.path(item)?;
     }
     let applied = rebase.structure()?;
@@ -652,10 +657,11 @@ impl<'o, O: Objects> Rebase<'o, O> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::admit;
+    use crate::commit::{admit, store_assembled};
     use crate::diff::diff;
     use crate::merge::HunkSide;
-    use crate::testing::{Repo, delete, gitlink, signature, text_map};
+    use crate::path::MAX_PATH_DEPTH;
+    use crate::testing::{Repo, deep_path, delete, gitlink, signature, text_map};
 
     struct Setup {
         repo: Repo,
@@ -773,6 +779,38 @@ mod tests {
             land(objects, Some(root), root, signature("x")).unwrap(),
             LandOutcome::AlreadyApplied
         );
+    }
+
+    #[test]
+    fn landing_respects_the_depth_limit() {
+        let deepest = deep_path(MAX_PATH_DEPTH);
+        let s = setup(
+            &[("a", "1")],
+            |r| vec![r.set("a", "2")],
+            |r| vec![r.set(&deepest, "c")],
+        );
+        let (id, _) = rebased(&s);
+        assert_eq!(
+            s.repo.files(s.repo.root(id)),
+            text_map(&[("a", "2"), (&deepest, "c")])
+        );
+
+        // A change one name deeper, made by hand since `commit` refuses it.
+        let forged = ChangesetParts {
+            parents: vec![s.base],
+            root: s.repo.root(s.base),
+            changes: vec![s.repo.set(&deep_path(MAX_PATH_DEPTH + 1), "c")],
+            author: signature("a"),
+            committer: signature("a"),
+            message: Vec::new(),
+            extras: Vec::new(),
+            git_origin: None,
+        }
+        .assemble()
+        .unwrap();
+        store_assembled(&s.repo.objects, &forged).unwrap();
+        let result = land(&s.repo.objects, Some(s.head), forged.id, signature("x"));
+        assert!(matches!(result, Err(Error::TooDeep { .. })), "{result:?}");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use braid_format::{
 };
 
 use crate::error::{Error, store_error};
+use crate::path::check_depth;
 
 /// Id of the tree with no entries: the root of an empty repository, and the
 /// base of a changeset without parents. Part of format v1.
@@ -135,12 +136,14 @@ pub fn read_changes<'c, O: Objects>(
 }
 
 /// The entry at `path` in the tree `root`, or `None` if there is none (or a
-/// prefix of `path` is not a directory).
+/// prefix of `path` is not a directory). A path deeper than
+/// [`MAX_PATH_DEPTH`](crate::MAX_PATH_DEPTH) is an error.
 pub fn entry_at<O: Objects>(
     objects: &O,
     root: ObjectId,
     path: &[u8],
 ) -> Result<Option<EntryKind>, Error> {
+    check_depth(path)?;
     Ok(Trees::new(objects).find(root, path)?.into_entry())
 }
 

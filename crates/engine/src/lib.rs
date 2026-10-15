@@ -23,9 +23,14 @@
 //! executable, a symlink or a gitlink, or deletes it. Directories follow from
 //! the files: a change below a missing directory creates it, and a directory
 //! left without entries by a change is removed, as git has no empty
-//! directories. A tree that holds an empty subdirectory can be stored and read,
-//! but no change list produces one, so [`apply`] and [`diff`] only round-trip
-//! trees without empty subdirectories.
+//! directories. Braid trees never hold an empty subdirectory: no change list
+//! makes one, and the git bridge drops them when it converts git trees.
+//!
+//! A path has at most [`MAX_PATH_DEPTH`] names. This is a store policy, not
+//! part of the hashed format: [`apply`] and [`admit`] refuse deeper paths, so
+//! no stored tree is deeper, and every walk over a tree stops with
+//! [`Error::TooDeep`] beyond it. The walks keep their own stacks rather than
+//! recursing, so the limit does not depend on the size of the thread's stack.
 //!
 //! # Costs
 //!
@@ -62,3 +67,4 @@ pub use diff::diff;
 pub use error::{ApplyProblem, Error, StoreError};
 pub use land::{Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
 pub use merge::{BINARY_SNIFF_BYTES, ConflictHunk, HunkSide, MergeResult, is_binary, merge3};
+pub use path::MAX_PATH_DEPTH;

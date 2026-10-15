@@ -3,11 +3,13 @@
 
 //! The canonical change list between two trees.
 
-use braid_format::{Change, ChangeOp, EntryKind, ObjectId, Objects};
+use std::rc::Rc;
+
+use braid_format::{Change, ChangeOp, Entry, EntryKind, ObjectId, Objects};
 
 use crate::access::Trees;
 use crate::error::Error;
-use crate::path::join;
+use crate::path::{MAX_PATH_DEPTH, depth, join};
 
 /// The canonical change list that turns the tree `old_root` into `new_root`:
 /// exactly the paths whose file differs (in kind or id), sorted by path bytes,
@@ -15,8 +17,9 @@ use crate::path::join;
 /// file below it plus a set for the file, and the other way round.
 ///
 /// Only subtrees whose ids differ are read, so the cost follows the size of
-/// the difference. For trees without empty subdirectories,
-/// `apply(old, diff(old, new)) == new`, and `diff(x, x)` is empty.
+/// the difference. `apply(old, diff(old, new)) == new` (braid trees hold no
+/// empty subdirectories), and `diff(x, x)` is empty. A tree deeper than
+/// [`MAX_PATH_DEPTH`] is an error.
 pub fn diff<O: Objects>(
     objects: &O,
     old_root: ObjectId,
@@ -46,6 +49,11 @@ pub(crate) struct DiffItem {
 
 /// The files that differ between the directories `old` and `new` found at
 /// `dir`, either of which may not exist, sorted by path.
+///
+/// The walk keeps its own stack of directory pairs rather than recursing, and
+/// one path buffer that each pair owns a prefix of, so neither the thread's
+/// stack nor the memory for paths grows with the depth beyond the paths
+/// themselves. A tree deeper than [`MAX_PATH_DEPTH`] is an error.
 pub(crate) fn diff_trees<O: Objects>(
     trees: &mut Trees<'_, O>,
     dir: &[u8],
@@ -53,61 +61,119 @@ pub(crate) fn diff_trees<O: Objects>(
     new: Option<ObjectId>,
 ) -> Result<Vec<DiffItem>, Error> {
     let mut items = Vec::new();
-    walk(trees, dir, old, new, &mut items)?;
+    // The path of the entry being compared.
+    let mut path = dir.to_vec();
+    let mut stack = Vec::new();
+    if old != new {
+        stack.push(Pair::open(trees, &path, depth(dir), old, new)?);
+    }
+    while let Some(top) = stack.last_mut() {
+        let (olds, news) = (Rc::clone(&top.olds), Rc::clone(&top.news));
+        let (len, depth) = (top.len, top.depth);
+        let mut below = None;
+        while let Some((name, before, after)) = top.next(&olds, &news) {
+            path.truncate(len);
+            if len > 0 {
+                path.push(b'/');
+            }
+            path.extend_from_slice(name);
+            let (old_file, old_tree) = split(before);
+            let (new_file, new_tree) = split(after);
+            if old_file != new_file {
+                items.push(DiffItem {
+                    path: path.clone(),
+                    old: old_file,
+                    new: new_file,
+                });
+            }
+            if old_tree != new_tree {
+                below = Some((old_tree, new_tree));
+                break;
+            }
+        }
+        match below {
+            Some((old, new)) => {
+                let pair = Pair::open(trees, &path, depth + 1, old, new)?;
+                stack.push(pair);
+            }
+            None => {
+                stack.pop();
+            }
+        }
+    }
     // A directory's entries are in name order, but `a/x` sorts after `a-b`.
     items.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(items)
 }
 
-fn walk<O: Objects>(
-    trees: &mut Trees<'_, O>,
-    dir: &[u8],
-    old: Option<ObjectId>,
-    new: Option<ObjectId>,
-    out: &mut Vec<DiffItem>,
-) -> Result<(), Error> {
-    if old == new {
-        return Ok(());
+/// A name, and its entry before and after.
+type Versions<'e> = (&'e [u8], Option<&'e EntryKind>, Option<&'e EntryKind>);
+
+/// Two versions of one directory, compared entry by entry.
+struct Pair {
+    olds: Rc<[Entry]>,
+    news: Rc<[Entry]>,
+    /// The next entry of each side to compare.
+    i: usize,
+    j: usize,
+    /// Length of the directory's path in the path buffer.
+    len: usize,
+    /// How many names the directory's path has.
+    depth: usize,
+}
+
+impl Pair {
+    /// Opens the versions `old` and `new` of the directory at `path`, which
+    /// has `depth` names. Its entries must not be deeper than the limit.
+    fn open<O: Objects>(
+        trees: &mut Trees<'_, O>,
+        path: &[u8],
+        depth: usize,
+        old: Option<ObjectId>,
+        new: Option<ObjectId>,
+    ) -> Result<Self, Error> {
+        let olds = trees.read_or_empty(old)?;
+        let news = trees.read_or_empty(new)?;
+        if depth >= MAX_PATH_DEPTH
+            && let Some(entry) = olds.first().or(news.first())
+        {
+            return Err(Error::TooDeep {
+                path: join(path, &entry.name),
+            });
+        }
+        Ok(Pair {
+            olds,
+            news,
+            i: 0,
+            j: 0,
+            len: path.len(),
+            depth,
+        })
     }
-    let olds = trees.read_or_empty(old)?;
-    let news = trees.read_or_empty(new)?;
-    let (mut i, mut j) = (0, 0);
-    loop {
-        let (name, before, after) = match (olds.get(i), news.get(j)) {
-            (None, None) => break,
+
+    /// The next name, in order, with its entry on each side.
+    fn next<'e>(&mut self, olds: &'e [Entry], news: &'e [Entry]) -> Option<Versions<'e>> {
+        Some(match (olds.get(self.i), news.get(self.j)) {
+            (None, None) => return None,
             (Some(o), Some(n)) if o.name == n.name => {
-                i += 1;
-                j += 1;
+                self.i += 1;
+                self.j += 1;
                 (&o.name, Some(&o.kind), Some(&n.kind))
             }
             (Some(o), Some(n)) if o.name < n.name => {
-                i += 1;
+                self.i += 1;
                 (&o.name, Some(&o.kind), None)
             }
             (Some(o), None) => {
-                i += 1;
+                self.i += 1;
                 (&o.name, Some(&o.kind), None)
             }
             (_, Some(n)) => {
-                j += 1;
+                self.j += 1;
                 (&n.name, None, Some(&n.kind))
             }
-        };
-        let path = join(dir, name);
-        let (old_file, old_tree) = split(before);
-        let (new_file, new_tree) = split(after);
-        if old_tree != new_tree {
-            walk(trees, &path, old_tree, new_tree, out)?;
-        }
-        if old_file != new_file {
-            out.push(DiffItem {
-                path,
-                old: old_file,
-                new: new_file,
-            });
-        }
+        })
     }
-    Ok(())
 }
 
 /// An entry as a file and as a directory: at most one of the two.
@@ -122,9 +188,9 @@ fn split(entry: Option<&EntryKind>) -> (Option<ChangeOp>, Option<ObjectId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access::EMPTY_TREE;
+    use crate::access::{EMPTY_TREE, write_tree};
     use crate::apply::apply;
-    use crate::testing::{Repo, delete, gitlink};
+    use crate::testing::{Repo, deep_path, delete, gitlink};
 
     #[test]
     fn identical_trees_have_no_changes() {
@@ -180,5 +246,45 @@ mod tests {
         );
         let link = apply(&repo.objects, old, &[gitlink("f", 1)]).unwrap();
         assert_eq!(diff(&repo.objects, old, link).unwrap(), [gitlink("f", 1)]);
+    }
+
+    /// A tree whose one file sits below `dirs` directories named `d`, built
+    /// by hand: no change list can make one deeper than the limit.
+    fn chain(repo: &Repo, dirs: usize) -> ObjectId {
+        let file = Entry {
+            name: b"file".to_vec(),
+            kind: repo.file_kind("x"),
+        };
+        let mut tree = write_tree(&repo.objects, vec![file]).unwrap();
+        for _ in 0..dirs {
+            let dir = Entry {
+                name: b"d".to_vec(),
+                kind: EntryKind::Tree { tree },
+            };
+            tree = write_tree(&repo.objects, vec![dir]).unwrap();
+        }
+        tree
+    }
+
+    #[test]
+    fn trees_deeper_than_the_limit_are_an_error() {
+        let repo = Repo::new();
+        let at_limit = chain(&repo, MAX_PATH_DEPTH - 1);
+        assert_eq!(
+            diff(&repo.objects, EMPTY_TREE, at_limit).unwrap(),
+            [repo.set(&deep_path(MAX_PATH_DEPTH), "x")]
+        );
+        let too_deep = chain(&repo, MAX_PATH_DEPTH);
+        for result in [
+            diff(&repo.objects, EMPTY_TREE, too_deep),
+            diff(&repo.objects, too_deep, EMPTY_TREE),
+            diff(&repo.objects, at_limit, too_deep),
+        ] {
+            assert!(
+                matches!(&result, Err(Error::TooDeep { path })
+                    if *path == deep_path(MAX_PATH_DEPTH + 1).as_bytes()),
+                "{result:?}"
+            );
+        }
     }
 }

@@ -154,6 +154,15 @@ pub enum Error {
         /// The branch head, if the branch has one.
         head: Option<ObjectId>,
     },
+
+    /// A path has more names than [`MAX_PATH_DEPTH`](crate::MAX_PATH_DEPTH),
+    /// the limit a store sets on how deep a tree may be.
+    #[error("{:?} has more than {} names", show(.path), crate::MAX_PATH_DEPTH)]
+    TooDeep {
+        /// The path of a change, or the first path deeper than the limit
+        /// that a walk over a tree met.
+        path: Vec<u8>,
+    },
 }
 
 impl Error {
