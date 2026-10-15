@@ -69,7 +69,8 @@
 //! little-endian; `uv`, `sv` and `bytes` are the codec of section 1.
 //!
 //! ```text
-//! format             object-format=blake3-dk-v1
+//! format             object-format=blake3-dk-v1, then storage=<version>
+//! format.lock        empty; locked exclusively to raise the storage version
 //! seg/<name>.seg     object records, append-only
 //! seg/<name>.jrn     journal of a segment that is still open
 //! seg/<name>.idx     sorted index of a sealed segment
@@ -82,6 +83,19 @@
 //! with `tmp-` are still being written, or were left by a writer that died;
 //! they are never read, and are removed once they are a minute old and
 //! unlocked.
+//!
+//! **Storage version.** The second line of `format` says what a reader must
+//! understand: a store without it has version 1 (records stored whole), and
+//! version 2 ([`STORAGE_VERSION`]) adds deltas and chunked blobs. A store of
+//! a later version, or with a line this version does not know, is refused
+//! with [`Error::NewerStore`] or [`Error::UnsupportedFormat`]. New stores
+//! start at the current version; an older one is raised under an exclusive
+//! lock on `format.lock`, after reading `format` again, only right before
+//! the first record that needs it is written, or when it is opened holding
+//! such records already. A journal entry or an index that holds its checksum
+//! but names a kind or a codec this version does not know, sets a reserved
+//! field, or has a later index version, was written by a newer version: the
+//! store is refused, so nothing is ever written over it.
 //!
 //! **Object record**, starting at a multiple of 8 bytes:
 //!
@@ -211,6 +225,7 @@
 mod chunks;
 mod delta;
 mod error;
+mod format_file;
 mod fsck;
 mod fsutil;
 mod index;
@@ -239,8 +254,14 @@ use error::io_error;
 use oplog::OpLog;
 use segments::Segments;
 
-/// The contents of the `format` file, without its final newline.
+/// The first line of the `format` file: the object ids a store uses.
 pub const OBJECT_FORMAT: &str = "object-format=blake3-dk-v1";
+
+/// The storage version this version of braid writes: 2, where records may
+/// be deltas (codec 3) and chunked blobs (codec 4). It reads stores of every
+/// version up to this one, and refuses later ones with
+/// [`Error::NewerStore`].
+pub const STORAGE_VERSION: u32 = 2;
 
 /// How a record stores its object's payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -357,8 +378,12 @@ impl Store {
             Ok(_) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 // Several processes may get here at once; they all publish
-                // the same bytes.
-                fsutil::publish_file(root, "format", format!("{OBJECT_FORMAT}\n").as_bytes())?;
+                // the same bytes. Opening reads what won.
+                fsutil::publish_file(
+                    root,
+                    "format",
+                    format_file::contents(STORAGE_VERSION).as_bytes(),
+                )?;
             }
             Err(err) => return Err(io_error("read", &format)(err)),
         }
@@ -366,10 +391,17 @@ impl Store {
     }
 
     /// Opens an existing store and reads every segment index and journal.
+    ///
+    /// A store that needs a newer version of braid is refused with
+    /// [`Error::NewerStore`]: its `format` file names a later storage
+    /// version, or one of its journals or indexes holds an entry this
+    /// version does not know. A store of an earlier storage version is
+    /// raised to the current one when it already holds records that need
+    /// it, and otherwise only when this handle is about to write the first.
     pub fn open(root: impl AsRef<Path>, options: Options) -> Result<Self, Error> {
         let root = root.as_ref().to_path_buf();
-        check_format(&root)?;
-        let segments = Segments::open(root.join("seg"), &options)?;
+        let storage = format_file::read(&root)?;
+        let segments = Segments::open(&root, &options, storage)?;
         let oplog = OpLog::new(root.join("oplog"), &options);
         Ok(Self {
             root,
@@ -501,26 +533,4 @@ impl Objects for Store {
     fn stat(&self, id: &ObjectId) -> Result<Option<(Kind, u64)>, Error> {
         self.segments.stat(id)
     }
-}
-
-/// Checks that `root` holds a store in a format this version understands.
-pub(crate) fn check_format(root: &Path) -> Result<(), Error> {
-    let path = root.join("format");
-    let text = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::NotAStore {
-                path: root.to_path_buf(),
-            });
-        }
-        Err(err) => return Err(io_error("read", &path)(err)),
-    };
-    let text = String::from_utf8_lossy(&text);
-    let line = text.strip_suffix('\n').unwrap_or(&text);
-    if line != OBJECT_FORMAT {
-        return Err(Error::UnsupportedFormat {
-            found: line.to_owned(),
-        });
-    }
-    Ok(())
 }

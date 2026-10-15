@@ -38,21 +38,22 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use braid_format::{Kind, ObjectId};
 
-use crate::chunks;
 use crate::error::{Error, io_error};
 use crate::fsutil::{
     is_random_name, publish_file, random_name, read_range, remove_stale_temps, sync_dir, sync_file,
     write_all_at,
 };
+use crate::index::IndexError;
 use crate::journal::{self, ENTRY_LEN, Entry};
 use crate::record::{self, CODEC_CHUNKED, CODEC_DELTA, CODEC_DICTIONARY, Encoded, Header};
 use crate::scan::{self, Window};
 use crate::{Durability, Options, index};
+use crate::{chunks, format_file};
 
 pub(crate) use objects::BaseCache;
 
@@ -63,6 +64,8 @@ const MAX_CACHED_READERS: usize = 256;
 /// The object half of a store: the `seg/` directory.
 #[derive(Debug)]
 pub(crate) struct Segments {
+    /// The store's directory, where the `format` file is.
+    root: PathBuf,
     dir: PathBuf,
     segment_size: u64,
     durability: Durability,
@@ -74,6 +77,8 @@ pub(crate) struct Segments {
     cached_readers: AtomicUsize,
     /// Payloads of delta bases read recently.
     bases: BaseCache,
+    /// The storage version the `format` file is known to have at least.
+    storage: AtomicU32,
 }
 
 /// What this handle knows about the segments and the objects in them.
@@ -211,10 +216,14 @@ enum Update {
 }
 
 impl Segments {
-    /// Opens the segments in `dir` and reads every index and journal.
-    pub fn open(dir: PathBuf, options: &Options) -> Result<Self, Error> {
+    /// Opens the segments of the store at `root`, whose `format` file says
+    /// it has storage version `storage`, and reads every index and journal.
+    /// If they already hold records that need a later storage version, as a
+    /// writer that died before raising it could leave, the version is raised.
+    pub fn open(root: &Path, options: &Options, storage: u32) -> Result<Self, Error> {
         let segments = Self {
-            dir,
+            root: root.to_path_buf(),
+            dir: root.join("seg"),
             segment_size: options.segment_size,
             durability: options.durability,
             catalog: RwLock::new(Catalog::default()),
@@ -222,9 +231,29 @@ impl Segments {
             writer: Mutex::new(Writer::default()),
             cached_readers: AtomicUsize::new(0),
             bases: BaseCache::default(),
+            storage: AtomicU32::new(storage),
         };
         segments.rescan()?;
+        let needed = segments
+            .known_entries()
+            .iter()
+            .map(|entry| record::storage_version(entry.codec))
+            .max()
+            .unwrap_or(1);
+        segments.need_storage(needed)?;
         Ok(segments)
+    }
+
+    /// Makes sure the store's `format` file says it has at least storage
+    /// version `version`, raising it if needed, before anything that needs
+    /// that version is written.
+    fn need_storage(&self, version: u32) -> Result<(), Error> {
+        if self.storage.load(Ordering::Acquire) >= version {
+            return Ok(());
+        }
+        format_file::raise(&self.root, version)?;
+        self.storage.fetch_max(version, Ordering::AcqRel);
+        Ok(())
     }
 
     /// The `seg/` directory.
@@ -432,7 +461,7 @@ impl Segments {
             let path = self.path(name, "jrn");
             match File::open(&path) {
                 Ok(file) => {
-                    let read = journal::read(&file, from).map_err(io_error("read", &path))?;
+                    let read = journal::read(&file, from, &path)?;
                     self.apply(name, Update::Journal(read.end), &read.entries);
                     return Ok(());
                 }
@@ -453,13 +482,17 @@ impl Segments {
 
     /// The entries of a sealed segment. A damaged index is worked around by
     /// scanning the segment, whose records describe themselves; fsck reports
-    /// the damage.
+    /// the damage. An index a newer version of braid wrote is refused.
     fn load_index(&self, name: &str) -> Result<Vec<Entry>, Error> {
         let path = self.path(name, "idx");
         let bytes = fs::read(&path).map_err(io_error("read", &path))?;
         match index::decode(&bytes) {
             Ok(index) => Ok(index.entries),
-            Err(_) => {
+            Err(IndexError::Newer(detail)) => Err(Error::NewerStore {
+                path,
+                detail: format!("it holds {detail}"),
+            }),
+            Err(IndexError::Damaged(_)) => {
                 let path = self.path(name, "seg");
                 let file = File::open(&path).map_err(io_error("open", &path))?;
                 let len = file.metadata().map_err(io_error("read", &path))?.len();
@@ -678,8 +711,12 @@ impl Segments {
     }
 
     /// Appends a record to the leased segment, taking a lease first if
-    /// needed, and seals the segment if it is now full.
+    /// needed, and seals the segment if it is now full. A record that needs
+    /// a later storage version than the store has raises it first, so that
+    /// no version of braid that does not know the record ever reads the
+    /// store.
     fn append(&self, writer: &mut Writer, encoded: Encoded) -> Result<(), Error> {
+        self.need_storage(record::storage_version(encoded.header.codec))?;
         if writer.lease.is_none() {
             let lease = self.acquire(writer)?;
             writer.lease = Some(lease);
@@ -783,7 +820,9 @@ impl Segments {
         // Whoever created these files may have died before flushing the
         // directory, and objects acknowledged from now on depend on them.
         sync_dir(&self.dir)?;
-        let read = journal::read(&journal, 0).map_err(io_error("read", &jrn_path))?;
+        // A journal a newer version wrote to stops here: this version never
+        // writes after entries it does not understand.
+        let read = journal::read(&journal, 0, &jrn_path)?;
         let seg_len = seg.metadata().map_err(io_error("read", &seg_path))?.len();
         // Never write over bytes an entry points at, even if they are gone.
         let claimed = read.entries.iter().map(Entry::end).max().unwrap_or(0);
@@ -864,7 +903,7 @@ impl Segments {
         let jrn_path = self.path(&lease.name, "jrn");
         // The index must never point at data that is not durable.
         sync_file(&lease.seg, self.durability).map_err(io_error("sync", &seg_path))?;
-        let read = journal::read(&lease.journal, 0).map_err(io_error("read", &jrn_path))?;
+        let read = journal::read(&lease.journal, 0, &jrn_path)?;
         let seg_len = lease
             .seg
             .metadata()

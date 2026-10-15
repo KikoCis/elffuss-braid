@@ -18,9 +18,23 @@
 //! of the segment when it was sealed. The binary fuse filter that the spec
 //! plans for fast misses is not written by this version: indexes are read
 //! into memory whole.
+//!
+//! An index whose hash checks out but whose version, reserved fields or
+//! entries this version does not know was written by a newer version of
+//! braid, and is refused rather than taken for damage.
 
-use crate::journal::Entry;
+use crate::journal::{Entry, Unusable};
 use crate::record::array;
+
+/// Why an index cannot be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IndexError {
+    /// It fails its hash or its structure checks. Lookups work around it
+    /// by scanning the segment.
+    Damaged(&'static str),
+    /// It is whole, but a newer version of braid wrote it.
+    Newer(&'static str),
+}
 
 const MAGIC: &[u8; 8] = b"braididx";
 const VERSION: u32 = 1;
@@ -83,32 +97,37 @@ pub(crate) struct Index {
 }
 
 /// Decodes and checks an index.
-pub(crate) fn decode(bytes: &[u8]) -> Result<Index, &'static str> {
+pub(crate) fn decode(bytes: &[u8]) -> Result<Index, IndexError> {
+    use IndexError::{Damaged, Newer};
     if bytes.len() < HEADER_LEN + FANOUT_LEN + FOOTER_LEN {
-        return Err("index file cut short");
+        return Err(Damaged("index file cut short"));
     }
     let (body, footer) = bytes.split_at(bytes.len() - FOOTER_LEN);
     if blake3::hash(body).as_bytes() != footer {
-        return Err("index checksum mismatch");
+        return Err(Damaged("index checksum mismatch"));
     }
+    // Whole from here on: what this version does not know is news, not
+    // damage.
     if &body[0..8] != MAGIC {
-        return Err("not an index file");
+        return Err(Damaged("not an index file"));
     }
-    if u32::from_le_bytes(array(&body[8..12])) != VERSION {
-        return Err("unknown index version");
+    match u32::from_le_bytes(array(&body[8..12])) {
+        VERSION => {}
+        0 => return Err(Damaged("index version 0")),
+        _ => return Err(Newer("an index version this version does not know")),
     }
     if u32::from_le_bytes(array(&body[12..16])) != 0 {
-        return Err("reserved index field is not zero");
+        return Err(Newer("a reserved index field is set"));
     }
     let count = u64::from_le_bytes(array(&body[16..24]));
     let segment_len = u64::from_le_bytes(array(&body[24..32]));
-    let count = usize::try_from(count).map_err(|_| "index entry count too large")?;
+    let count = usize::try_from(count).map_err(|_| Damaged("index entry count too large"))?;
     let expected = count
         .checked_mul(32 + LOCATION_LEN)
         .and_then(|n| n.checked_add(HEADER_LEN + FANOUT_LEN))
-        .ok_or("index entry count too large")?;
+        .ok_or(Damaged("index entry count too large"))?;
     if body.len() != expected {
-        return Err("index length does not match its entry count");
+        return Err(Damaged("index length does not match its entry count"));
     }
 
     let fanout = &body[HEADER_LEN..HEADER_LEN + FANOUT_LEN];
@@ -120,17 +139,20 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Index, &'static str> {
         let id = &ids[i * 32..i * 32 + 32];
         let location = &locations[i * LOCATION_LEN..(i + 1) * LOCATION_LEN];
         if u32::from_le_bytes(array(&location[28..32])) != 0 {
-            return Err("reserved location field is not zero");
+            return Err(Newer("a reserved location field is set"));
         }
-        let entry = Entry::from_fields(id, &location[..28]).ok_or("invalid index location")?;
+        let entry = Entry::from_fields(id, &location[..28]).map_err(|unusable| match unusable {
+            Unusable::Invalid => Damaged("invalid index location"),
+            Unusable::Newer => Newer("an object kind or codec this version does not know"),
+        })?;
         if entry.end() > segment_len {
-            return Err("index entry points past the end of the segment");
+            return Err(Damaged("index entry points past the end of the segment"));
         }
         if entries
             .last()
             .is_some_and(|previous: &Entry| previous.id >= entry.id)
         {
-            return Err("index ids are not strictly ascending");
+            return Err(Damaged("index ids are not strictly ascending"));
         }
         entries.push(entry);
     }
@@ -142,7 +164,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Index, &'static str> {
             .take_while(|entry| usize::from(entry.id.as_bytes()[0]) == byte)
             .count();
         if u32::from_le_bytes(array(value)) as usize != below {
-            return Err("index fan-out table does not match its ids");
+            return Err(Damaged("index fan-out table does not match its ids"));
         }
     }
     Ok(Index {
@@ -222,17 +244,46 @@ mod tests {
             let at = HEADER_LEN + FANOUT_LEN + i * 32;
             bytes[at..at + 32].copy_from_slice(entry.id.as_bytes());
         }
-        assert!(decode(&reseal(bytes)).is_err());
+        assert!(matches!(
+            decode(&reseal(bytes)),
+            Err(IndexError::Damaged(_))
+        ));
 
         // An entry past the end of the segment.
         assert_eq!(
             decode(&encode(&entries, len - 8)).unwrap_err(),
-            "index entry points past the end of the segment"
+            IndexError::Damaged("index entry points past the end of the segment")
         );
 
         // A fan-out table that disagrees with the ids.
         let mut bytes = encode(&entries, len);
         bytes[HEADER_LEN] ^= 1;
-        assert!(decode(&reseal(bytes)).is_err());
+        assert!(matches!(
+            decode(&reseal(bytes)),
+            Err(IndexError::Damaged(_))
+        ));
+    }
+
+    #[test]
+    fn what_a_newer_version_wrote_is_not_damage() {
+        let entries = entries(3);
+        let len = segment_len(&entries);
+        let reseal = |mut body: Vec<u8>| {
+            body.truncate(body.len() - FOOTER_LEN);
+            let hash = blake3::hash(&body);
+            body.extend_from_slice(hash.as_bytes());
+            body
+        };
+        let locations = HEADER_LEN + FANOUT_LEN + entries.len() * 32;
+        // A later index version, a reserved field, an unknown codec, an
+        // unknown kind, a reserved location field.
+        for at in [8, 12, locations + 13, locations + 12, locations + 28] {
+            let mut bytes = encode(&entries, len);
+            bytes[at] = 7;
+            assert!(
+                matches!(decode(&reseal(bytes)), Err(IndexError::Newer(_))),
+                "byte {at}"
+            );
+        }
     }
 }

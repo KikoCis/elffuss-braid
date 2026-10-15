@@ -76,6 +76,12 @@ pub(crate) fn is_whole(codec: u8) -> bool {
     codec == CODEC_RAW || codec == CODEC_ZSTD
 }
 
+/// The storage version a store must have to hold a record of this codec:
+/// 1 for records stored whole, 2 for the others.
+pub(crate) fn storage_version(codec: u8) -> u32 {
+    if is_whole(codec) { 1 } else { 2 }
+}
+
 /// How readers rank copies of one object, best first: whole records, then
 /// deltas, then chunked blobs, then what this version cannot decode. When a
 /// handle knows several copies of an object it uses the best ranked one, so

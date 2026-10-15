@@ -38,6 +38,18 @@ pub enum Error {
         found: String,
     },
 
+    /// The store was written by a newer version of braid: its `format` file
+    /// names a storage version this one does not know, or a journal or an
+    /// index holds an entry it cannot read. Nothing is read from such a
+    /// store, and nothing is written over what it holds.
+    #[error("{} needs a newer version of braid: {detail}", .path.display())]
+    NewerStore {
+        /// The file that says so.
+        path: PathBuf,
+        /// What this version does not know.
+        detail: String,
+    },
+
     /// Stored data failed a check: a checksum, a length, a sequence, an id.
     /// The store never returns data that failed a check.
     #[error("corrupt data in {} at byte {offset}: {detail}", .path.display())]

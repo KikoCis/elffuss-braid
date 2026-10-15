@@ -376,12 +376,11 @@ impl Segments {
 mod tests {
     use super::*;
     use crate::record::{CODEC_RAW, CODEC_ZSTD};
-    use crate::{Durability, Options};
+    use crate::{Options, STORAGE_VERSION};
 
     fn segments(dir: &std::path::Path) -> Segments {
-        let seg = dir.join("seg");
-        std::fs::create_dir_all(&seg).unwrap();
-        Segments::open(seg, &Options::default()).unwrap()
+        std::fs::create_dir_all(dir.join("seg")).unwrap();
+        Segments::open(dir, &Options::default(), STORAGE_VERSION).unwrap()
     }
 
     /// Source-like text: lines that compress only a little on their own.
@@ -488,14 +487,7 @@ mod tests {
         b.sync().unwrap();
         // A third handle sees both copies and keeps the whole one, so that a
         // delta against v2 has a base stored whole.
-        let c = Segments::open(
-            dir.path().join("seg"),
-            &Options {
-                durability: Durability::Ordered,
-                ..Options::default()
-            },
-        )
-        .unwrap();
+        let c = segments(dir.path());
         assert_eq!(codec(&c, &id2), CODEC_ZSTD);
         let v3 = edit(v2.clone(), 900, b"third");
         let id3 = c.put_similar(Kind::Blob, &v3, &id2).unwrap();

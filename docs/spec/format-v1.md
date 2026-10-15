@@ -318,7 +318,8 @@ Fixed-size integers are little-endian; `uv`, `sv` and `bytes` are the codec of
 section 1.
 
 ```
-.braid/store/format            object-format=blake3-dk-v1
+.braid/store/format            object-format=blake3-dk-v1, then storage=<version>
+.braid/store/format.lock       empty; locked exclusively to raise the storage version
 .braid/store/seg/<name>.seg    object records, append-only
 .braid/store/seg/<name>.jrn    journal of a segment that is still open
 .braid/store/seg/<name>.idx    sorted index of a sealed segment
@@ -330,6 +331,29 @@ section 1.
 Segment names are 32 random lowercase hex digits. Files whose names start with
 `tmp-` are still being written, or were left by a writer that died; they are
 never read, and are removed once they are a minute old and unlocked.
+
+**Storage version.** The `format` file has two lines: the object ids
+(`object-format=blake3-dk-v1`), and the storage version, what a reader must
+understand to use the store (`storage=2`). A store without the second line has
+storage version 1: records stored whole (codecs 0 and 1), which every version
+of braid reads. Version 2 adds deltas (codec 3) and chunked blobs (codec 4). A
+version of braid refuses a store of a later storage version, and a `format`
+file with any line it does not know; versions from before storage versions
+compare the whole file with the first line, so they refuse version 2 too.
+
+New stores start at the current version. A store is raised only when a writer
+is about to append the first record that needs a later version, or when a
+handle that opens it finds such records already there. The writer takes an
+exclusive lock on `format.lock`, reads `format` again, and if it is still
+older publishes the new one through a temporary file and a rename: the version
+never goes down, and it is durable before any record that needs it.
+
+A journal entry or an index whose checksum holds but which names an object
+kind or a codec the reader does not know, sets a reserved field, or has a later
+index version, was written by a newer version of braid: it is not torn or
+damaged. The reader refuses the store rather than skip the entry, scan around
+the index, or append after them, so nothing is ever written over records it
+does not understand.
 
 **Sharing.** A writer appends only to a segment it holds an exclusive,
 non-blocking lock on: an unlocked open segment if there is one, else a new one

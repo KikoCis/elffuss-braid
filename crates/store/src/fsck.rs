@@ -28,11 +28,12 @@ use crate::chunks;
 use crate::delta;
 use crate::error::Error;
 use crate::fsutil::{count_temps, read_range};
+use crate::index::IndexError;
 use crate::journal::{self, Entry};
 use crate::oplog::{Bad, decode_checkpoint, next_record, not_in_transaction, parse_record};
 use crate::record::{self, CODEC_CHUNKED, CODEC_DELTA, Header};
 use crate::segments::{BaseCache, Files, list, segment_path};
-use crate::{Store, check_format, index, scan};
+use crate::{Store, format_file, index, scan};
 
 /// What fsck found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -147,12 +148,23 @@ pub enum Problem {
         /// The object it points at.
         id: ObjectId,
     },
+    /// A journal or an index that a newer version of braid wrote, in a store
+    /// whose `format` file does not say so. Its segment is not checked.
+    Newer {
+        /// Its path within the store.
+        path: String,
+        /// What this version does not know.
+        detail: String,
+    },
 }
 
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Problem::Format { detail } => write!(f, "format file: {detail}"),
+            Problem::Newer { path, detail } => {
+                write!(f, "{path}: written by a newer version of braid: {detail}")
+            }
             Problem::Unreadable { path, detail } => write!(f, "{path}: cannot read: {detail}"),
             Problem::BadRecord {
                 segment,
@@ -239,11 +251,24 @@ impl Store {
     pub fn fsck(&self) -> Result<FsckReport, Error> {
         not_in_transaction()?;
         let mut report = FsckReport::default();
-        self.check_format(&mut report);
+        let storage = self.check_format(&mut report);
         // The op log first: every object a record points at was durable
         // before the record, so the segments listed afterwards hold it.
         let refs = self.check_oplog(&mut report)?;
         let objects = self.check_segments(&mut report);
+        // Records that need a storage version the store does not declare
+        // could be read by a version of braid that does not know them.
+        if let Some(storage) = storage
+            && storage < 2
+            && report.delta_records + report.chunked_records > 0
+        {
+            report.problems.push(Problem::Format {
+                detail: format!(
+                    "it says storage version {storage}, but the store holds deltas or chunked \
+                     blobs, which need version 2"
+                ),
+            });
+        }
         report.objects = objects.len() as u64;
         report.refs = refs.len();
         for (name, id) in refs {
@@ -262,11 +287,16 @@ impl Store {
         Ok(report)
     }
 
-    fn check_format(&self, report: &mut FsckReport) {
-        if let Err(err) = check_format(&self.root) {
-            report.problems.push(Problem::Format {
-                detail: err.to_string(),
-            });
+    /// Checks the `format` file, and returns the storage version it says.
+    fn check_format(&self, report: &mut FsckReport) -> Option<u32> {
+        match format_file::read(&self.root) {
+            Ok(storage) => Some(storage),
+            Err(err) => {
+                report.problems.push(Problem::Format {
+                    detail: err.to_string(),
+                });
+                None
+            }
         }
     }
 
@@ -742,21 +772,38 @@ fn segment_entries(
 ) -> Option<Entries> {
     if !files.idx && files.jrn {
         let path = segment_path(dir, name, "jrn");
-        match File::open(&path).and_then(|file| journal::read(&file, 0)) {
-            Ok(read) => {
-                report.torn_journal_entries += read.invalid;
-                return Some(Entries {
-                    entries: read.entries,
-                    rebuild: false,
-                    sealed_len: None,
-                });
+        let shown = format!("seg/{name}.jrn");
+        match File::open(&path) {
+            Ok(file) => {
+                return match journal::read(&file, 0, &path) {
+                    Ok(read) => {
+                        report.torn_journal_entries += read.invalid;
+                        Some(Entries {
+                            entries: read.entries,
+                            rebuild: false,
+                            sealed_len: None,
+                        })
+                    }
+                    Err(Error::NewerStore { detail, .. }) => {
+                        report.problems.push(Problem::Newer {
+                            path: shown,
+                            detail,
+                        });
+                        None
+                    }
+                    Err(err) => {
+                        report.problems.push(Problem::Unreadable {
+                            path: shown,
+                            detail: err.to_string(),
+                        });
+                        None
+                    }
+                };
             }
             // Sealed since the listing: read the index instead.
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => {
-                report
-                    .problems
-                    .push(unreadable(&format!("seg/{name}.jrn"), &err));
+                report.problems.push(unreadable(&shown, &err));
                 return None;
             }
         }
@@ -771,7 +818,14 @@ fn segment_entries(
                     rebuild: false,
                     sealed_len: Some(index.segment_len),
                 }),
-                Err(detail) => {
+                Err(IndexError::Newer(detail)) => {
+                    report.problems.push(Problem::Newer {
+                        path: format!("seg/{name}.idx"),
+                        detail: format!("it holds {detail}"),
+                    });
+                    None
+                }
+                Err(IndexError::Damaged(detail)) => {
                     report.problems.push(Problem::BadIndex {
                         segment: name.to_owned(),
                         detail: detail.to_owned(),
