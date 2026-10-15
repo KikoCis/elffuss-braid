@@ -43,6 +43,16 @@ the reasons behind it. The byte-level format is in
 - Large directories are split with a rule that depends only on entry names, so
   an edit rewrites a few small nodes instead of the whole directory, and equal
   contents always have equal ids.
+- A changeset may carry extra fields, ordered key and value pairs that are
+  part of its hash. Braid writes two: `agent`, the label of the agent that
+  made the changeset, and `rebased-from`, the changeset a rebased one comes
+  from. A rebase keeps the original's other fields, so `agent` names the
+  agent that made the change wherever it lands. The git bridge writes extra
+  fields as commit headers.
+- Ids are shown as their first 12 hex digits, and any unique prefix of six
+  digits or more names an object; the lookup scans the store's in-memory map
+  of ids, and a prefix that several objects share is an error that lists
+  them.
 
 ## Store
 
@@ -60,7 +70,10 @@ process dies, atomic rename, and ordered syncs.
   Only files that can no longer change are memory-mapped.
 - **Op log.** Branch heads and the history of operations live in an
   append-only log behind a short lock. Every record names the agent that wrote
-  it, so `braid op log` shows who did what and `braid undo` can step back.
+  it, so `braid op log` shows who did what and `braid undo` can step back. A
+  record's description is written inside the transaction, once the outcome
+  is known: a landing says how it went, which changeset landed as which, and
+  how many paths it merged.
 - **Publish order.** Objects, then their journal entries, then a barrier, then
   the op log record that refers to them. The op log never points at an object
   that is not durable.
@@ -90,10 +103,13 @@ Locally this step runs under the op log lock; on a server, one task per branch
 runs it in order, grouping several landings into one sync.
 
 Conflicts are reported as data, not as markers in a file: the path, the kind,
-the base, ours and theirs, and the hunks. Braid is stricter than git about
-structural conflicts: a file against a directory, two names that differ only in
-case or Unicode normalisation, a directory removed under a new file, and the
-same file renamed two ways.
+what the base, the head (ours) and the change (theirs) have there, and the
+hunks, with line numbers counted from 0 and the end excluded. The command line
+names the sides from the caller's point of view: `base`, `branch` and
+`workspace`. Braid is stricter than git about structural conflicts: a file
+against a directory, two names that differ only in case or Unicode
+normalisation, a directory removed under a new file, and the same file renamed
+two ways.
 
 **Invariants.** A branch only moves forward. A branch never contains a
 conflict. No value is overwritten except by a change whose base already
@@ -113,7 +129,8 @@ heads.
   change one workspace at once; different workspaces never wait for each
   other, except for the short transaction in which a landing moves a branch.
 - New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger than
-  1 MiB need an explicit `braid track`.
+  1 MiB need an explicit `braid track`. Until then `braid commit` refuses,
+  naming them, and `--force` leaves them out.
 - Status uses a stat cache (modification time, size, inode, type, blob id),
   with the usual guard: a file whose modification time is not strictly older
   than the start of the scan that cached it, read from the workspace's own
@@ -129,18 +146,29 @@ heads.
   normalisation; names that would collide there, or that the platform cannot
   hold, are refused before anything is written. Untracked files in the way
   stop a checkout too. Nothing from repository content is ever run.
-- `braid commit` records the working copy as a changeset on the base.
-  `braid land` puts the workspace's changesets on its branch in one op log
+- `braid commit` records the working copy as a changeset on the base. It
+  refuses while something blocks it, listing every reason at once: conflict
+  markers left in a file, a conflict that is not about content and not marked
+  resolved, a new file waiting for `braid track`. `braid status` lists the
+  same reasons as `blocking`, with `ready_to_commit`; it also counts how far
+  the branch's head is ahead of the workspace along first parents, stopping
+  after 5000 changesets, and lists the changesets that have not landed,
+  including those of a rebase in progress.
+- `braid land` puts the workspace's changesets on its branch in one op log
   transaction: the engine fast-forwards or rebases them onto the head, and the
   branch moves with a compare-and-swap. The working copy then follows, writing
   only the difference. On conflicts the branch does not move, the conflicts
-  come back as data, and the command exits with status 2.
+  come back as data, and the command exits with status 2. `land` and `update`
+  report the same fields: where each changeset went, from its id to the one
+  that holds it now, the paths merged, the paths of the working copy written
+  or removed, and on conflicts the command to run next.
 - `braid update` brings a workspace onto its branch's head, rebasing its own
   changesets without moving the branch. On conflicts, the working copy gets
   the head's tree with the change's clean paths and git-style markers for
   content conflicts; a rebase is then in progress, `braid resolve` settles the
   other conflicts, and the next `braid commit` records the resolution on the
-  head, refusing while markers remain.
+  head, refusing while markers remain. The resolution keeps the rebased
+  changeset's author, extra fields and message, unless `-m` gives another.
 - A changeset can also be made without any working copy: `braid change
   create` takes the base, the new contents and the deletions, and can require
   what the base holds at each path first, so that an agent never overwrites

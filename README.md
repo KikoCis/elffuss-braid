@@ -137,6 +137,7 @@ onto whatever the others landed first.
 
 ```bash
 export BRAID_AUTHOR="Ada Lovelace <ada@example.org>"
+export BRAID_AGENT=agent-1           # recorded with everything this agent does
 braid workspace add agent-1          # ./agent-1, tracking main
 cd agent-1
 echo 'fn main() {}' > main.rs
@@ -146,9 +147,34 @@ braid land                           # fast-forward, or a rebase onto main
 ```
 
 When two agents change the same lines, the second `land` exits with status 2,
-prints the conflicts as data (`--json` for agents) and leaves `main` where it
-was. `braid update` then rebases the change and writes git-style conflict
-markers; fix the file, `braid commit`, `braid land`.
+prints the conflicts as data and leaves `main` where it was. With `--json`,
+each conflict names its sides from the agent's point of view: `base`,
+`branch` (what is on the branch now) and `workspace` (its own change), with
+the hunks in conflict, and `next` says what to run: `braid update`, which
+rebases the change and writes git-style conflict markers. Fix the file, then
+`braid commit` (the change keeps its message unless `-m` gives another) and
+`braid land`.
+
+- `land` and `update` report the same fields: where each changeset went
+  (`landed`, from its id to the one that holds it now), the paths merged, the
+  paths of the working copy they wrote or removed, and for a landing its op
+  log entry.
+- `braid status --json` says how far the branch is ahead (`behind_by`), which
+  changesets have not landed, including one whose rebase is in progress, and
+  whether a commit would go through (`ready_to_commit`), with every reason
+  it would not (`blocking`), which `braid commit` refuses with too.
+- Every changeset names the agent that made it, and keeps it when it is
+  rebased; `braid log`, `braid show` and `braid op log` show who did what,
+  and the op log says what each landing did. Signatures use the local time
+  zone.
+- Revisions can be given as short ids, six hex digits or more; an ambiguous
+  one is an error that lists the candidates.
+- `braid show` and `braid diff <from> <to>` list the files a change adds,
+  modifies, deletes or turns into another type (`A`, `M`, `D`, `T`), as
+  `git diff --name-status` does.
+
+`braid status --help`, `braid land --help` and `braid update --help` describe
+every JSON field.
 
 An agent that knows exactly what it changes needs no checkout at all, and can
 check that nobody changed the file under it:
@@ -159,7 +185,8 @@ braid change create --base main --set src/lib.rs=@new-lib.rs \
 ```
 
 New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger than
-1 MiB are not committed until `braid track <path>` says so.
+1 MiB are not committed until `braid track <path>` says so: `braid commit`
+refuses while they wait, naming them, and `--force` leaves them out.
 
 ## Working with git
 
