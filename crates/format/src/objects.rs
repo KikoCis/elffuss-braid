@@ -26,6 +26,15 @@ pub trait Objects {
     fn contains(&self, id: &ObjectId) -> Result<bool, Self::Error> {
         Ok(self.get(id)?.is_some())
     }
+
+    /// The kind and payload size of an object, or `None` if it is not here.
+    /// Stores that know the size without reading the payload should override
+    /// this, so that checks on large files stay cheap.
+    fn stat(&self, id: &ObjectId) -> Result<Option<(Kind, u64)>, Self::Error> {
+        Ok(self
+            .get(id)?
+            .map(|(kind, payload)| (kind, payload.len() as u64)))
+    }
 }
 
 impl<T: Objects + ?Sized> Objects for &T {
@@ -41,6 +50,10 @@ impl<T: Objects + ?Sized> Objects for &T {
 
     fn contains(&self, id: &ObjectId) -> Result<bool, Self::Error> {
         (**self).contains(id)
+    }
+
+    fn stat(&self, id: &ObjectId) -> Result<Option<(Kind, u64)>, Self::Error> {
+        (**self).stat(id)
     }
 }
 
@@ -98,6 +111,13 @@ impl Objects for MemoryObjects {
     fn contains(&self, id: &ObjectId) -> Result<bool, Self::Error> {
         Ok(self.lock().contains_key(id))
     }
+
+    fn stat(&self, id: &ObjectId) -> Result<Option<(Kind, u64)>, Self::Error> {
+        Ok(self
+            .lock()
+            .get(id)
+            .map(|(kind, payload)| (*kind, payload.len() as u64)))
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +137,7 @@ mod tests {
             Some((Kind::Blob, b"hello\n".to_vec()))
         );
         assert!(objects.contains(&id).unwrap());
+        assert_eq!(objects.stat(&id).unwrap(), Some((Kind::Blob, 6)));
         let other = ObjectId::hash(Kind::Tree, b"hello\n");
         assert_eq!(objects.get(&other).unwrap(), None);
         // Through a reference, too.
