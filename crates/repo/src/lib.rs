@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+mod clock;
 mod config;
 mod git;
 mod link;
@@ -35,6 +36,7 @@ use braid_format::{Kind, ObjectId, Objects};
 use braid_store::{Options, Store};
 
 pub use braid_engine::{Conflict, ConflictHunk, ConflictKind, HunkSide};
+pub use clock::{local_now, signature_now};
 pub use config::{CONFIG_FILE, Config};
 pub use git::{
     GIT_EXPORT_AGENT, GitImport, MAP_REF, REMOTE_PREFIX, braid_ref_for_git, git_ref_for_braid,

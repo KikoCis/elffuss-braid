@@ -8,7 +8,6 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use braid_engine::{Conflict, MergeOutcome, is_ancestor, merge};
 use braid_format::{Kind, MemoryObjects, ObjectId, Objects, Signature};
@@ -267,15 +266,7 @@ impl Repo {
             }
             None => format!("{}@example.org", email_name(agent)),
         };
-        let seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0));
-        Ok(Signature {
-            name: agent.as_bytes().to_vec(),
-            email: email.into_bytes(),
-            seconds,
-            offset_minutes: 0,
-        })
+        Ok(crate::signature_now(agent.as_bytes(), email.as_bytes()))
     }
 }
 

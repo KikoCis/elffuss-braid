@@ -5,10 +5,9 @@
 //! `name` and `email` of the repository's `.braid/config` (see
 //! [`braid_repo::Config`]).
 //!
-//! Signatures record the current time with an offset of zero: braid does
-//! not work out the local time zone yet, so times read as UTC.
-
-use std::time::{SystemTime, UNIX_EPOCH};
+//! Signatures record the current time with the offset of the local time
+//! zone, or of UTC when it cannot be determined (see
+//! [`braid_repo::local_now`]).
 
 use braid_format::Signature;
 use braid_repo::Repo;
@@ -85,17 +84,9 @@ impl Identity {
         }
     }
 
-    /// A signature by this identity, now, with an offset of zero.
+    /// A signature by this identity, now, in local time.
     pub fn now(&self) -> Signature {
-        let seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs() as i64);
-        Signature {
-            name: self.name.as_bytes().to_vec(),
-            email: self.email.as_bytes().to_vec(),
-            seconds,
-            offset_minutes: 0,
-        }
+        braid_repo::signature_now(self.name.as_bytes(), self.email.as_bytes())
     }
 }
 
@@ -118,8 +109,9 @@ mod tests {
             assert!(Identity::parse(bad).is_err(), "{bad:?}");
         }
         let signature = ada.now();
-        assert_eq!(signature.offset_minutes, 0);
+        assert_eq!(signature.email, b"ada@example.org");
         assert!(signature.seconds > 1_700_000_000);
+        assert!(signature.offset_minutes.abs() < 24 * 60);
     }
 
     #[test]

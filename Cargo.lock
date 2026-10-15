@@ -530,6 +530,7 @@ dependencies = [
  "elffuss-braid-format",
  "elffuss-braid-git",
  "elffuss-braid-store",
+ "jiff",
  "tempfile",
  "thiserror",
 ]

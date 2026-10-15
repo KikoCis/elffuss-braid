@@ -248,6 +248,56 @@ fn short_ids_and_an_ambiguous_one() {
 }
 
 #[test]
+fn signatures_carry_the_local_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        braid()
+            .arg("init")
+            .arg(dir.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"a\n").unwrap();
+    let set = format!("a.txt=@{}", file.display());
+    // POSIX rules, UTC, and a zone that cannot be found, which reads as UTC.
+    for (zone, minutes, shown) in [
+        ("<+0530>-05:30", 330, "+0530"),
+        ("<-03>3", -180, "-0300"),
+        ("UTC0", 0, "+0000"),
+        ("Nowhere/Nothing", 0, "+0000"),
+    ] {
+        let made = run_json(
+            braid_in(dir.path())
+                .env("TZ", zone)
+                .env("BRAID_AUTHOR", "Ada <ada@example.org>")
+                .args(["change", "create", "--base", "none", "--set", &set])
+                .args(["-m", zone]),
+        );
+        let id = made["change"].as_str().unwrap();
+        // JSON keeps the seconds and the offset.
+        let show = run_json(braid_in(dir.path()).args(["show", id]));
+        for who in ["author", "committer"] {
+            assert_eq!(show[who]["offset_minutes"], minutes, "{zone}");
+            assert!(show[who]["seconds"].as_i64().unwrap() > 1_700_000_000);
+            let time = show[who]["time"].as_str().unwrap();
+            assert!(time.ends_with(shown), "{zone}: {time}");
+        }
+        // The log shows minutes, in the signature's own offset.
+        let log = braid_in(dir.path())
+            .args(["log", id, "-n", "1"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(log.stdout).unwrap();
+        let time = text.split("  ").nth(1).unwrap();
+        assert_eq!(time.len(), "2026-10-15 21:41 +0530".len(), "{text}");
+        assert!(time.ends_with(shown), "{zone}: {text}");
+    }
+}
+
+#[test]
 fn commands_outside_a_repository_fail_clearly() {
     let dir = tempfile::tempdir().unwrap();
     let out = braid()

@@ -18,6 +18,13 @@ braid-store.workspace = true
 braid-git.workspace = true
 braid-engine.workspace = true
 blake3.workspace = true
+# The local time zone, read without calling into the C library. Only the
+# system's own time zone database: nothing bundled.
+jiff = { version = "0.2.38", default-features = false, features = [
+    "std",
+    "tz-system",
+    "tzdb-zoneinfo",
+] }
 thiserror = "2"
 
 [dev-dependencies]

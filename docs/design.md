@@ -145,8 +145,10 @@ heads.
   create` takes the base, the new contents and the deletions, and can require
   what the base holds at each path first, so that an agent never overwrites
   an edit it did not see.
-- Signatures record the time in UTC for now: the local time zone offset is not
-  computed yet.
+- Signatures record the time with the offset of the local time zone, which
+  [jiff](https://github.com/BurntSushi/jiff) reads from `TZ` or the system's
+  setting without calling into the C library; when it cannot be determined,
+  the offset is zero.
 
 ## Git bridge
 
