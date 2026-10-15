@@ -9,7 +9,7 @@ mod common;
 
 use std::fs;
 
-use braid_format::ChangeOp;
+use braid_format::{ChangeOp, ObjectId};
 use braid_wc::{ChangeKind, CommitRequest, Error, Landed, RebaseProgress, Updated, Workspace};
 use common::{Fixture, ada};
 
@@ -55,7 +55,10 @@ fn a_file_replacing_a_directory_with_untracked_files_is_refused() {
 
     // Once the file is out of the way, the update goes through.
     fs::remove_file(dir.join("d/junk")).unwrap();
-    assert_eq!(ws.update(&ada()).unwrap(), Updated::Moved { head: second });
+    assert_eq!(
+        ws.update(&ada()).unwrap().updated,
+        Updated::Moved { head: second }
+    );
     assert_eq!(fs::read(dir.join("d")).unwrap(), b"now a file");
 }
 
@@ -124,9 +127,10 @@ fn a_stack_that_conflicts_half_way_continues_after_the_commit() {
     let theirs = f.commit(&[seed], vec![("x", f.file("1\ntheirs\n3\n"))]);
     f.set_branch("main", theirs);
 
+    let report = ws.update(&ada()).unwrap();
     let Updated::Conflicts {
         change, conflicts, ..
-    } = ws.update(&ada()).unwrap()
+    } = report.updated
     else {
         panic!("expected conflicts");
     };
@@ -135,6 +139,18 @@ fn a_stack_that_conflicts_half_way_continues_after_the_commit() {
     let state = ws.state().unwrap();
     let rebase = state.rebase.unwrap();
     assert_eq!(rebase.pending, [third]);
+    // The first changeset went onto main's head, the others nowhere yet;
+    // the working copy got main's x with markers, and lost z for now.
+    assert_eq!(report.head, Some(theirs));
+    assert_eq!(report.base_before, Some(third));
+    assert_eq!(report.base, Some(rebase.onto));
+    let placed: Vec<(ObjectId, Option<ObjectId>)> =
+        report.placed.iter().map(|p| (p.from, p.to)).collect();
+    assert_eq!(
+        placed,
+        [(first, Some(rebase.onto)), (second, None), (third, None)]
+    );
+    assert_eq!(report.updated_paths, [b"x".to_vec(), b"z".to_vec()]);
     // The working copy has the first changeset rebased, and the markers;
     // the third one waits.
     assert_eq!(fs::read(dir.join("y")).unwrap(), b"y, ours\n");

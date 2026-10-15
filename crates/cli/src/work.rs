@@ -17,8 +17,8 @@ use braid_engine::{Conflict, ConflictKind, HunkSide};
 use braid_format::{ChangeOp, EntryKind, ObjectId};
 use braid_repo::{Location, Repo};
 use braid_wc::{
-    ChangeRequest, CommitRequest, Expect, Identity, LandReport, Landed, RebaseProgress, Updated,
-    Workspace,
+    ChangeRequest, CommitRequest, Expect, Identity, LandReport, Landed, Placed, RebaseProgress,
+    UpdateReport, Updated, Workspace,
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -27,6 +27,80 @@ use crate::{Cli, change_json, open_repo, print_json, resolve_changeset};
 
 /// Exit status of a command that stopped on conflicts.
 const CONFLICTS: u8 = 2;
+
+/// The fields of the report `land`, `update` and `change create --land`
+/// print with `--json`, for their long help.
+macro_rules! report_fields {
+    () => {
+        "With --json, land and update print one object with these fields;
+change create --land prints it as \"land\", without base and updated_paths.
+
+  branch         the branch landed on, or updated from
+  outcome        land: fast-forward, rebased, already-applied, nothing or
+                 conflicts; update: up-to-date, moved, rebased or conflicts
+  head_before    the branch's head before the command
+  head           the branch's head after it (update never moves it)
+  base           the workspace's base after the command
+  landed         one {from, to} per changeset of the workspace, oldest
+                 first: its id, and the id of the changeset that holds it
+                 now (itself after a fast-forward, the rebased one after a
+                 rebase), or null when it did not move: its changes were
+                 there already, or a conflict stopped it or one before it
+  merged_paths   paths both sides changed, merged line by line
+  operation      the op log operation that moved the branch, or null
+  updated_paths  paths of the working copy written or removed, sorted
+  change         the changeset that conflicts, or null
+  conflicts      one per conflict: path; kind, one of CONTENT,
+                 MODIFY_DELETE, MODE, DF, DIR_REMOVED and CASE; and what
+                 each side has at the path, null or an entry {kind, ...}:
+                 base (the common ancestor), branch (what the branch has
+                 now) and workspace (your change). A CONTENT conflict of
+                 text files has hunks: the regions in conflict, each with
+                 the same three sides as {start, end, text}, where start
+                 and end are line numbers counted from 0 and end is
+                 excluded (an empty range sits before line start)
+  next           on conflicts, what to run next: braid update after land;
+                 braid commit, once the files are fixed, after update; a
+                 new change create on the branch after change create;
+                 otherwise null
+
+Ids in JSON are full; text output shows their first 12 hex digits."
+    };
+}
+
+/// The long help of `land`.
+pub(crate) const LAND_HELP: &str = concat!(
+    "Land the workspace's changesets on its branch, in one step: a
+fast-forward when they were built on the head, a rebase onto it otherwise.
+The working copy then follows the landed tree. On conflicts the branch does
+not move and the exit status is 2; `braid update` brings the conflicts into
+the working copy.
+
+",
+    report_fields!()
+);
+
+/// The long help of `update`.
+pub(crate) const UPDATE_HELP: &str = concat!(
+    "Bring the workspace onto its branch's head, rebasing its own changesets
+without moving the branch. On conflicts the exit status is 2: the working
+copy gets the head's tree with the clean paths and conflict markers, and a
+rebase is in progress until `braid commit`.
+
+",
+    report_fields!()
+);
+
+/// The long help of `change create`.
+pub(crate) const CREATE_HELP: &str = concat!(
+    "Make a changeset on a base without a working copy, and optionally land
+it (exit status 2 on conflicts). Prints JSON whether or not --json is
+given: change, the new changeset's id; base; and land, the report of the
+landing, or null.
+
+",
+    report_fields!()
+);
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorkspaceAction {
@@ -96,6 +170,7 @@ pub(crate) struct LandArgs {
 pub(crate) enum ChangeAction {
     /// Make a changeset on a base without a working copy, and optionally
     /// land it (exit status 2 on conflicts). Prints the ids as JSON.
+    #[command(long_about = CREATE_HELP)]
     Create(CreateArgs),
 }
 
@@ -467,67 +542,175 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
     })
 }
 
-/// Prints a landing's report and returns the exit status it calls for.
-fn report_landing(cli: &Cli, report: &LandReport) -> Result<ExitCode> {
-    let (outcome, changeset) = match &report.landed {
-        Landed::Nothing => ("nothing", None),
-        Landed::FastForward(id) => ("fast-forward", Some(*id)),
-        Landed::Rebased(id) => ("rebased", Some(*id)),
-        Landed::AlreadyApplied => ("already-applied", None),
-        Landed::Conflicts { change, .. } => ("conflicts", Some(*change)),
-    };
-    let conflicts: &[Conflict] = match &report.landed {
-        Landed::Conflicts { conflicts, .. } => conflicts,
-        _ => &[],
-    };
-    if cli.json {
-        print_json(&json!({
-            "branch": report.branch,
-            "outcome": outcome,
-            "previous": hex(report.previous),
-            "head": hex(report.head()),
-            "changeset": hex(changeset),
-            "operation": report.operation,
-            "conflicts": conflicts.iter().map(conflict_json).collect::<Vec<_>>(),
-        }))?;
-    } else {
-        match &report.landed {
-            Landed::Nothing => println!("Nothing to land on {}", report.branch),
-            Landed::FastForward(id) => {
-                println!("Landed {} on {} (fast-forward)", id.short(), report.branch);
-            }
-            Landed::Rebased(id) => println!(
-                "Landed on {} as {}, rebased onto {}",
-                report.branch,
-                id.short(),
-                short(report.previous)
-            ),
-            Landed::AlreadyApplied => println!("{} already has these changes", report.branch),
-            Landed::Conflicts { change, conflicts } => {
-                println!(
-                    "{} conflicts with {} at {}; {} did not move:",
-                    change.short(),
-                    report.branch,
-                    short(report.previous),
-                    report.branch
-                );
-                print_conflicts(conflicts);
-            }
+/// What `land`, `update` and `change create --land` report, in one shape:
+/// the fields their long help lists.
+struct Report<'a> {
+    branch: &'a str,
+    outcome: &'static str,
+    head_before: Option<ObjectId>,
+    head: Option<ObjectId>,
+    placed: &'a [Placed],
+    merged_paths: &'a [Vec<u8>],
+    operation: Option<u64>,
+    change: Option<ObjectId>,
+    conflicts: &'a [Conflict],
+    next: Option<String>,
+    /// For a workspace: its base afterwards, and the paths of its working
+    /// copy written or removed.
+    workspace: Option<(Option<ObjectId>, &'a [Vec<u8>])>,
+}
+
+impl<'a> Report<'a> {
+    fn landing(report: &'a LandReport) -> Report<'a> {
+        let (outcome, change, conflicts): (_, _, &[Conflict]) = match &report.landed {
+            Landed::Nothing => ("nothing", None, &[]),
+            Landed::FastForward(_) => ("fast-forward", None, &[]),
+            Landed::Rebased(_) => ("rebased", None, &[]),
+            Landed::AlreadyApplied => ("already-applied", None, &[]),
+            Landed::Conflicts { change, conflicts } => ("conflicts", Some(*change), conflicts),
+        };
+        Report {
+            branch: &report.branch,
+            outcome,
+            head_before: report.head_before,
+            head: report.head(),
+            placed: &report.placed,
+            merged_paths: &report.merged_paths,
+            operation: report.operation,
+            change,
+            conflicts,
+            next: None,
+            workspace: None,
         }
     }
-    Ok(if conflicts.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(CONFLICTS)
-    })
+
+    fn update(report: &'a UpdateReport) -> Report<'a> {
+        let (outcome, change, conflicts): (_, _, &[Conflict]) = match &report.updated {
+            Updated::UpToDate => ("up-to-date", None, &[]),
+            Updated::Moved { .. } => ("moved", None, &[]),
+            Updated::Rebased { .. } => ("rebased", None, &[]),
+            Updated::Conflicts {
+                change, conflicts, ..
+            } => ("conflicts", Some(*change), conflicts),
+        };
+        Report {
+            branch: &report.branch,
+            outcome,
+            // An update reads the head and never moves it.
+            head_before: report.head,
+            head: report.head,
+            placed: &report.placed,
+            merged_paths: &report.merged_paths,
+            operation: None,
+            change,
+            conflicts,
+            next: (!conflicts.is_empty()).then(|| "braid commit".to_owned()),
+            workspace: Some((report.base, &report.updated_paths)),
+        }
+    }
+
+    fn json(&self) -> Value {
+        let mut value = json!({
+            "branch": self.branch,
+            "outcome": self.outcome,
+            "head_before": hex(self.head_before),
+            "head": hex(self.head),
+            "landed": self.placed.iter().map(|placed| json!({
+                "from": placed.from.to_hex(),
+                "to": hex(placed.to),
+            })).collect::<Vec<_>>(),
+            "merged_paths": self.merged_paths.iter().map(|p| show(p)).collect::<Vec<_>>(),
+            "operation": self.operation,
+            "change": hex(self.change),
+            "conflicts": self.conflicts.iter().map(conflict_json).collect::<Vec<_>>(),
+            "next": self.next,
+        });
+        if let Some((base, updated)) = self.workspace {
+            value["base"] = hex(base);
+            value["updated_paths"] = updated.iter().map(|p| Value::String(show(p))).collect();
+        }
+        value
+    }
+
+    fn exit_code(&self) -> ExitCode {
+        if self.conflicts.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(CONFLICTS)
+        }
+    }
+
+    /// `, 1 path merged`, or nothing when none was.
+    fn merged(&self) -> String {
+        match self.merged_paths.len() {
+            0 => String::new(),
+            n => format!(" ({} merged)", count(n, "path")),
+        }
+    }
+
+    /// Says how many paths of the working copy changed, if any did.
+    fn print_updated(&self) {
+        if let Some((_, updated)) = self.workspace
+            && !updated.is_empty()
+        {
+            println!(
+                "Updated {} in the working copy",
+                count(updated.len(), "path")
+            );
+        }
+    }
 }
 
 pub(crate) fn land(cli: &Cli, args: &LandArgs) -> Result<ExitCode> {
     let target = Target::find(cli)?;
     let workspace = target.open()?;
     let committer = identity(&args.identity, &target.repo)?;
-    let report = workspace.land(args.onto.as_deref(), &cli.agent, &committer)?;
-    report_landing(cli, &report)
+    let landing = workspace.land(args.onto.as_deref(), &cli.agent, &committer)?;
+    let mut report = Report::landing(&landing);
+    report.workspace = Some((workspace.state()?.base, &landing.updated_paths));
+    if !report.conflicts.is_empty() {
+        report.next = Some("braid update".to_owned());
+    }
+    if cli.json {
+        print_json(&report.json())?;
+        return Ok(report.exit_code());
+    }
+    let branch = &landing.branch;
+    let several = landing.placed.len() > 1;
+    match &landing.landed {
+        Landed::Nothing => println!("Nothing to land on {branch}"),
+        Landed::FastForward(id) if several => println!(
+            "Landed {} on {branch} (fast-forward), up to {}",
+            count(landing.placed.len(), "changeset"),
+            id.short()
+        ),
+        Landed::FastForward(id) => println!("Landed {} on {branch} (fast-forward)", id.short()),
+        Landed::Rebased(id) if several => println!(
+            "Landed {} on {branch}, rebased onto {}; the last is {}{}",
+            count(landing.placed.len(), "changeset"),
+            short(landing.head_before),
+            id.short(),
+            report.merged()
+        ),
+        Landed::Rebased(id) => println!(
+            "Landed on {branch} as {}, rebased onto {}{}",
+            id.short(),
+            short(landing.head_before),
+            report.merged()
+        ),
+        Landed::AlreadyApplied => println!("{branch} already has these changes"),
+        Landed::Conflicts { change, conflicts } => {
+            println!(
+                "{} conflicts with {branch} at {}; {branch} did not move:",
+                change.short(),
+                short(landing.head_before),
+            );
+            print_conflicts(conflicts);
+            println!("Run `braid update` to bring the conflicts into the working copy.");
+        }
+    }
+    report.print_updated();
+    Ok(report.exit_code())
 }
 
 pub(crate) fn update(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
@@ -535,56 +718,38 @@ pub(crate) fn update(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
     let workspace = target.open()?;
     let committer = identity(args, &target.repo)?;
     let updated = workspace.update(&committer)?;
-    let (outcome, head, base, conflicts): (&str, Option<ObjectId>, Option<ObjectId>, &[Conflict]) =
-        match &updated {
-            Updated::UpToDate => ("up-to-date", None, None, &[]),
-            Updated::Moved { head } => ("moved", Some(*head), Some(*head), &[]),
-            Updated::Rebased { head, tip } => ("rebased", Some(*head), Some(*tip), &[]),
-            Updated::Conflicts {
-                head, conflicts, ..
-            } => ("conflicts", Some(*head), Some(*head), conflicts),
-        };
+    let report = Report::update(&updated);
     if cli.json {
-        let change = match &updated {
-            Updated::Conflicts { change, .. } => Some(*change),
-            _ => None,
-        };
-        print_json(&json!({
-            "outcome": outcome,
-            "head": hex(head),
-            "base": hex(base.or(workspace.state()?.base)),
-            "change": hex(change),
-            "conflicts": conflicts.iter().map(conflict_json).collect::<Vec<_>>(),
-        }))?;
-    } else {
-        match &updated {
-            Updated::UpToDate => println!("Up to date"),
-            Updated::Moved { head } => println!("Moved to {}", head.short()),
-            Updated::Rebased { head, tip } => {
-                println!("Rebased onto {}; now at {}", head.short(), tip.short());
-            }
-            Updated::Conflicts {
-                head,
-                change,
-                conflicts,
-            } => {
-                println!(
-                    "{} conflicts with {}; the working copy has the merge so far:",
-                    change.short(),
-                    head.short()
-                );
-                print_conflicts(conflicts);
-                println!(
-                    "Fix the files, `braid resolve` the other conflicts, then `braid commit`."
-                );
-            }
+        print_json(&report.json())?;
+        return Ok(report.exit_code());
+    }
+    match &updated.updated {
+        Updated::UpToDate => println!("Up to date"),
+        Updated::Moved { head } => println!("Moved to {}", head.short()),
+        Updated::Rebased { head, tip } => {
+            println!(
+                "Rebased onto {}; now at {}{}",
+                head.short(),
+                tip.short(),
+                report.merged()
+            );
+        }
+        Updated::Conflicts {
+            head,
+            change,
+            conflicts,
+        } => {
+            println!(
+                "{} conflicts with {}; the working copy has the merge so far:",
+                change.short(),
+                head.short()
+            );
+            print_conflicts(conflicts);
+            println!("Fix the files, `braid resolve` the other conflicts, then `braid commit`.");
         }
     }
-    Ok(if conflicts.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(CONFLICTS)
-    })
+    report.print_updated();
+    Ok(report.exit_code())
 }
 
 pub(crate) fn resolve(cli: &Cli, paths: &[PathBuf]) -> Result<ExitCode> {
@@ -724,7 +889,15 @@ pub(crate) fn change(cli: &Cli, action: &ChangeAction) -> Result<ExitCode> {
     );
     // Always JSON: this command is for agents, which want the ids.
     let land = match &landing {
-        Some(report) => landing_json(report),
+        Some(landing) => {
+            let mut report = Report::landing(landing);
+            if !report.conflicts.is_empty() {
+                // The change was built on a base the branch has moved past:
+                // it is made again on the new head.
+                report.next = Some(format!("braid change create --base {}", landing.branch));
+            }
+            report.json()
+        }
         None => Value::Null,
     };
     print_json(&json!({
@@ -736,28 +909,6 @@ pub(crate) fn change(cli: &Cli, action: &ChangeAction) -> Result<ExitCode> {
         ExitCode::from(CONFLICTS)
     } else {
         ExitCode::SUCCESS
-    })
-}
-
-fn landing_json(report: &LandReport) -> Value {
-    let outcome = match &report.landed {
-        Landed::Nothing => "nothing",
-        Landed::FastForward(_) => "fast-forward",
-        Landed::Rebased(_) => "rebased",
-        Landed::AlreadyApplied => "already-applied",
-        Landed::Conflicts { .. } => "conflicts",
-    };
-    let conflicts: &[Conflict] = match &report.landed {
-        Landed::Conflicts { conflicts, .. } => conflicts,
-        _ => &[],
-    };
-    json!({
-        "branch": report.branch,
-        "outcome": outcome,
-        "previous": hex(report.previous),
-        "head": hex(report.head()),
-        "operation": report.operation,
-        "conflicts": conflicts.iter().map(conflict_json).collect::<Vec<_>>(),
     })
 }
 
@@ -792,16 +943,18 @@ fn side_json(side: &HunkSide) -> Value {
     })
 }
 
-/// A conflict as data: the path, the kind's code, the entries of the base,
-/// ours (the branch head) and theirs (the change), and for content
-/// conflicts the hunks.
+/// A conflict as data, with its sides named from the caller's point of
+/// view: the path, the kind's code, the entries of `base` (the common
+/// ancestor), `branch` (what the branch has now) and `workspace` (the
+/// change: the workspace's, or the one `change create` made), and for
+/// content conflicts the hunks, with the same three sides.
 pub(crate) fn conflict_json(conflict: &Conflict) -> Value {
     let mut value = json!({
         "path": show(&conflict.path),
         "kind": conflict.kind.code(),
         "base": entry_json(&conflict.base),
-        "ours": entry_json(&conflict.ours),
-        "theirs": entry_json(&conflict.theirs),
+        "branch": entry_json(&conflict.ours),
+        "workspace": entry_json(&conflict.theirs),
         "hunks": [],
     });
     match &conflict.kind {
@@ -811,8 +964,8 @@ pub(crate) fn conflict_json(conflict: &Conflict) -> Value {
                 .map(|hunk| {
                     json!({
                         "base": side_json(&hunk.base),
-                        "ours": side_json(&hunk.ours),
-                        "theirs": side_json(&hunk.theirs),
+                        "branch": side_json(&hunk.ours),
+                        "workspace": side_json(&hunk.theirs),
                     })
                 })
                 .collect();

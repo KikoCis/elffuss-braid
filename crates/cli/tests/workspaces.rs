@@ -177,7 +177,7 @@ fn disjoint_workspaces_land_in_either_order() {
         assert_eq!(landed["outcome"], "fast-forward");
         let landed = json(second, &["land"]);
         assert_eq!(landed["outcome"], "rebased");
-        assert_eq!(landed["previous"], json(first, &["status"])["base"]);
+        assert_eq!(landed["head_before"], json(first, &["status"])["base"]);
 
         // Both changes are on main, once each, on a linear history.
         let log = history(&repo);
@@ -230,9 +230,12 @@ fn same_lines_conflict_then_resolve() {
     let conflict = &landed["conflicts"][0];
     assert_eq!(conflict["path"], "shared.txt");
     assert_eq!(conflict["kind"], "CONTENT");
-    assert_eq!(conflict["hunks"][0]["ours"]["text"], "TWO from a\n");
-    assert_eq!(conflict["hunks"][0]["theirs"]["text"], "TWO from b\n");
+    assert_eq!(conflict["hunks"][0]["branch"]["text"], "TWO from a\n");
+    assert_eq!(conflict["hunks"][0]["workspace"]["text"], "TWO from b\n");
     assert_eq!(conflict["base"]["kind"], "file");
+    assert_eq!(conflict["branch"]["kind"], "file");
+    assert!(conflict.get("ours").is_none() && conflict.get("theirs").is_none());
+    assert_eq!(landed["next"], "braid update");
     assert_eq!(repo.main(), main_before);
 
     // Update writes the conflict with markers, and a rebase is in progress.
@@ -398,6 +401,21 @@ fn change_create_with_expectations() {
     );
     assert_eq!(made["land"]["outcome"], "fast-forward");
     assert_eq!(repo.main().as_deref(), made["change"].as_str());
+    let change = made["change"].as_str().unwrap();
+    assert_eq!(
+        made["land"]["landed"],
+        serde_json::json!([{ "from": change, "to": change }])
+    );
+    assert!(made["land"].get("updated_paths").is_none());
+    let op = &json(&repo.root, &["op", "log", "-n", "1"])[0];
+    assert_eq!(
+        op["description"],
+        format!(
+            "land changeset on main: fast-forward {} -> {} (0 paths merged)",
+            &change[..12],
+            &change[..12]
+        )
+    );
 
     // Another agent, still believing the old content, is stopped before
     // anything is made: its base holds another blob now.
@@ -464,6 +482,18 @@ fn change_create_with_expectations() {
     );
     assert_eq!(conflicted["land"]["outcome"], "conflicts");
     assert_eq!(conflicted["land"]["conflicts"][0]["kind"], "CONTENT");
+    assert_eq!(
+        conflicted["land"]["conflicts"][0]["workspace"]["size"],
+        "a = 3\n".len()
+    );
+    assert_eq!(
+        conflicted["land"]["next"],
+        "braid change create --base main"
+    );
+    assert_eq!(
+        conflicted["land"]["landed"],
+        serde_json::json!([{ "from": conflicted["change"], "to": null }])
+    );
     assert_eq!(repo.main().as_deref(), made["change"].as_str());
 
     // Content from standard input.
@@ -670,6 +700,37 @@ fn stacked_changesets_land_in_order() {
     let landed = json(&ws, &["land"]);
     assert_eq!(landed["outcome"], "rebased");
     let log = history(&repo);
+    // The report and the op log say where each went.
+    let id = |c: &Value| c["changeset"].as_str().unwrap().to_owned();
+    let moves: Vec<(String, String)> = landed["landed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["from"].as_str().unwrap().to_owned(),
+                m["to"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        moves,
+        [
+            (id(&first), log[1]["id"].as_str().unwrap().to_owned()),
+            (id(&second), log[0]["id"].as_str().unwrap().to_owned()),
+        ]
+    );
+    let op = &json(&repo.root, &["op", "log", "-n", "1"])[0];
+    assert_eq!(
+        op["description"],
+        format!(
+            "land workspace ws on main: rebased 2 changesets: {} -> {}, {} -> {} (0 paths merged)",
+            &moves[0].0[..12],
+            &moves[0].1[..12],
+            &moves[1].0[..12],
+            &moves[1].1[..12]
+        )
+    );
     let messages: Vec<&str> = log.iter().map(|c| c["message"].as_str().unwrap()).collect();
     assert_eq!(messages, ["second", "first", "other", "seed"]);
     assert_eq!(
@@ -683,6 +744,86 @@ fn stacked_changesets_land_in_order() {
     assert_eq!(read(&ws, "a.txt"), "3\n");
     assert_eq!(read(&ws, "b.txt"), "other\n");
     assert!(repo.fsck_is_clean());
+}
+
+#[test]
+fn land_and_update_print_the_same_fields() {
+    let fields = [
+        "base",
+        "branch",
+        "change",
+        "conflicts",
+        "head",
+        "head_before",
+        "landed",
+        "merged_paths",
+        "next",
+        "operation",
+        "outcome",
+        "updated_paths",
+    ];
+    let keys = |report: &Value| {
+        let mut keys: Vec<String> = report.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let repo = Repo::new();
+    seed(&repo, &[("a.txt", "1\n"), ("b.txt", "1\n")]);
+    let ws = repo.workspace("ws");
+    let other = repo.workspace("other");
+    write(&ws, "a.txt", "2\n");
+    let first = json(&ws, &["commit", "-m", "first"]);
+    write(&other, "b.txt", "other\n");
+    json(&other, &["commit", "-m", "other"]);
+    let theirs = json(&other, &["land"]);
+    let head = theirs["head"].as_str().unwrap().to_owned();
+
+    // update rebases the workspace's changeset onto the head, and brings
+    // b.txt into the working copy.
+    let updated = json(&ws, &["update"]);
+    assert_eq!(keys(&updated), fields);
+    assert_eq!(updated["outcome"], "rebased");
+    assert_eq!(updated["head_before"], head.as_str());
+    assert_eq!(updated["head"], head.as_str());
+    assert_eq!(updated["operation"], Value::Null);
+    assert_eq!(updated["next"], Value::Null);
+    assert_eq!(updated["updated_paths"], serde_json::json!(["b.txt"]));
+    let rebased = updated["base"].as_str().unwrap().to_owned();
+    assert_eq!(
+        updated["landed"],
+        serde_json::json!([{ "from": first["changeset"], "to": rebased }])
+    );
+
+    // land then fast-forwards to it, and writes nothing.
+    let landed = json(&ws, &["land"]);
+    assert_eq!(keys(&landed), fields);
+    assert_eq!(landed["outcome"], "fast-forward");
+    assert_eq!(landed["head_before"], head.as_str());
+    assert_eq!(landed["head"], rebased.as_str());
+    assert_eq!(landed["base"], rebased.as_str());
+    assert_eq!(
+        landed["landed"],
+        serde_json::json!([{ "from": rebased, "to": rebased }])
+    );
+    assert_eq!(landed["updated_paths"], serde_json::json!([]));
+    let op = &json(&repo.root, &["op", "log", "-n", "1"])[0];
+    assert_eq!(op["seq"], landed["operation"]);
+    assert_eq!(
+        op["description"],
+        format!(
+            "land workspace ws on main: fast-forward {} -> {} (0 paths merged)",
+            &rebased[..12],
+            &rebased[..12]
+        )
+    );
+    // Nothing left: both report it the same way.
+    let nothing = json(&ws, &["land"]);
+    assert_eq!(keys(&nothing), fields);
+    assert_eq!(nothing["outcome"], "nothing");
+    assert_eq!(nothing["landed"], serde_json::json!([]));
+    let up_to_date = json(&ws, &["update"]);
+    assert_eq!(keys(&up_to_date), fields);
+    assert_eq!(up_to_date["outcome"], "up-to-date");
 }
 
 #[test]

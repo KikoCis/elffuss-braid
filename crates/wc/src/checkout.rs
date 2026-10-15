@@ -59,6 +59,20 @@ impl Plan {
     pub(crate) fn len(&self) -> usize {
         self.removes.len() + self.writes.len()
     }
+
+    /// The paths the checkout writes or removes, sorted: files, symlinks
+    /// and gitlinks, not the directories that come and go with them.
+    pub(crate) fn paths(&self) -> Vec<Vec<u8>> {
+        let mut paths: Vec<Vec<u8>> = self
+            .removes
+            .iter()
+            .chain(&self.writes)
+            .map(|(path, _)| path.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
 }
 
 /// Plans the checkout that turns the working copy of tree `from` into tree

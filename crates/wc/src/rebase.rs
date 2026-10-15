@@ -27,6 +27,7 @@ use crate::markers;
 use crate::paths::is_within;
 use crate::state::RecordedConflict;
 use crate::tree::root_of;
+use crate::workspace::Placed;
 
 /// The extra field a temporary base carries, so that it can be told apart.
 pub const TEMPORARY: &[u8] = b"braid-temporary-base";
@@ -36,13 +37,22 @@ pub const TEMPORARY: &[u8] = b"braid-temporary-base";
 pub(crate) enum Replayed {
     /// Every changeset is on top of the head; `tip` is the last of them, or
     /// the head itself when it had all of them already.
-    Done { tip: ObjectId, rebased: bool },
+    Done {
+        tip: ObjectId,
+        rebased: bool,
+        /// Where each changeset of the stack went, in order.
+        placed: Vec<Placed>,
+        /// The paths both sides changed, over the whole stack, sorted.
+        merged_paths: Vec<Vec<u8>>,
+    },
     /// The changeset at `index` of the stack conflicts with `onto`, the head
     /// or the last changeset replayed before it.
     Stopped {
         index: usize,
         onto: ObjectId,
         conflicts: Vec<Conflict>,
+        /// Where the changesets before `index` went.
+        placed: Vec<Placed>,
     },
 }
 
@@ -72,6 +82,8 @@ pub(crate) fn replay<O: Objects>(
 ) -> Result<Replayed, Error> {
     let mut tip = head;
     let mut rebased = false;
+    let mut placed = Vec::with_capacity(stack.len());
+    let mut merged = Vec::new();
     for (index, &change) in stack.iter().enumerate() {
         let outcome = match tip {
             Some(onto) if index > 0 || first == First::Pick => {
@@ -89,13 +101,17 @@ pub(crate) fn replay<O: Objects>(
                 other => other?,
             },
         };
-        match outcome {
-            LandOutcome::FastForward(id) => tip = Some(id),
-            LandOutcome::Rebased { changeset, .. } => {
-                tip = Some(changeset);
+        let to = match outcome {
+            LandOutcome::FastForward(id) => Some(id),
+            LandOutcome::Rebased {
+                changeset,
+                merged_paths,
+            } => {
                 rebased = true;
+                merged.extend(merged_paths);
+                Some(changeset)
             }
-            LandOutcome::AlreadyApplied => {}
+            LandOutcome::AlreadyApplied => None,
             LandOutcome::Conflicts(conflicts) => {
                 let onto = tip.ok_or(Error::NotOnBranch {
                     branch: branch.to_owned(),
@@ -104,12 +120,22 @@ pub(crate) fn replay<O: Objects>(
                     index,
                     onto,
                     conflicts,
+                    placed,
                 });
             }
-        }
+        };
+        tip = to.or(tip);
+        placed.push(Placed { from: change, to });
     }
+    merged.sort();
+    merged.dedup();
     match tip {
-        Some(tip) => Ok(Replayed::Done { tip, rebased }),
+        Some(tip) => Ok(Replayed::Done {
+            tip,
+            rebased,
+            placed,
+            merged_paths: merged,
+        }),
         None => Err(Error::NotOnBranch {
             branch: branch.to_owned(),
         }),

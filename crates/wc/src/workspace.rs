@@ -133,17 +133,38 @@ pub enum Landed {
     },
 }
 
+/// One changeset of a workspace, and the changeset that holds it now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placed {
+    /// The changeset as the workspace had it.
+    pub from: ObjectId,
+    /// What holds it now: the same changeset after a fast-forward, the
+    /// rebased one after a rebase, or `None` when it did not go anywhere:
+    /// the branch had its changes already, or a conflict stopped it or one
+    /// before it.
+    pub to: Option<ObjectId>,
+}
+
 /// What a landing did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LandReport {
     /// The branch.
     pub branch: String,
     /// Its head before the landing.
-    pub previous: Option<ObjectId>,
+    pub head_before: Option<ObjectId>,
     /// How it ended.
     pub landed: Landed,
     /// The op log operation that moved the branch, if it moved.
     pub operation: Option<u64>,
+    /// Where each changeset of the stack went, oldest first; when the
+    /// branch did not move, none went anywhere.
+    pub placed: Vec<Placed>,
+    /// The paths both sides changed, merged line by line or by kind, over
+    /// the whole stack, sorted.
+    pub merged_paths: Vec<Vec<u8>>,
+    /// The paths of the working copy that the landing then wrote or
+    /// removed, sorted; none for [`land_change`](crate::land_change).
+    pub updated_paths: Vec<Vec<u8>>,
 }
 
 impl LandReport {
@@ -151,9 +172,35 @@ impl LandReport {
     pub fn head(&self) -> Option<ObjectId> {
         match &self.landed {
             Landed::FastForward(id) | Landed::Rebased(id) => Some(*id),
-            _ => self.previous,
+            _ => self.head_before,
         }
     }
+}
+
+/// What `update` did, with the outcome in [`UpdateReport::updated`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateReport {
+    /// The branch the workspace updates from.
+    pub branch: String,
+    /// Its head, which an update reads and never moves; `None` when the
+    /// branch does not exist.
+    pub head: Option<ObjectId>,
+    /// How the update ended.
+    pub updated: Updated,
+    /// The workspace's base before the update.
+    pub base_before: Option<ObjectId>,
+    /// Its base after it.
+    pub base: Option<ObjectId>,
+    /// Where each of the workspace's own changesets went, oldest first: the
+    /// rebased changeset on top of the head, or `None` from the one that
+    /// conflicts on.
+    pub placed: Vec<Placed>,
+    /// The paths both sides changed, merged line by line or by kind, over
+    /// the changesets rebased, sorted.
+    pub merged_paths: Vec<Vec<u8>>,
+    /// The paths of the working copy that the update wrote or removed,
+    /// sorted.
+    pub updated_paths: Vec<Vec<u8>>,
 }
 
 /// What `update` did.
@@ -203,17 +250,55 @@ enum Decision {
     Nothing,
     AlreadyApplied {
         head: ObjectId,
+        placed: Vec<Placed>,
     },
     Moved {
         tip: ObjectId,
         rebased: bool,
         tip_root: ObjectId,
         plan: Plan,
+        placed: Vec<Placed>,
+        merged_paths: Vec<Vec<u8>>,
     },
     Conflicts {
         change: ObjectId,
         conflicts: Vec<Conflict>,
+        stack: Vec<ObjectId>,
     },
+}
+
+/// How many changesets an op log description names, at most.
+const DESCRIBED: usize = 8;
+
+/// What the op log says a landing did, after `prefix`: how it went, each
+/// changeset and the one it became (short ids), and how many paths were
+/// merged, as in `rebased c57e1007e4f3 -> 3afaed346293 (1 path merged)`.
+pub(crate) fn describe_landing(
+    prefix: &str,
+    outcome: &str,
+    placed: &[Placed],
+    merged_paths: usize,
+) -> String {
+    let mut moves: Vec<String> = placed
+        .iter()
+        .take(DESCRIBED)
+        .map(|placed| match placed.to {
+            Some(to) => format!("{} -> {}", placed.from.short(), to.short()),
+            None => format!("{} already applied", placed.from.short()),
+        })
+        .collect();
+    if placed.len() > DESCRIBED {
+        moves.push(format!("and {} more", placed.len() - DESCRIBED));
+    }
+    let moves = match placed.len() {
+        1 => moves.concat(),
+        n => format!("{n} changesets: {}", moves.join(", ")),
+    };
+    let merged = match merged_paths {
+        1 => "1 path".to_owned(),
+        n => format!("{n} paths"),
+    };
+    format!("{prefix}: {outcome} {moves} ({merged} merged)")
 }
 
 impl<'r> Workspace<'r> {
@@ -318,7 +403,7 @@ impl<'r> Workspace<'r> {
             rebase: None,
         };
         let written = workspace.write(&root, &mut state, &plan, EMPTY_TREE, to)?;
-        Ok((workspace, written))
+        Ok((workspace, written.len()))
     }
 
     /// Opens the workspace named `name`, at the directory its state
@@ -482,7 +567,7 @@ impl<'r> Workspace<'r> {
     /// Writes a planned checkout from tree `from` to tree `to` and saves
     /// `state`. The state is saved first with the checkout marked as
     /// unfinished, so that a command interrupted half way through is
-    /// finished by the next one.
+    /// finished by the next one. Returns the paths written or removed.
     fn write(
         &self,
         root: &Root,
@@ -490,17 +575,17 @@ impl<'r> Workspace<'r> {
         plan: &Plan,
         from: ObjectId,
         to: ObjectId,
-    ) -> Result<usize, Error> {
+    ) -> Result<Vec<Vec<u8>>, Error> {
         if plan.len() == 0 {
             state.save(&self.state_dir)?;
-            return Ok(0);
+            return Ok(Vec::new());
         }
         state.checkout = Some(Checkout { from, to });
         state.save(&self.state_dir)?;
-        let written = checkout::apply(self.store(), root, plan)?;
+        checkout::apply(self.store(), root, plan)?;
         state.checkout = None;
         state.save(&self.state_dir)?;
-        Ok(written)
+        Ok(plan.paths())
     }
 
     /// Scans the working copy, saves the new stat cache, and compares it
@@ -755,6 +840,7 @@ impl<'r> Workspace<'r> {
                 index,
                 onto,
                 conflicts,
+                ..
             } => {
                 let change = pending[index];
                 self.stop_on_conflicts(
@@ -773,7 +859,8 @@ impl<'r> Workspace<'r> {
 
     /// Writes the working copy for a rebase stopped by conflicts and
     /// records the rebase: `onto`'s tree, with `change`'s clean paths and
-    /// conflict markers, as the base `onto`.
+    /// conflict markers, as the base `onto`. Returns the paths written or
+    /// removed.
     #[allow(clippy::too_many_arguments)]
     fn stop_on_conflicts(
         &self,
@@ -784,7 +871,7 @@ impl<'r> Workspace<'r> {
         change: ObjectId,
         pending: &[ObjectId],
         conflicts: &[Conflict],
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Vec<u8>>, Error> {
         let store = self.store();
         let subject = subject(&read_changeset(store, change)?.message);
         let ours = format!("{} ({})", state.branch, onto.short());
@@ -798,19 +885,20 @@ impl<'r> Workspace<'r> {
             pending: pending.to_vec(),
             conflicts: recorded,
         });
-        self.write(root, state, &plan, from, tree)?;
-        Ok(())
+        self.write(root, state, &plan, from, tree)
     }
 
     /// Lands the workspace's own changesets on `onto` (by default the
     /// branch it tracks), in one op log transaction: the head is read, the
     /// changesets are landed on it with the engine (fast-forward or
-    /// rebase), and the branch moves with a compare-and-swap. With
-    /// conflicts the branch does not move and nothing in the workspace
-    /// changes. Once the branch has moved, the working copy is brought from
-    /// the base's tree to the landed tree, writing only the difference, and
-    /// the landed changeset becomes the base. Refused with uncommitted
-    /// changes or a rebase in progress.
+    /// rebase), and the branch moves with a compare-and-swap. The operation
+    /// says how it went, which changeset became which, and how many paths
+    /// were merged (see [`LandReport`]). With conflicts the branch does not
+    /// move and nothing in the workspace changes. Once the branch has
+    /// moved, the working copy is brought from the base's tree to the
+    /// landed tree, writing only the difference, and the landed changeset
+    /// becomes the base. Refused with uncommitted changes or a rebase in
+    /// progress.
     pub fn land(
         &self,
         onto: Option<&str>,
@@ -826,120 +914,136 @@ impl<'r> Workspace<'r> {
         let store = self.store();
         let base_root = root_of(store, state.base)?;
         let signature = committer.now();
-        let mut previous = None;
+        let mut head_before = None;
         let mut decision = None;
-        let description = format!("land workspace {} on {branch}", self.name);
-        let result = store.transact(
-            agent,
-            &description,
-            |refs| -> Result<Vec<RefUpdate>, Abort> {
-                let head = refs.get(&branch);
-                previous = head;
-                let stack = find_stack(store, head, state.base, state.upstream)?;
-                if stack.is_empty() {
-                    decision = Some(Decision::Nothing);
-                    return Err(Abort::Stop);
+        let prefix = format!("land workspace {} on {branch}", self.name);
+        let result = store.transact_with(agent, |refs| -> Result<_, Abort> {
+            let head = refs.get(&branch);
+            head_before = head;
+            let stack = find_stack(store, head, state.base, state.upstream)?;
+            if stack.is_empty() {
+                decision = Some(Decision::Nothing);
+                return Err(Abort::Stop);
+            }
+            match replay(
+                store,
+                &branch,
+                head,
+                &stack,
+                &signature,
+                First::MustBeOnBranch,
+            )? {
+                Replayed::Done { tip, placed, .. } if Some(tip) == head => {
+                    decision = Some(Decision::AlreadyApplied { head: tip, placed });
+                    Err(Abort::Stop)
                 }
-                match replay(
-                    store,
-                    &branch,
-                    head,
-                    &stack,
-                    &signature,
-                    First::MustBeOnBranch,
-                )? {
-                    Replayed::Done { tip, .. } if Some(tip) == head => {
-                        decision = Some(Decision::AlreadyApplied { head: tip });
-                        Err(Abort::Stop)
-                    }
-                    Replayed::Done { tip, rebased } => {
-                        // Check the working copy can follow before the branch
-                        // moves.
-                        let tip_root = root_of(store, Some(tip))?;
-                        let plan = checkout::plan(
-                            store,
-                            &root,
-                            state.fs,
-                            base_root,
-                            tip_root,
-                            Mode::Checked,
-                        )?;
-                        decision = Some(Decision::Moved {
-                            tip,
-                            rebased,
-                            tip_root,
-                            plan,
-                        });
-                        Ok(vec![RefUpdate::new(branch.clone(), head, Some(tip))])
-                    }
-                    Replayed::Stopped {
-                        index, conflicts, ..
-                    } => {
-                        decision = Some(Decision::Conflicts {
-                            change: stack[index],
-                            conflicts,
-                        });
-                        Err(Abort::Stop)
-                    }
+                Replayed::Done {
+                    tip,
+                    rebased,
+                    placed,
+                    merged_paths,
+                } => {
+                    // Check the working copy can follow before the branch
+                    // moves.
+                    let tip_root = root_of(store, Some(tip))?;
+                    let plan =
+                        checkout::plan(store, &root, state.fs, base_root, tip_root, Mode::Checked)?;
+                    let outcome = if rebased { "rebased" } else { "fast-forward" };
+                    let description =
+                        describe_landing(&prefix, outcome, &placed, merged_paths.len());
+                    decision = Some(Decision::Moved {
+                        tip,
+                        rebased,
+                        tip_root,
+                        plan,
+                        placed,
+                        merged_paths,
+                    });
+                    let updates = vec![RefUpdate::new(branch.clone(), head, Some(tip))];
+                    Ok((updates, description))
                 }
-            },
-        );
+                Replayed::Stopped {
+                    index, conflicts, ..
+                } => {
+                    decision = Some(Decision::Conflicts {
+                        change: stack[index],
+                        conflicts,
+                        stack,
+                    });
+                    Err(Abort::Stop)
+                }
+            }
+        });
         let operation = match result {
             Ok(op) => Some(op.seq),
             Err(TransactError::Aborted(Abort::Stop)) => None,
             Err(TransactError::Aborted(Abort::Failed(err))) => return Err(err),
             Err(TransactError::Store(err)) => return Err(err.into()),
         };
-        let landed = match decision {
+        let mut report = LandReport {
+            branch,
+            head_before,
+            landed: Landed::Nothing,
+            operation,
+            placed: Vec::new(),
+            merged_paths: Vec::new(),
+            updated_paths: Vec::new(),
+        };
+        match decision {
             Some(Decision::Moved {
                 tip,
                 rebased,
                 tip_root,
                 plan,
+                placed,
+                merged_paths,
             }) => {
                 state.base = Some(tip);
                 state.upstream = Some(tip);
-                self.write(&root, &mut state, &plan, base_root, tip_root)?;
-                if rebased {
+                report.updated_paths = self.write(&root, &mut state, &plan, base_root, tip_root)?;
+                report.landed = if rebased {
                     Landed::Rebased(tip)
                 } else {
                     Landed::FastForward(tip)
-                }
+                };
+                report.placed = placed;
+                report.merged_paths = merged_paths;
             }
-            Some(Decision::AlreadyApplied { head }) => {
+            Some(Decision::AlreadyApplied { head, placed }) => {
                 // The branch has it all: the workspace moves to the head.
-                self.move_to(&root, &mut state, base_root, head)?;
-                Landed::AlreadyApplied
+                report.updated_paths = self.move_to(&root, &mut state, base_root, head)?;
+                report.landed = Landed::AlreadyApplied;
+                report.placed = placed;
             }
-            Some(Decision::Conflicts { change, conflicts }) => {
-                Landed::Conflicts { change, conflicts }
+            Some(Decision::Conflicts {
+                change,
+                conflicts,
+                stack,
+            }) => {
+                report.landed = Landed::Conflicts { change, conflicts };
+                report.placed = unplaced(&stack);
             }
-            Some(Decision::Nothing) | None => Landed::Nothing,
-        };
-        Ok(LandReport {
-            branch,
-            previous,
-            landed,
-            operation,
-        })
+            Some(Decision::Nothing) | None => {}
+        }
+        Ok(report)
     }
 
     /// Brings the working copy from tree `from` to `head`'s tree and makes
-    /// `head` the base and the upstream.
+    /// `head` the base and the upstream. Returns the paths written or
+    /// removed.
     fn move_to(
         &self,
         root: &Root,
         state: &mut State,
         from: ObjectId,
         head: ObjectId,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Vec<u8>>, Error> {
         let store = self.store();
         let to = root_of(store, Some(head))?;
         let plan = checkout::plan(store, root, state.fs, from, to, Mode::Checked)?;
         state.base = Some(head);
         state.upstream = Some(head);
-        self.write(root, state, &plan, from, to)?;
-        Ok(())
+        self.write(root, state, &plan, from, to)
     }
 
     /// Brings the workspace onto the current head of its branch. Without
@@ -951,16 +1055,27 @@ impl<'r> Workspace<'r> {
     /// markers; other conflicts keep the head's version and are reported. A
     /// rebase is then in progress until `braid commit`. Refused with
     /// uncommitted changes or a rebase in progress.
-    pub fn update(&self, committer: &Identity) -> Result<Updated, Error> {
+    pub fn update(&self, committer: &Identity) -> Result<UpdateReport, Error> {
         let (_lock, mut state, root) = self.begin()?;
         if state.rebase.is_some() {
             return Err(Error::RebaseInProgress);
         }
         self.require_clean(&root, &state)?;
         let store = self.store();
-        let Some(head) = store.refs()?.get(&state.branch) else {
-            return Ok(Updated::UpToDate);
+        let mut report = UpdateReport {
+            branch: state.branch.clone(),
+            head: None,
+            updated: Updated::UpToDate,
+            base_before: state.base,
+            base: state.base,
+            placed: Vec::new(),
+            merged_paths: Vec::new(),
+            updated_paths: Vec::new(),
         };
+        let Some(head) = store.refs()?.get(&state.branch) else {
+            return Ok(report);
+        };
+        report.head = Some(head);
         let base_root = root_of(store, state.base)?;
         let stack = find_stack(store, Some(head), state.base, state.upstream)?;
         if stack.is_empty() {
@@ -969,10 +1084,12 @@ impl<'r> Workspace<'r> {
                     state.upstream = Some(head);
                     state.save(&self.state_dir)?;
                 }
-                return Ok(Updated::UpToDate);
+                return Ok(report);
             }
-            self.move_to(&root, &mut state, base_root, head)?;
-            return Ok(Updated::Moved { head });
+            report.updated_paths = self.move_to(&root, &mut state, base_root, head)?;
+            report.updated = Updated::Moved { head };
+            report.base = state.base;
+            return Ok(report);
         }
         let signature = committer.now();
         match replay(
@@ -983,26 +1100,35 @@ impl<'r> Workspace<'r> {
             &signature,
             First::Anywhere,
         )? {
-            Replayed::Done { tip, .. } if tip == head => {
-                self.move_to(&root, &mut state, base_root, head)?;
-                Ok(Updated::Moved { head })
+            Replayed::Done { tip, placed, .. } if tip == head => {
+                report.updated_paths = self.move_to(&root, &mut state, base_root, head)?;
+                report.updated = Updated::Moved { head };
+                report.placed = placed;
             }
-            Replayed::Done { tip, .. } => {
+            Replayed::Done {
+                tip,
+                placed,
+                merged_paths,
+                ..
+            } => {
                 let to = root_of(store, Some(tip))?;
                 let plan = checkout::plan(store, &root, state.fs, base_root, to, Mode::Checked)?;
                 state.base = Some(tip);
                 state.upstream = Some(head);
-                self.write(&root, &mut state, &plan, base_root, to)?;
-                Ok(Updated::Rebased { head, tip })
+                report.updated_paths = self.write(&root, &mut state, &plan, base_root, to)?;
+                report.updated = Updated::Rebased { head, tip };
+                report.placed = placed;
+                report.merged_paths = merged_paths;
             }
             Replayed::Stopped {
                 index,
                 onto,
                 conflicts,
+                mut placed,
             } => {
                 let change = stack[index];
                 state.upstream = Some(head);
-                self.stop_on_conflicts(
+                report.updated_paths = self.stop_on_conflicts(
                     &root,
                     &mut state,
                     base_root,
@@ -1011,13 +1137,17 @@ impl<'r> Workspace<'r> {
                     &stack[index + 1..],
                     &conflicts,
                 )?;
-                Ok(Updated::Conflicts {
+                placed.extend(unplaced(&stack[index..]));
+                report.updated = Updated::Conflicts {
                     head,
                     change,
                     conflicts,
-                })
+                };
+                report.placed = placed;
             }
         }
+        report.base = state.base;
+        Ok(report)
     }
 
     /// Marks conflicts of the rebase in progress resolved: those at each of
@@ -1135,6 +1265,14 @@ fn markers_remain(root: &Root, path: &[u8]) -> Result<bool, Error> {
     Ok(has_markers(&content))
 }
 
+/// Changesets that went nowhere.
+fn unplaced(stack: &[ObjectId]) -> Vec<Placed> {
+    stack
+        .iter()
+        .map(|&from| Placed { from, to: None })
+        .collect()
+}
+
 /// The first non-empty line of a message.
 fn subject(message: &[u8]) -> String {
     String::from_utf8_lossy(message)
@@ -1206,4 +1344,61 @@ pub(crate) fn find_stack<O: Objects>(
     }
     stack.reverse();
     Ok(stack)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use braid_format::Kind;
+
+    fn id(n: u8) -> ObjectId {
+        ObjectId::hash(Kind::Changeset, &[n])
+    }
+
+    #[test]
+    fn landing_descriptions() {
+        let one = [Placed {
+            from: id(1),
+            to: Some(id(2)),
+        }];
+        assert_eq!(
+            describe_landing("land workspace b on main", "rebased", &one, 1),
+            format!(
+                "land workspace b on main: rebased {} -> {} (1 path merged)",
+                id(1).short(),
+                id(2).short()
+            )
+        );
+        let two = [
+            Placed {
+                from: id(1),
+                to: None,
+            },
+            Placed {
+                from: id(3),
+                to: Some(id(4)),
+            },
+        ];
+        assert_eq!(
+            describe_landing("land", "rebased", &two, 0),
+            format!(
+                "land: rebased 2 changesets: {} already applied, {} -> {} (0 paths merged)",
+                id(1).short(),
+                id(3).short(),
+                id(4).short()
+            )
+        );
+        let many: Vec<Placed> = (0..20)
+            .map(|n| Placed {
+                from: id(n),
+                to: Some(id(n)),
+            })
+            .collect();
+        let text = describe_landing("land", "fast-forward", &many, 2);
+        assert!(
+            text.starts_with("land: fast-forward 20 changesets: "),
+            "{text}"
+        );
+        assert!(text.ends_with(", and 12 more (2 paths merged)"), "{text}");
+    }
 }

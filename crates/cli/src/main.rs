@@ -118,9 +118,11 @@ enum Command {
     Commit(work::CommitArgs),
     /// Land the workspace's changesets on its branch (exit status 2 on
     /// conflicts).
+    #[command(long_about = work::LAND_HELP)]
     Land(work::LandArgs),
     /// Bring the workspace onto its branch's head, rebasing its own
     /// changesets (exit status 2 on conflicts).
+    #[command(long_about = work::UPDATE_HELP)]
     Update(work::IdentityArgs),
     /// Mark conflicts of a rebase in progress resolved.
     Resolve {

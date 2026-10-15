@@ -74,6 +74,6 @@ pub use paths::workspace_path;
 pub use state::{Checkout, Rebase, RecordedConflict, State};
 pub use status::{ChangeKind, GUARD_SIZE, PathChange, Status, is_guarded};
 pub use workspace::{
-    CommitOutcome, CommitRequest, LandReport, Landed, RebaseProgress, StatusReport, Updated,
-    Workspace,
+    CommitOutcome, CommitRequest, LandReport, Landed, Placed, RebaseProgress, StatusReport,
+    UpdateReport, Updated, Workspace,
 };

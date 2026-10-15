@@ -42,7 +42,10 @@ fn a_symlink_replaced_by_a_directory_is_never_gone_through() {
         ],
     );
     f.set_branch("main", second);
-    assert_eq!(ws.update(&ada()).unwrap(), Updated::Moved { head: second });
+    assert_eq!(
+        ws.update(&ada()).unwrap().updated,
+        Updated::Moved { head: second }
+    );
     assert!(
         listing(outside.path()).is_empty(),
         "wrote outside the workspace"

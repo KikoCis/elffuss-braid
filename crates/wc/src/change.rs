@@ -14,7 +14,7 @@ use braid_store::{RefUpdate, Store, TransactError};
 
 use crate::error::Error;
 use crate::identity::Identity;
-use crate::workspace::{LandReport, Landed};
+use crate::workspace::{LandReport, Landed, Placed, describe_landing};
 
 /// What the base must hold at a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +142,8 @@ fn describe(entry: Option<&EntryKind>) -> String {
 
 /// Lands `change` on `branch` in one op log transaction: the engine
 /// fast-forwards or rebases it onto the head, and the branch moves with a
-/// compare-and-swap. With conflicts, or when the branch already has it, the
+/// compare-and-swap. The operation says how it went, as a workspace's
+/// landing does. With conflicts, or when the branch already has it, the
 /// branch does not move and no operation is recorded.
 pub fn land_change(
     store: &Store,
@@ -152,31 +153,42 @@ pub fn land_change(
     committer: &Identity,
 ) -> Result<LandReport, Error> {
     let signature = committer.now();
-    let mut previous = None;
+    let mut head_before = None;
     let mut landed = Landed::Nothing;
-    let description = format!("land {} on {branch}", change.short());
-    let result = store.transact(agent, &description, |refs| {
+    let mut merged = Vec::new();
+    let prefix = format!("land changeset on {branch}");
+    let result = store.transact_with(agent, |refs| {
         let head = refs.get(branch);
-        previous = head;
-        let new = match land(store, head, change, signature).map_err(|err| Some(err.into()))? {
-            LandOutcome::FastForward(id) => {
-                landed = Landed::FastForward(id);
-                id
-            }
-            LandOutcome::Rebased { changeset, .. } => {
-                landed = Landed::Rebased(changeset);
-                changeset
-            }
-            LandOutcome::AlreadyApplied => {
-                landed = Landed::AlreadyApplied;
-                return Err(None);
-            }
-            LandOutcome::Conflicts(conflicts) => {
-                landed = Landed::Conflicts { change, conflicts };
-                return Err(None);
-            }
-        };
-        Ok(vec![RefUpdate::new(branch, head, Some(new))])
+        head_before = head;
+        let (new, outcome) =
+            match land(store, head, change, signature).map_err(|err| Some(err.into()))? {
+                LandOutcome::FastForward(id) => {
+                    landed = Landed::FastForward(id);
+                    (id, "fast-forward")
+                }
+                LandOutcome::Rebased {
+                    changeset,
+                    merged_paths,
+                } => {
+                    landed = Landed::Rebased(changeset);
+                    merged = merged_paths;
+                    (changeset, "rebased")
+                }
+                LandOutcome::AlreadyApplied => {
+                    landed = Landed::AlreadyApplied;
+                    return Err(None);
+                }
+                LandOutcome::Conflicts(conflicts) => {
+                    landed = Landed::Conflicts { change, conflicts };
+                    return Err(None);
+                }
+            };
+        let placed = [Placed {
+            from: change,
+            to: Some(new),
+        }];
+        let description = describe_landing(&prefix, outcome, &placed, merged.len());
+        Ok((vec![RefUpdate::new(branch, head, Some(new))], description))
     });
     let operation = match result {
         Ok(op) => Some(op.seq),
@@ -185,11 +197,18 @@ pub fn land_change(
         Err(TransactError::Aborted(Some(err))) => return Err(err),
         Err(TransactError::Store(err)) => return Err(err.into()),
     };
+    let to = match &landed {
+        Landed::FastForward(id) | Landed::Rebased(id) => Some(*id),
+        _ => None,
+    };
     Ok(LandReport {
         branch: branch.to_owned(),
-        previous,
+        head_before,
         landed,
         operation,
+        placed: vec![Placed { from: change, to }],
+        merged_paths: merged,
+        updated_paths: Vec::new(),
     })
 }
 
