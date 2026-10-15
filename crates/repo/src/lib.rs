@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 use braid_format::{ObjectId, Objects};
 use braid_store::{Options, Store};
 
-pub use git::{GitImport, MAP_REF, braid_ref_for_git, git_ref_for_braid};
+pub use git::{
+    GIT_EXPORT_AGENT, GitImport, MAP_REF, REMOTE_PREFIX, braid_ref_for_git, git_ref_for_braid,
+    remote_ref,
+};
 
 /// Name of the directory that holds a repository's data.
 pub const DIR: &str = ".braid";
@@ -58,6 +61,19 @@ pub enum Error {
     /// The file system failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// Another operation moved a branch while sync was working on it.
+    /// Nothing was pushed; syncing again starts from where it is now.
+    #[error("branch {branch:?} moved during the sync; nothing was pushed, sync again")]
+    BranchMoved {
+        /// The branch.
+        branch: String,
+    },
+    /// A ref kept moving, so an operation could not be recorded.
+    #[error("ref {name:?} keeps moving; try again")]
+    Busy {
+        /// The ref.
+        name: String,
+    },
 }
 
 /// An open repository.
