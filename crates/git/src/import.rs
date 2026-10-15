@@ -75,7 +75,9 @@ pub struct ImportReport {
 /// - its tree is converted, each git tree once: blobs keep their exact bytes,
 ///   modes become file, executable, symlink, directory or submodule entries,
 ///   and a git tree that the export cannot regenerate exactly keeps its raw
-///   bytes;
+///   bytes. Braid trees never hold an empty subdirectory, so empty
+///   directories, and directories holding only empty ones, are left out; a
+///   git tree that loses entries this way keeps its raw bytes too;
 /// - its raw bytes are stored and become the changeset's git origin, with the
 ///   change list against its first parent, the parents, and the author,
 ///   committer and message read from it;
@@ -106,6 +108,9 @@ pub fn import<O: Objects>(
         map,
         report: ImportReport::default(),
         roots: HashMap::new(),
+        empty_tree: build_directory(Vec::new())
+            .expect("the empty directory is valid")
+            .root(),
     };
 
     // What the refs point to: commits to walk from, trees and blobs that tags
@@ -179,6 +184,8 @@ struct Importer<'r, 'o, 'm, O: Objects> {
     report: ImportReport,
     /// Root trees of the changesets seen in this import.
     roots: HashMap<ObjectId, ObjectId>,
+    /// The braid id of the empty directory.
+    empty_tree: ObjectId,
 }
 
 /// A git tree being converted, waiting for its subtrees.
@@ -194,6 +201,8 @@ struct Frame {
     done: Vec<Entry>,
     /// Whether every subtree so far is canonical.
     canonical_subtrees: bool,
+    /// Whether an empty directory was left out.
+    dropped_empty: bool,
 }
 
 impl<O: Objects> Importer<'_, '_, '_, O> {
@@ -372,6 +381,11 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                     EntryType::Tree => match self.map.tree(&oid) {
                         Some(tree) => {
                             top.canonical_subtrees &= self.map.raw_tree(&oid).is_none();
+                            if tree == self.empty_tree {
+                                top.dropped_empty = true;
+                                top.next += 1;
+                                continue;
+                            }
                             EntryKind::Tree { tree }
                         }
                         None => {
@@ -405,12 +419,19 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                 Some(parent) => {
                     let (_, name, oid) = parent.entries[parent.next].clone();
                     parent.canonical_subtrees &= self.map.raw_tree(&oid).is_none();
-                    parent.done.push(Entry {
-                        name,
-                        kind: EntryKind::Tree { tree },
-                    });
+                    if tree == self.empty_tree {
+                        // An empty directory, or one holding only empty
+                        // ones: braid trees leave it out.
+                        parent.dropped_empty = true;
+                    } else {
+                        parent.done.push(Entry {
+                            name,
+                            kind: EntryKind::Tree { tree },
+                        });
+                    }
                     parent.next += 1;
                 }
+                // A root may be empty.
                 None => return Ok(tree),
             }
         }
@@ -452,6 +473,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             next: 0,
             done: Vec::with_capacity(count),
             canonical_subtrees: true,
+            dropped_empty: false,
         })
     }
 
@@ -464,6 +486,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             path,
             done,
             canonical_subtrees,
+            dropped_empty,
             ..
         } = frame;
         // Braid names are unique: of duplicate entries, the last one written
@@ -496,9 +519,11 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
 
         // Canonical means the export, reading back what was just stored,
         // gives exactly these bytes. A tree naming a subtree that is not
-        // canonical cannot be: the subtree's canonical id differs.
+        // canonical cannot be: the subtree's canonical id differs. Neither can
+        // one that lost duplicates or empty directories.
         let canonical = canonical_subtrees
             && unique
+            && !dropped_empty
             && Exporter::new(self.objects, &*self.map).tree(&tree)?.1 == raw;
         let raw_blob = if canonical {
             None

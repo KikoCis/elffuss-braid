@@ -244,15 +244,19 @@ file and `100775` an executable); `120000` a symlink, whose blob is the target;
 `040000` a directory; `160000` a SHA-1 gitlink. Any other type stops the
 import, and so does a name section 5 refuses, checked before anything the tree
 names is read. Of entries with the same name, the braid tree keeps the last
-written, which is the one a git checkout uses.
+written, which is the one a git checkout uses. Braid trees never hold an empty
+subdirectory (only a root can be empty), so an entry for an empty directory, or
+for a directory holding only empty ones, is left out; changes, being per file,
+never mention one.
 
 The *canonical* git tree of a braid tree lists its entries in git's order with
 the modes `100644`, `100755`, `120000`, `40000` and `160000`, naming each
 subdirectory by its own canonical git tree. A git tree equal to the canonical
-git tree of its braid tree needs nothing more. Any other keeps its raw bytes in
-a blob, recorded against its git id, since several git trees can share one
-braid tree; a tree that names such a tree is not canonical either. The empty
-tree is read as present even when git did not store it.
+git tree of its braid tree needs nothing more. Any other, including one that
+lost duplicate names or empty directories, keeps its raw bytes in a blob,
+recorded against its git id, since several git trees can share one braid tree;
+a tree that names such a tree is not canonical either. The empty tree is read
+as present even when git did not store it.
 
 **Commits.** The changeset of a commit has: as parents, the changesets of the
 `parent` headers that follow the first header, `tree`, in their order; as root,

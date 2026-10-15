@@ -6,10 +6,12 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use braid_format::changeset::decode_change_list;
 use braid_format::{
-    ChangeOp, Changes, Changeset, ChangesetParts, Entry, EntryKind, GitId, Kind, MemoryObjects,
-    ObjectId, Objects, Signature, build_directory,
+    Change, ChangeOp, Changes, Changeset, ChangesetParts, Entry, EntryKind, GitId, Kind,
+    MemoryObjects, ObjectId, Objects, Signature, build_directory, read_directory,
 };
 use braid_git::{
     Error, GitKind, GitMap, GitOid, ImportOptions, RefTarget, RefUpdate, RoundTripReport,
@@ -35,8 +37,8 @@ fn import_all(repo: &Repo, objects: &MemoryObjects, map: &mut GitMap) -> braid_g
 
 /// The checks every fixture goes through: the round trip holds; importing
 /// imports every commit; importing again with the saved map imports nothing;
-/// after `extend` adds commits, importing brings in exactly those; and the
-/// round trip still holds.
+/// after `extend` adds commits, importing brings in exactly those; the round
+/// trip still holds; and every imported changeset passes admission.
 fn check(repo: &mut Repo, extend: impl FnOnce(&mut Repo) -> usize) -> (MemoryObjects, GitMap) {
     round_trip(repo);
     let objects = MemoryObjects::new();
@@ -60,24 +62,160 @@ fn check(repo: &mut Repo, extend: impl FnOnce(&mut Repo) -> usize) -> (MemoryObj
     assert_eq!(next.commits, added, "only the new commits are imported");
     assert_eq!(map.counts().commits, repo.count_commits());
     round_trip(repo);
+    assert_admissible(&objects, &map);
     (objects, map)
 }
 
-fn changeset(objects: &MemoryObjects, map: &GitMap, commit: &str) -> Changeset {
-    let id = map.changeset(&oid(commit)).expect("commit imported");
-    let (kind, bytes) = objects.get(&id).unwrap().unwrap();
+fn decode(objects: &MemoryObjects, id: &ObjectId) -> Changeset {
+    let (kind, bytes) = objects.get(id).unwrap().unwrap();
     assert_eq!(kind, Kind::Changeset);
     Changeset::decode(&bytes).unwrap()
 }
 
+fn changeset(objects: &MemoryObjects, map: &GitMap, commit: &str) -> Changeset {
+    decode(
+        objects,
+        &map.changeset(&oid(commit)).expect("commit imported"),
+    )
+}
+
+fn change_list(objects: &MemoryObjects, changeset: &Changeset) -> Vec<Change> {
+    match &changeset.changes {
+        Changes::Inline(list) => list.clone(),
+        Changes::External { list, .. } => {
+            decode_change_list(&objects.get(list).unwrap().unwrap().1).unwrap()
+        }
+    }
+}
+
+/// A directory held in memory, to apply change lists to.
+type Dir = BTreeMap<Vec<u8>, Node>;
+
+#[derive(Clone, Debug)]
+enum Node {
+    Leaf(EntryKind),
+    Dir(Dir),
+}
+
+/// Reads a braid directory and everything below it, and checks that no
+/// subdirectory is empty: braid trees never hold one.
+fn load(objects: &MemoryObjects, tree: ObjectId) -> Dir {
+    let entries =
+        read_directory(tree, |id| objects.get(id).unwrap().map(|(_, bytes)| bytes)).unwrap();
+    entries
+        .into_iter()
+        .map(|entry| {
+            let node = match entry.kind {
+                EntryKind::Tree { tree } => {
+                    let below = load(objects, tree);
+                    assert!(
+                        !below.is_empty(),
+                        "{:?} is an empty subdirectory",
+                        String::from_utf8_lossy(&entry.name)
+                    );
+                    Node::Dir(below)
+                }
+                kind => Node::Leaf(kind),
+            };
+            (entry.name, node)
+        })
+        .collect()
+}
+
+/// The braid id of a directory held in memory.
+fn tree_id(dir: &Dir) -> ObjectId {
+    let entries = dir
+        .iter()
+        .map(|(name, node)| Entry {
+            name: name.clone(),
+            kind: match node {
+                Node::Leaf(kind) => kind.clone(),
+                Node::Dir(below) => EntryKind::Tree {
+                    tree: tree_id(below),
+                },
+            },
+        })
+        .collect();
+    build_directory(entries).unwrap().root()
+}
+
+/// Applies a change list as the store's admission check does. Each change
+/// gives a file's final value, so deletes go first; a directory goes with its
+/// last entry, and setting a file creates the directories above it.
+fn apply(dir: &mut Dir, changes: &[Change]) {
+    let split = |path: &[u8]| -> Vec<Vec<u8>> {
+        path.split(|byte| *byte == b'/')
+            .map(<[u8]>::to_vec)
+            .collect()
+    };
+    for change in changes.iter().filter(|c| c.op == ChangeOp::Delete) {
+        delete(dir, &split(&change.path));
+    }
+    for change in changes.iter().filter(|c| c.op != ChangeOp::Delete) {
+        set(dir, &split(&change.path), change.op.to_entry().unwrap());
+    }
+}
+
+fn delete(dir: &mut Dir, path: &[Vec<u8>]) {
+    match path {
+        [name] => assert!(
+            matches!(dir.remove(name), Some(Node::Leaf(_))),
+            "deleting a file that is not there"
+        ),
+        [name, rest @ ..] => {
+            let Some(Node::Dir(below)) = dir.get_mut(name) else {
+                panic!("deleting below a directory that is not there")
+            };
+            delete(below, rest);
+            if below.is_empty() {
+                dir.remove(name);
+            }
+        }
+        [] => unreachable!("paths are never empty"),
+    }
+}
+
+fn set(dir: &mut Dir, path: &[Vec<u8>], kind: EntryKind) {
+    match path {
+        [name] => {
+            let previous = dir.insert(name.clone(), Node::Leaf(kind));
+            assert!(
+                !matches!(previous, Some(Node::Dir(_))),
+                "a file over a directory that still has entries"
+            );
+        }
+        [name, rest @ ..] => {
+            let node = dir
+                .entry(name.clone())
+                .or_insert_with(|| Node::Dir(Dir::new()));
+            let Node::Dir(below) = node else {
+                panic!("a directory over a file that was not deleted")
+            };
+            set(below, rest, kind);
+        }
+        [] => unreachable!("paths are never empty"),
+    }
+}
+
+/// Every imported changeset passes admission: its change list, applied to
+/// the root of its first parent (or to nothing), gives its own root, and no
+/// tree it holds has an empty subdirectory.
+fn assert_admissible(objects: &MemoryObjects, map: &GitMap) {
+    for (commit, id) in map.commits() {
+        let changeset = decode(objects, &id);
+        let mut dir = match changeset.parents.first() {
+            Some(parent) => load(objects, decode(objects, parent).root),
+            None => Dir::new(),
+        };
+        apply(&mut dir, &change_list(objects, &changeset));
+        assert_eq!(tree_id(&dir), changeset.root, "commit {commit}");
+        load(objects, changeset.root);
+    }
+}
+
 /// The change list of an imported commit, as path and operation.
 fn changes(objects: &MemoryObjects, map: &GitMap, commit: &str) -> Vec<(String, &'static str)> {
-    let list = match changeset(objects, map, commit).changes {
-        Changes::Inline(list) => list,
-        Changes::External { list, .. } => {
-            decode_change_list(&objects.get(&list).unwrap().unwrap().1).unwrap()
-        }
-    };
+    let list = change_list(objects, &changeset(objects, map, commit));
     list.into_iter()
         .map(|change| {
             let op = match change.op {
@@ -1032,11 +1170,13 @@ fn a_changeset_that_disagrees_with_its_origin_is_not_exported() {
     );
 }
 
+/// The git id of the empty tree.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 #[test]
 fn the_empty_tree_need_not_be_stored() {
     // Git treats the empty tree as always present and does not store it when
     // a commit uses it; the import and the round trip must cope.
-    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     let mut repo = Repo::new();
     let empty = repo.commit(EMPTY_TREE, &[], "nothing yet");
     repo.set_ref("refs/heads/main", &empty);
@@ -1050,4 +1190,102 @@ fn the_empty_tree_need_not_be_stored() {
     });
     assert!(changes(&objects, &map, &empty).is_empty());
     assert!(map.raw_tree(&oid(EMPTY_TREE)).is_none());
+}
+
+#[test]
+fn empty_directories_are_left_out() {
+    let mut repo = Repo::new();
+    let f = repo.blob(b"f\n");
+    let g = repo.blob(b"g\n");
+    // An empty directory beside a file.
+    let single = repo.mktree(&[
+        ("100644", "blob", &f, b"f"),
+        ("40000", "tree", EMPTY_TREE, b"empty"),
+    ]);
+    // A chain of them: a/b/c, where c is the empty tree.
+    let b = repo.mktree(&[("40000", "tree", EMPTY_TREE, b"c")]);
+    let a = repo.mktree(&[("40000", "tree", &b, b"b")]);
+    // A directory with a file and an empty directory.
+    let sub = repo.mktree(&[
+        ("100644", "blob", &g, b"g"),
+        ("40000", "tree", EMPTY_TREE, b"hollow"),
+    ]);
+    let root = repo.mktree(&[
+        ("100644", "blob", &f, b"f"),
+        ("40000", "tree", &single, b"single"),
+        ("40000", "tree", &a, b"a"),
+        ("40000", "tree", &sub, b"sub"),
+    ]);
+    let first = repo.commit(&root, &[], "empty directories");
+    // A root holding nothing but empty directories is the empty tree.
+    let hollow_root = repo.mktree(&[
+        ("40000", "tree", &a, b"a"),
+        ("40000", "tree", EMPTY_TREE, b"e"),
+    ]);
+    let hollow = repo.commit(&hollow_root, &[&first], "only empty directories");
+    repo.set_ref("refs/heads/main", &hollow);
+
+    let (objects, map) = check(&mut repo, |repo| {
+        let again = repo.mktree(&[("100644", "blob", &g, b"g"), ("40000", "tree", &b, b"b")]);
+        let next = repo.commit(&again, &[&hollow], "a file again");
+        repo.set_ref("refs/heads/main", &next);
+        1
+    });
+    assert_eq!(
+        changes(&objects, &map, &first),
+        pairs(&[("f", "file"), ("single/f", "file"), ("sub/g", "file")])
+    );
+    assert_eq!(
+        changes(&objects, &map, &hollow),
+        pairs(&[("f", "delete"), ("single/f", "delete"), ("sub/g", "delete")])
+    );
+    let empty = map.tree(&oid(EMPTY_TREE)).unwrap();
+    assert_eq!(changeset(&objects, &map, &hollow).root, empty);
+    assert_eq!(map.tree(&oid(&b)), Some(empty));
+    assert_eq!(map.tree(&oid(&a)), Some(empty));
+    // Every git tree that lost an entry keeps its bytes; the empty tree
+    // itself is canonical.
+    for tree in [&single, &b, &a, &sub, &root, &hollow_root] {
+        assert!(map.raw_tree(&oid(tree)).is_some(), "{tree}");
+    }
+    assert!(map.raw_tree(&oid(EMPTY_TREE)).is_none());
+}
+
+#[test]
+fn a_commit_that_only_adds_or_removes_an_empty_directory() {
+    let mut repo = Repo::new();
+    let f = repo.blob(b"f\n");
+    let plain = repo.mktree(&[("100644", "blob", &f, b"f")]);
+    let base = repo.commit(&plain, &[], "a file");
+    let with_empty = repo.mktree(&[
+        ("100644", "blob", &f, b"f"),
+        ("40000", "tree", EMPTY_TREE, b"empty"),
+    ]);
+    let add = repo.commit(&with_empty, &[&base], "add an empty directory");
+    let inner = repo.mktree(&[("40000", "tree", EMPTY_TREE, b"deeper")]);
+    let nested = repo.mktree(&[
+        ("100644", "blob", &f, b"f"),
+        ("40000", "tree", &inner, b"empty"),
+    ]);
+    let deepen = repo.commit(&nested, &[&add], "nest another one inside");
+    let remove = repo.commit(&plain, &[&deepen], "remove it");
+    repo.set_ref("refs/heads/main", &remove);
+
+    let (objects, map) = check(&mut repo, |repo| {
+        let again = repo.commit(&with_empty, &[&remove], "add it again");
+        repo.set_ref("refs/heads/main", &again);
+        1
+    });
+    let root = changeset(&objects, &map, &base).root;
+    for (commit, parent) in [(&add, &base), (&deepen, &add), (&remove, &deepen)] {
+        assert!(changes(&objects, &map, commit).is_empty(), "{commit}");
+        let changeset = changeset(&objects, &map, commit);
+        assert_eq!(changeset.root, root, "{commit}");
+        assert_eq!(changeset.parents, [map.changeset(&oid(parent)).unwrap()]);
+        // Still bit for bit.
+        let (exported, bytes) =
+            export_commit(&objects, &map, &map.changeset(&oid(commit)).unwrap()).unwrap();
+        assert_eq!(exported, oid(commit));
+        assert_eq!(bytes, repo.git_bytes(&["cat-file", "commit", commit]));
+    }
 }
