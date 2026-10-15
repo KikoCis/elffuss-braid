@@ -5,7 +5,10 @@
 //!
 //! The tests run copies of this test binary that execute only [`child`],
 //! configured through environment variables. A child writes batches of
-//! objects, syncs, and acknowledges each object in a file of its own. Then it
+//! objects, syncs, and acknowledges each object in a file of its own. Some
+//! objects are stored with a hint, so that they become deltas: against the
+//! child's previous version of a file, or against an object every child
+//! writes, whose copy often sits in another process's open segment. Then it
 //! increments a shared counter ref with compare and swap, retrying when
 //! another process got there first, and acknowledges that too. The parent
 //! checks the store against the acknowledgements: fsck is clean, every
@@ -59,7 +62,7 @@ struct Job {
     batch: u64,
 }
 
-const OBJECTS_PER_BATCH: u64 = 6;
+const OBJECTS_PER_BATCH: u64 = 8;
 
 /// The entry point of child processes. In a normal test run it does nothing.
 #[test]
@@ -92,7 +95,11 @@ fn run(job: &Job) {
         let mut written = Vec::new();
         for j in 0..job.batch {
             let (kind, payload) = object(job.round, job.child, i, j);
-            written.push((j, store.put(kind, &payload).expect("put")));
+            let id = match similar(job.round, job.child, i, j) {
+                Some(hint) => store.put_similar(kind, &payload, &hint),
+                None => store.put(kind, &payload),
+            };
+            written.push((j, id.expect("put")));
         }
         store.sync().expect("sync");
         // Acknowledged only once synced. One write per batch: a kill can
@@ -151,11 +158,30 @@ fn counter_value(store: &Store, id: &ObjectId) -> u64 {
 
 /// The object a child writes as number `j` of batch `i`. The first of every
 /// batch is the same in every child of a round, so several processes store
-/// the same object at the same moment.
+/// the same object at the same moment. The sixth is a file the child edits
+/// a little in every batch, and the seventh the shared object with a few
+/// bytes of the child's own: both are stored with a hint, see [`similar`].
 fn object(round: u64, child: u64, i: u64, j: u64) -> (Kind, Vec<u8>) {
-    if j == 0 {
-        let text = format!("shared by every child of round {round}, batch {i}");
-        return (Kind::Blob, text.into_bytes());
+    match j {
+        0 => return (Kind::Blob, shared(round, i)),
+        6 => {
+            let mut rng = Rng::new(round, child, 0, j);
+            let mut lines: Vec<String> = (0..200)
+                .map(|n| format!("line {n}: {:016x}\n", rng.next()))
+                .collect();
+            for edit in 0..=i {
+                let n = (edit * 37 % 200) as usize;
+                lines[n] = format!("line {n} edited in batch {edit}\n");
+            }
+            return (Kind::Blob, lines.concat().into_bytes());
+        }
+        7 => {
+            let mut payload = shared(round, i);
+            let at = 100 + (child as usize * 13) % 1500;
+            payload[at..at + 8].copy_from_slice(&child.to_le_bytes());
+            return (Kind::Tree, payload);
+        }
+        _ => {}
     }
     let mut rng = Rng::new(round, child, i, j);
     let kind = Kind::ALL[(rng.next() % Kind::ALL.len() as u64) as usize];
@@ -172,6 +198,32 @@ fn object(round: u64, child: u64, i: u64, j: u64) -> (Kind, Vec<u8>) {
             .collect(),
     };
     (kind, payload)
+}
+
+/// The object every child of a round writes first in batch `i`: a short
+/// text, then bytes that do not compress.
+fn shared(round: u64, i: u64) -> Vec<u8> {
+    let mut rng = Rng::new(round, u64::MAX, i, 0);
+    let mut payload = format!("shared by every child of round {round}, batch {i}\n").into_bytes();
+    while payload.len() < 2000 {
+        payload.extend_from_slice(&rng.next().to_le_bytes());
+    }
+    payload
+}
+
+/// The hint a child gives for object `j` of batch `i`: its previous version
+/// of the file it edits, or the shared object of the batch, which another
+/// process may have written and not flushed yet.
+fn similar(round: u64, child: u64, i: u64, j: u64) -> Option<ObjectId> {
+    let hint = |i, j| {
+        let (kind, payload) = object(round, child, i, j);
+        ObjectId::hash(kind, &payload)
+    };
+    match j {
+        6 if i > 0 => Some(hint(i - 1, 6)),
+        7 => Some(hint(i, 0)),
+        _ => None,
+    }
 }
 
 /// SplitMix64.
@@ -359,6 +411,8 @@ fn many_processes_share_one_store() {
     assert_eq!(operations, children * iterations);
     assert!(report.sealed_segments > 0, "{report:?}");
     assert!(report.checkpoints > 0, "{report:?}");
+    // Every child's edited file and its variant of the shared object.
+    assert!(report.delta_records >= children * iterations, "{report:?}");
 }
 
 #[test]
@@ -430,10 +484,11 @@ fn processes_killed_at_random_moments() {
         acknowledged = acks.increments.len();
         // Shown with --nocapture: what the kills left behind.
         eprintln!(
-            "{context}: {before} operations, {} objects, {} segments ({} sealed), \
+            "{context}: {before} operations, {} objects ({} deltas), {} segments ({} sealed), \
              leftovers: {} torn segment bytes, {} torn journal entries, \
              {} unindexed records, {} torn log bytes, {} temporary files",
             report.objects,
+            report.delta_records,
             report.segments,
             report.sealed_segments,
             report.torn_segment_bytes,

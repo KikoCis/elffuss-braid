@@ -6,7 +6,7 @@
 //! ```text
 //! u32 sync = 0xB7A1D5E9 | u8 kind | u8 codec | u16 flags = 0
 //! u32 stored_len | u64 raw_len | [32] id
-//! codec 2–3 only: [32] dictionary or reference object id
+//! codecs 2 and 3 only: [32] dictionary or base id
 //! payload: stored_len bytes
 //! u32 crc32c of everything from the sync word to the end of the payload
 //! zero padding to a multiple of 8 bytes
@@ -16,12 +16,22 @@
 //! reader that meets the remains of a write cut short can find the next
 //! record by looking for the sync word 8 bytes at a time.
 //!
-//! Payloads of up to 64 bytes are stored raw (codec 0). Larger ones are
-//! compressed with zstd at level 3 (codec 1) when that makes them smaller.
-//! Codecs 2 and 3 (a dictionary or a delta base) are reserved: their header
-//! is parsed, so a scan can step over them, but this version cannot decode
-//! them.
+//! The codec says how the payload is stored:
+//!
+//! - 0, raw: as it is. Payloads of up to 64 bytes are always raw.
+//! - 1, zstd: one zstd frame at level 3, used when it is smaller than raw.
+//! - 2, reserved for zstd with a dictionary: its header is parsed, so a scan
+//!   can step over it, but nothing writes or decodes it.
+//! - 3, delta: one zstd frame compressed with the raw payload of the base
+//!   object as a reference prefix (see [`crate::delta`]). The base is stored
+//!   whole, with codec 0 or 1.
+//! - 4, chunked, for blobs only: the payload is the list of the chunks the
+//!   blob is cut into (see [`crate::chunks`]).
+//!
+//! Decoding codecs 0 and 1 needs the record alone, and is done here. Codecs 3
+//! and 4 need other objects, so the segments resolve them.
 
+use std::borrow::Cow;
 use std::io::Read;
 
 use braid_format::{Kind, ObjectId};
@@ -29,8 +39,11 @@ use braid_format::{Kind, ObjectId};
 /// The first four bytes of every record.
 pub(crate) const SYNC: u32 = 0xB7A1_D5E9;
 
-/// Bytes from the sync word to the payload, for codecs 0 and 1.
+/// Bytes from the sync word to the payload, for codecs without a reference.
 pub(crate) const HEADER_LEN: usize = 52;
+
+/// Bytes of the dictionary or base id that codecs 2 and 3 add to the header.
+pub(crate) const REFERENCE_LEN: usize = 32;
 
 /// Records start at multiples of this.
 pub(crate) const ALIGN: u64 = 8;
@@ -38,18 +51,43 @@ pub(crate) const ALIGN: u64 = 8;
 /// Payloads up to this size are always stored raw.
 pub(crate) const RAW_MAX: usize = 64;
 
-/// The zstd level for compressed payloads.
-const ZSTD_LEVEL: i32 = 3;
+/// The zstd level for compressed payloads and deltas.
+pub(crate) const ZSTD_LEVEL: i32 = 3;
 
 /// The payload is stored as it is.
 pub(crate) const CODEC_RAW: u8 = 0;
 /// The payload is one zstd frame.
 pub(crate) const CODEC_ZSTD: u8 = 1;
-/// The highest codec number the format defines (2 and 3 are reserved).
-const CODEC_MAX: u8 = 3;
+/// Reserved: one zstd frame compressed with a dictionary.
+pub(crate) const CODEC_DICTIONARY: u8 = 2;
+/// The payload is one zstd frame compressed against a base object.
+pub(crate) const CODEC_DELTA: u8 = 3;
+/// The payload is the chunk list of a blob stored in chunks.
+pub(crate) const CODEC_CHUNKED: u8 = 4;
+/// The highest codec number the format defines.
+pub(crate) const CODEC_MAX: u8 = CODEC_CHUNKED;
 
 /// Bytes the CRC adds after the payload.
 const CRC_LEN: usize = 4;
+
+/// Whether a record of this codec holds its object's payload by itself, so
+/// that it can be a delta's base.
+pub(crate) fn is_whole(codec: u8) -> bool {
+    codec == CODEC_RAW || codec == CODEC_ZSTD
+}
+
+/// How readers rank copies of one object, best first: whole records, then
+/// deltas, then chunked blobs, then what this version cannot decode. When a
+/// handle knows several copies of an object it uses the best ranked one, so
+/// that a delta's base resolves to a whole copy whenever one is known.
+pub(crate) fn rank(codec: u8) -> u8 {
+    match codec {
+        CODEC_RAW | CODEC_ZSTD => 0,
+        CODEC_DELTA => 1,
+        CODEC_CHUNKED => 2,
+        _ => 3,
+    }
+}
 
 /// The fixed fields of a record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,11 +128,16 @@ impl Header {
 
 /// Bytes from the sync word to the payload for a codec.
 pub(crate) fn header_len(codec: u8) -> usize {
-    if codec >= 2 {
-        HEADER_LEN + 32
+    if has_reference(codec) {
+        HEADER_LEN + REFERENCE_LEN
     } else {
         HEADER_LEN
     }
+}
+
+/// Whether records of this codec name another object in their header.
+fn has_reference(codec: u8) -> bool {
+    codec == CODEC_DICTIONARY || codec == CODEC_DELTA
 }
 
 /// Rounds up to the next record boundary.
@@ -113,37 +156,63 @@ pub(crate) struct Encoded {
     pub bytes: Vec<u8>,
 }
 
-/// Encodes the object `id`, which must be the hash of `payload` as `kind`.
-/// Fails with the payload size if the stored form does not fit in a record.
+/// The stored form of a payload on its own: raw when it is small or does
+/// not compress, else one zstd frame.
+pub(crate) fn standalone(payload: &[u8]) -> (u8, Cow<'_, [u8]>) {
+    if payload.len() > RAW_MAX
+        && let Ok(compressed) = zstd::bulk::compress(payload, ZSTD_LEVEL)
+        && compressed.len() < payload.len()
+    {
+        return (CODEC_ZSTD, Cow::Owned(compressed));
+    }
+    (CODEC_RAW, Cow::Borrowed(payload))
+}
+
+/// Encodes the object `id`, which must be the hash of `payload` as `kind`,
+/// on its own: raw or compressed, whichever is smaller. Fails with the
+/// payload size if the stored form does not fit in a record.
 pub(crate) fn encode(kind: Kind, id: ObjectId, payload: &[u8]) -> Result<Encoded, u64> {
-    let compressed = if payload.len() > RAW_MAX {
-        zstd::bulk::compress(payload, ZSTD_LEVEL)
-            .ok()
-            .filter(|compressed| compressed.len() < payload.len())
-    } else {
-        None
-    };
-    let (codec, stored) = match &compressed {
-        Some(compressed) => (CODEC_ZSTD, compressed.as_slice()),
-        None => (CODEC_RAW, payload),
-    };
-    let stored_len = u32::try_from(stored.len()).map_err(|_| payload.len() as u64)?;
+    let (codec, stored) = standalone(payload);
+    assemble(kind, id, codec, payload.len() as u64, None, &stored)
+}
+
+/// Encodes the object `id` raw, without trying to compress it.
+pub(crate) fn encode_raw(kind: Kind, id: ObjectId, payload: &[u8]) -> Result<Encoded, u64> {
+    assemble(kind, id, CODEC_RAW, payload.len() as u64, None, payload)
+}
+
+/// Builds a record from its fields: `stored` is the payload as stored, and
+/// `reference` the base or dictionary id of codecs 2 and 3. Fails with
+/// `raw_len` if the stored form does not fit in a record.
+pub(crate) fn assemble(
+    kind: Kind,
+    id: ObjectId,
+    codec: u8,
+    raw_len: u64,
+    reference: Option<&ObjectId>,
+    stored: &[u8],
+) -> Result<Encoded, u64> {
+    debug_assert_eq!(reference.is_some(), has_reference(codec));
+    let stored_len = u32::try_from(stored.len()).map_err(|_| raw_len)?;
     let header = Header {
         kind,
         codec,
         stored_len,
-        raw_len: payload.len() as u64,
+        raw_len,
         id,
     };
-    let record_len = usize::try_from(header.record_len()).map_err(|_| payload.len() as u64)?;
+    let record_len = usize::try_from(header.record_len()).map_err(|_| raw_len)?;
     let mut bytes = Vec::with_capacity(record_len);
     bytes.extend_from_slice(&SYNC.to_le_bytes());
     bytes.push(kind.code());
     bytes.push(codec);
     bytes.extend_from_slice(&0u16.to_le_bytes());
     bytes.extend_from_slice(&stored_len.to_le_bytes());
-    bytes.extend_from_slice(&header.raw_len.to_le_bytes());
+    bytes.extend_from_slice(&raw_len.to_le_bytes());
     bytes.extend_from_slice(id.as_bytes());
+    if let Some(reference) = reference {
+        bytes.extend_from_slice(reference.as_bytes());
+    }
     bytes.extend_from_slice(stored);
     let crc = crc32c::crc32c(&bytes);
     bytes.extend_from_slice(&crc.to_le_bytes());
@@ -173,6 +242,9 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<Header, &'static str> {
     if codec == CODEC_RAW && raw_len != u64::from(stored_len) {
         return Err("raw payload with two different lengths");
     }
+    if codec == CODEC_CHUNKED && kind != Kind::Blob {
+        return Err("only blobs are stored in chunks");
+    }
     let id = ObjectId::from_bytes(array(&bytes[20..52]));
     Ok(Header {
         kind,
@@ -183,10 +255,22 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<Header, &'static str> {
     })
 }
 
+/// A record whose checksum is valid, read from the bytes that hold it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Checked<'a> {
+    /// Its fixed fields.
+    pub header: Header,
+    /// Its CRC.
+    pub crc: u32,
+    /// The base (codec 3) or dictionary (codec 2) it names.
+    pub reference: Option<ObjectId>,
+    /// The payload as stored.
+    pub stored: &'a [u8],
+}
+
 /// Checks the record at the start of `bytes`, which must hold at least its
-/// unpadded length: the header and the CRC. Returns the header, the CRC and
-/// the stored payload.
-pub(crate) fn check(bytes: &[u8]) -> Result<(Header, u32, &[u8]), &'static str> {
+/// unpadded length: the header and the CRC.
+pub(crate) fn check(bytes: &[u8]) -> Result<Checked<'_>, &'static str> {
     let header = parse_header(bytes)?;
     let checked = usize::try_from(header.checked_len()).map_err(|_| "record too large")?;
     if bytes.len() < checked + CRC_LEN {
@@ -196,28 +280,47 @@ pub(crate) fn check(bytes: &[u8]) -> Result<(Header, u32, &[u8]), &'static str> 
     if crc32c::crc32c(&bytes[..checked]) != crc {
         return Err("checksum mismatch");
     }
+    let reference = has_reference(header.codec)
+        .then(|| ObjectId::from_bytes(array(&bytes[HEADER_LEN..HEADER_LEN + REFERENCE_LEN])));
     let start = header_len(header.codec);
-    Ok((header, crc, &bytes[start..checked]))
+    Ok(Checked {
+        header,
+        crc,
+        reference,
+        stored: &bytes[start..checked],
+    })
 }
 
-/// Restores the payload of a checked record and verifies that it hashes to
-/// the record's id.
+/// Restores the payload of a checked record stored whole (codec 0 or 1)
+/// and verifies that it hashes to the record's id.
 pub(crate) fn decode(header: &Header, stored: &[u8]) -> Result<Vec<u8>, &'static str> {
     let payload = match header.codec {
         CODEC_RAW => stored.to_vec(),
         CODEC_ZSTD => decompress(stored, header.raw_len)?,
+        CODEC_DELTA | CODEC_CHUNKED => return Err("record needs other objects to decode"),
         _ => return Err("codec not supported by this version"),
     };
-    if ObjectId::hash(header.kind, &payload) != header.id {
-        return Err("content does not hash to its id");
-    }
+    verify(header, &payload)?;
     Ok(payload)
 }
 
+/// Checks that a decoded payload hashes to its record's id.
+pub(crate) fn verify(header: &Header, payload: &[u8]) -> Result<(), &'static str> {
+    if ObjectId::hash(header.kind, payload) != header.id {
+        return Err("content does not hash to its id");
+    }
+    Ok(())
+}
+
 fn decompress(stored: &[u8], raw_len: u64) -> Result<Vec<u8>, &'static str> {
-    // Stream with a cap instead of trusting raw_len for one allocation: a
-    // damaged length then costs at most the data actually there.
     let decoder = zstd::stream::read::Decoder::with_buffer(stored).map_err(|_| "bad zstd data")?;
+    read_capped(decoder, raw_len)
+}
+
+/// Reads a decoder to its end, expecting exactly `raw_len` bytes. It streams
+/// with a cap instead of trusting `raw_len` for one allocation: a damaged
+/// length then costs at most the data actually there.
+pub(crate) fn read_capped(decoder: impl Read, raw_len: u64) -> Result<Vec<u8>, &'static str> {
     let mut payload = Vec::with_capacity(usize::try_from(raw_len.min(1 << 24)).unwrap_or(0));
     decoder
         .take(raw_len.saturating_add(1))
@@ -245,10 +348,11 @@ mod tests {
         let encoded = encode(kind, id, payload).unwrap();
         assert_eq!(encoded.bytes.len() as u64, encoded.header.record_len());
         assert_eq!(encoded.bytes.len() % ALIGN as usize, 0);
-        let (header, crc, stored) = check(&encoded.bytes).unwrap();
-        assert_eq!(header, encoded.header);
-        assert_eq!(crc, encoded.crc);
-        assert_eq!(decode(&header, stored).unwrap(), payload);
+        let checked = check(&encoded.bytes).unwrap();
+        assert_eq!(checked.header, encoded.header);
+        assert_eq!(checked.crc, encoded.crc);
+        assert_eq!(checked.reference, None);
+        assert_eq!(decode(&checked.header, checked.stored).unwrap(), payload);
         encoded
     }
 
@@ -284,6 +388,13 @@ mod tests {
             );
         }
         round_trip(Kind::Blob, &payload);
+        // Asked for raw, it stays raw even when it would compress.
+        let text = b"compress me please ".repeat(20);
+        let id = ObjectId::hash(Kind::Blob, &text);
+        let raw = encode_raw(Kind::Blob, id, &text).unwrap();
+        assert_eq!(raw.header.codec, CODEC_RAW);
+        let checked = check(&raw.bytes).unwrap();
+        assert_eq!(decode(&checked.header, checked.stored).unwrap(), text);
     }
 
     #[test]
@@ -308,6 +419,33 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_follows_the_id() {
+        let base = ObjectId::hash(Kind::Blob, b"base");
+        let id = ObjectId::hash(Kind::Blob, b"not decoded here");
+        let encoded = assemble(Kind::Blob, id, CODEC_DELTA, 16, Some(&base), b"frame").unwrap();
+        let bytes = &encoded.bytes;
+        assert_eq!(bytes[5], CODEC_DELTA);
+        assert_eq!(&bytes[52..84], base.as_bytes());
+        assert_eq!(&bytes[84..89], b"frame");
+        assert_eq!(encoded.header.header_len(), 84);
+        let checked = check(bytes).unwrap();
+        assert_eq!(checked.reference, Some(base));
+        assert_eq!(checked.stored, b"frame");
+        assert_eq!(
+            decode(&checked.header, checked.stored),
+            Err("record needs other objects to decode")
+        );
+
+        // A chunk list has no reference, and only blobs have one.
+        let chunked = assemble(Kind::Blob, id, CODEC_CHUNKED, 16, None, b"list").unwrap();
+        assert_eq!(chunked.header.header_len(), 52);
+        assert_eq!(check(&chunked.bytes).unwrap().stored, b"list");
+        let mut tree = chunked.bytes.clone();
+        tree[4] = Kind::Tree.code();
+        assert_eq!(parse_header(&tree), Err("only blobs are stored in chunks"));
+    }
+
+    #[test]
     fn every_flipped_byte_is_caught() {
         for payload in [&b"hello\n"[..], &b"compress me please ".repeat(20)] {
             let encoded = round_trip(Kind::Blob, payload);
@@ -317,7 +455,7 @@ mod tests {
                 damaged[i] ^= 0x01;
                 let caught = match check(&damaged) {
                     Err(_) => true,
-                    Ok((header, _, stored)) => decode(&header, stored).is_err(),
+                    Ok(found) => decode(&found.header, found.stored).is_err(),
                 };
                 assert!(caught, "flip at byte {i} went unnoticed");
             }
@@ -337,9 +475,9 @@ mod tests {
         let payload = b"some content";
         let wrong = ObjectId::hash(Kind::Blob, b"other content");
         let encoded = encode(Kind::Blob, wrong, payload).unwrap();
-        let (header, _, stored) = check(&encoded.bytes).unwrap();
+        let checked = check(&encoded.bytes).unwrap();
         assert_eq!(
-            decode(&header, stored),
+            decode(&checked.header, checked.stored),
             Err("content does not hash to its id")
         );
     }
@@ -347,10 +485,20 @@ mod tests {
     #[test]
     fn reserved_codecs_parse_but_do_not_decode() {
         let mut encoded = round_trip(Kind::Blob, b"x").bytes;
-        encoded[5] = 2;
+        encoded[5] = CODEC_DICTIONARY;
         let header = parse_header(&encoded).unwrap();
         assert_eq!(header.header_len(), HEADER_LEN as u64 + 32);
-        encoded[5] = 4;
+        encoded[5] = 5;
         assert_eq!(parse_header(&encoded), Err("unknown codec"));
+    }
+
+    #[test]
+    fn copies_rank_whole_first() {
+        assert!(rank(CODEC_RAW) == rank(CODEC_ZSTD));
+        assert!(rank(CODEC_ZSTD) < rank(CODEC_DELTA));
+        assert!(rank(CODEC_DELTA) < rank(CODEC_CHUNKED));
+        assert!(rank(CODEC_CHUNKED) < rank(CODEC_DICTIONARY));
+        assert!(is_whole(CODEC_RAW) && is_whole(CODEC_ZSTD));
+        assert!(!is_whole(CODEC_DELTA) && !is_whole(CODEC_CHUNKED));
     }
 }

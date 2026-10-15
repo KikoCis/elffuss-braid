@@ -21,7 +21,7 @@ use std::io;
 use braid_format::{Kind, ObjectId};
 
 use crate::fsutil::read_range;
-use crate::record::{CODEC_RAW, Header, array};
+use crate::record::{CODEC_CHUNKED, CODEC_MAX, CODEC_RAW, Header, array};
 
 /// Bytes per journal entry.
 pub(crate) const ENTRY_LEN: u64 = 64;
@@ -117,8 +117,9 @@ impl Entry {
             crc: u32::from_le_bytes(array(&fields[24..28])),
         };
         let valid = u16::from_le_bytes(array(&fields[14..16])) == 0
-            && entry.codec <= 3
+            && entry.codec <= CODEC_MAX
             && (entry.codec != CODEC_RAW || entry.raw_len == u64::from(entry.stored_len))
+            && (entry.codec != CODEC_CHUNKED || entry.kind == Kind::Blob)
             && entry.offset.is_multiple_of(crate::record::ALIGN)
             && entry
                 .offset

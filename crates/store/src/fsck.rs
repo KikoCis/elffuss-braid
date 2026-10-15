@@ -8,21 +8,30 @@
 //! record cut short in a segment or in the op log, journal entries that fail
 //! their CRC, records no entry points at, temporary files. Everything that
 //! could make the store return wrong data or lose data is a [`Problem`].
+//!
+//! Records stored whole are decoded as each segment is read. Deltas and
+//! chunked blobs need other objects, so they are checked once every segment
+//! has been read: a delta's base must be an object stored whole, a chunked
+//! blob's chunks must be blobs of the sizes its list gives, and what they
+//! decode to must hash to the record's id.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use braid_format::ObjectId;
+use braid_format::{IdHasher, Kind, ObjectId};
 
+use crate::chunks;
+use crate::delta;
 use crate::error::Error;
-use crate::fsutil::count_temps;
+use crate::fsutil::{count_temps, read_range};
 use crate::journal::{self, Entry};
 use crate::oplog::{Bad, decode_checkpoint, next_record, not_in_transaction, parse_record};
-use crate::record::{self, Header};
-use crate::segments::{Files, list, segment_path};
+use crate::record::{self, CODEC_CHUNKED, CODEC_DELTA, Header};
+use crate::segments::{BaseCache, Files, list, segment_path};
 use crate::{Store, check_format, index, scan};
 
 /// What fsck found.
@@ -34,6 +43,10 @@ pub struct FsckReport {
     pub sealed_segments: usize,
     /// Records whose checksum is valid.
     pub records: u64,
+    /// Of those, records holding a delta against a base object.
+    pub delta_records: u64,
+    /// Of those, records holding the chunk list of a blob stored in chunks.
+    pub chunked_records: u64,
     /// Distinct objects that an index or a journal leads to.
     pub objects: u64,
     /// Valid records that no index or journal entry points at: appends whose
@@ -173,15 +186,52 @@ impl fmt::Display for Problem {
 struct Found {
     header: Header,
     crc: u32,
-    content: Result<(), &'static str>,
+    content: Content,
+}
+
+/// Whether a record's content checks out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Content {
+    /// It decodes and hashes to its id.
+    Good,
+    /// It does not.
+    Bad,
+    /// A delta or a chunk list: checked once every segment is read.
+    Later,
+}
+
+/// A record that an entry leads to, by segment number and offset.
+#[derive(Clone, Copy, Debug)]
+struct Located {
+    segment: usize,
+    offset: u64,
+    header: Header,
+}
+
+/// What the first pass over the segments collects for the second.
+#[derive(Default)]
+struct Collected {
+    /// Segment paths, by number.
+    segments: Vec<PathBuf>,
+    /// Objects an entry leads to, whose content checks out.
+    objects: HashSet<ObjectId>,
+    /// Of those, a copy stored whole of each object.
+    whole: HashMap<ObjectId, Located>,
+    /// Deltas and chunk lists that an entry leads to, to check.
+    later: Vec<Located>,
+    /// Of those, the deltas that checked out, for chunks stored as deltas.
+    deltas: HashMap<ObjectId, Located>,
 }
 
 impl Store {
     /// Checks the whole store: every segment record (checksum, and that its
     /// content hashes to its id), every journal and index entry (it leads to
-    /// a whole record of the same object), every op log record (checksum,
-    /// sequence, and that each update's old value matches), every checkpoint,
-    /// and that every ref points at an object in the store.
+    /// a whole record of the same object), every delta (its base is an
+    /// object stored whole, and applying it gives its id), every chunked
+    /// blob (its chunks are there with the sizes it lists, and together hash
+    /// to its id), every op log record (checksum, sequence, and that each
+    /// update's old value matches), every checkpoint, and that every ref
+    /// points at an object in the store.
     ///
     /// It can run while other processes use the store. Errors are only
     /// returned when fsck itself cannot run; damage goes in the report. Like
@@ -344,10 +394,11 @@ impl Store {
         Ok(refs)
     }
 
-    /// Checks every segment. Returns the objects that an entry leads to.
+    /// Checks every segment. Returns the objects that an entry leads to and
+    /// whose content checks out.
     fn check_segments(&self, report: &mut FsckReport) -> HashSet<ObjectId> {
         let dir = self.root.join("seg");
-        let mut objects = HashSet::new();
+        let mut collected = Collected::default();
         let listing = match list(&dir) {
             Ok(listing) => listing,
             Err(err) => {
@@ -355,7 +406,7 @@ impl Store {
                     path: "seg".to_owned(),
                     detail: err.to_string(),
                 });
-                return objects;
+                return collected.objects;
             }
         };
         for (name, files) in listing {
@@ -369,9 +420,10 @@ impl Store {
                 continue;
             }
             report.segments += 1;
-            check_segment(&dir, &name, files, report, &mut objects);
+            check_segment(&dir, &name, files, report, &mut collected);
         }
-        objects
+        collected.check_later(report);
+        collected.objects
     }
 }
 
@@ -380,7 +432,7 @@ fn check_segment(
     name: &str,
     files: Files,
     report: &mut FsckReport,
-    objects: &mut HashSet<ObjectId>,
+    collected: &mut Collected,
 ) {
     // Entries before records: an entry is written after its record, so every
     // record an entry read now points at is already in the segment.
@@ -418,13 +470,29 @@ fn check_segment(
         });
     }
     let mut records = BTreeMap::new();
-    let scanned = scan::scan(&file, len, |offset, header, crc, stored| {
-        let content = record::decode(header, stored).map(|_| ());
+    let mut problems = Vec::new();
+    let scanned = scan::scan(&file, len, |offset, found| {
+        let codec = found.header.codec;
+        let content = if codec == CODEC_DELTA || codec == CODEC_CHUNKED {
+            Content::Later
+        } else {
+            match record::decode(&found.header, found.stored) {
+                Ok(_) => Content::Good,
+                Err(detail) => {
+                    problems.push(Problem::BadRecord {
+                        segment: name.to_owned(),
+                        offset,
+                        detail: format!("object {}: {detail}", found.header.id),
+                    });
+                    Content::Bad
+                }
+            }
+        };
         records.insert(
             offset,
             Found {
-                header: *header,
-                crc,
+                header: found.header,
+                crc: found.crc,
                 content,
             },
         );
@@ -439,15 +507,16 @@ fn check_segment(
             return;
         }
     }
-    for (offset, found) in &records {
-        if let Err(detail) = found.content {
-            report.problems.push(Problem::BadRecord {
-                segment: name.to_owned(),
-                offset: *offset,
-                detail: format!("object {}: {detail}", found.header.id),
-            });
+    report.problems.append(&mut problems);
+    for found in records.values() {
+        match found.header.codec {
+            CODEC_DELTA => report.delta_records += 1,
+            CODEC_CHUNKED => report.chunked_records += 1,
+            _ => {}
         }
     }
+    let segment = collected.segments.len();
+    collected.segments.push(seg_path);
 
     // A damaged index is worked around by scanning, as lookups do.
     let entries = if rebuild {
@@ -476,13 +545,182 @@ fn check_segment(
                     report
                         .problems
                         .push(bad_entry("the record there is another one"));
-                } else if found.content.is_ok() {
-                    objects.insert(entry.id);
+                    continue;
+                }
+                let copy = Located {
+                    segment,
+                    offset: entry.offset,
+                    header: found.header,
+                };
+                match found.content {
+                    Content::Good => {
+                        collected.objects.insert(entry.id);
+                        collected.whole.entry(entry.id).or_insert(copy);
+                    }
+                    Content::Later => collected.later.push(copy),
+                    Content::Bad => {}
                 }
             }
         }
     }
     report.unindexed_records += (records.len() - referenced.len()) as u64;
+}
+
+impl Collected {
+    /// The second pass: deltas, then chunked blobs, whose chunks may be
+    /// deltas. A record that checks out adds its object; one that does not
+    /// is a bad record.
+    fn check_later(&mut self, report: &mut FsckReport) {
+        let named = self.named();
+        let mut reader = Reader {
+            segments: &self.segments,
+            files: HashMap::new(),
+            bases: BaseCache::default(),
+        };
+        let (deltas, lists): (Vec<Located>, Vec<Located>) = std::mem::take(&mut self.later)
+            .into_iter()
+            .partition(|copy| copy.header.codec == CODEC_DELTA);
+        let mut problems = Vec::new();
+        for copy in deltas {
+            match reader.delta(&copy, &self.whole, &named) {
+                Ok(_) => {
+                    self.objects.insert(copy.header.id);
+                    self.deltas.entry(copy.header.id).or_insert(copy);
+                }
+                Err(detail) => problems.push(reader.bad_record(&copy, &detail)),
+            }
+        }
+        for copy in lists {
+            match reader.chunked(&copy, &self.whole, &self.deltas, &named) {
+                Ok(()) => {
+                    self.objects.insert(copy.header.id);
+                }
+                Err(detail) => problems.push(reader.bad_record(&copy, &detail)),
+            }
+        }
+        report.problems.append(&mut problems);
+    }
+
+    /// Every object an entry leads to, whatever its content.
+    fn named(&self) -> HashSet<ObjectId> {
+        self.whole
+            .keys()
+            .chain(self.later.iter().map(|copy| &copy.header.id))
+            .copied()
+            .collect()
+    }
+}
+
+/// Reads records for the second pass.
+struct Reader<'a> {
+    segments: &'a [PathBuf],
+    files: HashMap<usize, File>,
+    bases: BaseCache,
+}
+
+impl Reader<'_> {
+    /// The bytes of a record, checked again.
+    fn record(&mut self, copy: &Located) -> Result<Vec<u8>, String> {
+        let path = &self.segments[copy.segment];
+        let file = match self.files.entry(copy.segment) {
+            std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(File::open(path).map_err(|err| err.to_string())?)
+            }
+        };
+        let bytes = read_range(file, copy.offset, copy.header.unpadded_len())
+            .map_err(|err| format!("cannot read it again: {err}"))?;
+        match record::check(&bytes) {
+            Ok(found) if found.header == copy.header => Ok(bytes),
+            _ => Err("its record changed while fsck ran".to_owned()),
+        }
+    }
+
+    /// The payload of an object stored whole.
+    fn whole(&mut self, copy: &Located) -> Result<Arc<Vec<u8>>, String> {
+        if let Some(payload) = self.bases.get(&copy.header.id) {
+            return Ok(payload);
+        }
+        let bytes = self.record(copy)?;
+        let found = record::check(&bytes).map_err(str::to_owned)?;
+        let payload = Arc::new(record::decode(&found.header, found.stored).map_err(str::to_owned)?);
+        self.bases.insert(copy.header.id, Arc::clone(&payload));
+        Ok(payload)
+    }
+
+    /// The payload of a delta, checked against its base and its id.
+    fn delta(
+        &mut self,
+        copy: &Located,
+        whole: &HashMap<ObjectId, Located>,
+        named: &HashSet<ObjectId>,
+    ) -> Result<Vec<u8>, String> {
+        let bytes = self.record(copy)?;
+        let found = record::check(&bytes).map_err(str::to_owned)?;
+        let base = found.reference.ok_or("a delta without a base")?;
+        let base_copy = match whole.get(&base) {
+            Some(base_copy) => base_copy,
+            None if named.contains(&base) => {
+                return Err(format!("its base {base} has no good copy stored whole"));
+            }
+            None => return Err(format!("its base {base} is missing")),
+        };
+        let base_payload = self
+            .whole(base_copy)
+            .map_err(|detail| format!("its base {base}: {detail}"))?;
+        delta::decode(&found.header, found.stored, &base_payload).map_err(str::to_owned)
+    }
+
+    /// Checks a chunked blob: every chunk is a blob of the size the list
+    /// gives, stored whole or as a delta, and together they hash to the
+    /// blob's id.
+    fn chunked(
+        &mut self,
+        copy: &Located,
+        whole: &HashMap<ObjectId, Located>,
+        deltas: &HashMap<ObjectId, Located>,
+        named: &HashSet<ObjectId>,
+    ) -> Result<(), String> {
+        let bytes = self.record(copy)?;
+        let found = record::check(&bytes).map_err(str::to_owned)?;
+        let chunks =
+            chunks::decode_list(found.stored, found.header.raw_len).map_err(str::to_owned)?;
+        let mut hasher = IdHasher::new(Kind::Blob);
+        for chunk in &chunks {
+            let fits = |candidate: &Located| {
+                candidate.header.kind == Kind::Blob && candidate.header.raw_len == chunk.size
+            };
+            let payload = match (whole.get(&chunk.id), deltas.get(&chunk.id)) {
+                (Some(chunk_copy), _) if fits(chunk_copy) => self.whole(chunk_copy)?.to_vec(),
+                (_, Some(chunk_copy)) if fits(chunk_copy) => {
+                    self.delta(chunk_copy, whole, named)?
+                }
+                _ => {
+                    return Err(format!(
+                        "its chunk {} has no good copy as a blob of {} bytes",
+                        chunk.id, chunk.size
+                    ));
+                }
+            };
+            hasher.update(&payload);
+        }
+        if hasher.finalize() != found.header.id {
+            return Err("its chunks do not hash to its id".to_owned());
+        }
+        Ok(())
+    }
+
+    fn bad_record(&self, copy: &Located, detail: &str) -> Problem {
+        let segment = self.segments[copy.segment]
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Problem::BadRecord {
+            segment,
+            offset: copy.offset,
+            detail: format!("object {}: {detail}", copy.header.id),
+        }
+    }
 }
 
 /// What a segment's index or journal says.

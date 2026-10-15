@@ -57,6 +57,16 @@ pub enum Error {
         size: u64,
     },
 
+    /// Reading the content to store, or writing an object out, failed.
+    #[error("cannot {action} the stream: {source}")]
+    Stream {
+        /// What was being done: "read" or "write".
+        action: &'static str,
+        /// The error from the reader or the writer.
+        #[source]
+        source: io::Error,
+    },
+
     /// A ref name the op log does not accept.
     #[error("invalid ref name {name:?}: {reason}")]
     InvalidRefName {

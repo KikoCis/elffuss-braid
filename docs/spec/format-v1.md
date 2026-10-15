@@ -354,12 +354,73 @@ u32 crc32c of everything from the sync word to the end of the payload
 zero padding to a multiple of 8 bytes
 ```
 
-Codec 0 is raw (`stored_len == raw_len`) and 1 is one zstd frame; 2 (zstd with
-a dictionary) and 3 (zstd against a reference object) are reserved. Payloads up
-to 64 bytes are stored raw, larger ones compressed at zstd level 3 when that
-makes them smaller. After a crash, the next writer appends at the next multiple
-of 8 after the end of the file, so the remains of a cut append stay in place and
-scans step over them.
+`raw_len` is always the size of the object itself, whatever the codec, so the
+kind and size of any object come from its header without reading its payload.
+After a crash, the next writer appends at the next multiple of 8 after the end
+of the file, so the remains of a cut append stay in place and scans step over
+them.
+
+| Codec | Payload | Used for |
+|---|---|---|
+| 0 raw | the object as it is (`stored_len == raw_len`) | payloads up to 64 bytes, and larger ones zstd does not make smaller |
+| 1 zstd | one zstd frame, level 3 | other objects stored whole |
+| 2 | reserved: zstd with a dictionary | not written yet |
+| 3 delta | one zstd frame against the raw payload of the base the header names | blobs under 4 MiB and trees, given a similar object |
+| 4 chunked | the chunk list | blobs only, of 4 MiB or more |
+
+**Deltas (codec 3).** A writer may say which object a new one is probably
+close to: the same path in the parent, for blobs and trees. A blob under 4 MiB
+or a tree is then compressed with zstd at level 3, with the raw payload of the
+base as a reference prefix (`ZSTD_CCtx_refPrefix`), a window that holds the
+base and the object together (at most 2²⁷ bytes, so that any decoder accepts
+it), and long-distance matching. The frame is kept only when it and the 32
+bytes of the base id take at most half the bytes of the object stored on its
+own (codec 0 or 1); otherwise the object is stored on its own.
+
+Depth is always one. A base is stored whole, with codec 0 or 1, and when the
+object named as similar is a delta, the new one is made against that delta's
+own base. Reading a delta reads its base and applies one delta, never a chain.
+A reader that knows several copies of one object, as racing writers can leave,
+uses a copy stored whole before a delta, and a delta before a chunked blob, so
+that a base always resolves to a copy stored whole when there is one.
+
+**Chunked blobs (codec 4).** A blob of 4 MiB or more is cut with FastCDC, the
+2020 algorithm with normalisation level 1 and the standard gear table, into
+chunks whose boundaries depend only on the content:
+
+| Blob size | Smallest chunk | Average | Largest |
+|---|---|---|---|
+| 4 MiB to 256 MiB | 16 KiB | 64 KiB | 256 KiB |
+| 256 MiB or more | 256 KiB | 1 MiB | 4 MiB |
+
+The last chunk may be smaller than the smallest size. A writer that streams a
+blob in cuts it with the sizes for the size it expects, such as a file's
+length; how a blob is cut never changes its id. Each chunk is a blob of its
+own, whose id is the hash of its bytes, so a chunk shared by several files or
+versions is stored once. A chunk is stored whole: raw when its first 64 KiB do
+not compress below 0.9 of their size, else compressed when that is smaller. A
+chunk list never names a chunked blob: a chunk is written whole even when a
+chunked copy of the same bytes exists. The blob's own record holds its chunk
+list:
+
+```
+uv n                                 n ≥ 1
+n × ([32] chunk id | uv chunk size)  in order; sizes at least 1
+```
+
+The sizes add up to the record's `raw_len`, and the chunks, in order, make up
+the blob. Its id is still the hash of its full content: readers fetch the
+chunks one at a time, each checked against its own id and size, and check the
+whole against the blob's id, so a blob of any size can be read and written as a
+stream.
+
+**What depends on what.** A delta needs its base, and a chunked blob its
+chunks. A writer that finds a copy of an object instead of writing it again
+relies on it only together with what it needs, and flushes, at its next sync,
+the open segments of other writers that hold any of them, as it does for the
+copy itself. There is no garbage collection yet (`braid gc` is planned): no
+object is ever removed. Garbage collection must never drop a base while a delta
+needs it, nor a chunk while a chunk list names it.
 
 **Journal entry**, 64 bytes at a multiple of 64, written after its record:
 
@@ -382,8 +443,9 @@ count × (u64 offset | u32 stored_len | u8 kind | u8 codec | u16 0
 [32] BLAKE3 hash of everything before it
 ```
 
-Only entries whose record checks out go in, and the first copy of an object
-wins.
+Only entries whose record checks out go in. Of several copies of an object, a
+copy stored whole wins over a delta, a delta over a chunked blob, and the first
+of equals wins.
 
 **Operation record**:
 
@@ -412,6 +474,6 @@ uv n | n × (bytes ref name | [32] id), names strictly ascending
 ```
 
 **Planned, not implemented yet:** a binary fuse filter in indexes for fast
-misses, merged indexes, one-level zstd deltas against the same path in the
-first parent (codec 3), per-repository dictionaries (codec 2), and FastCDC
-chunking of blobs of 4 MiB or more.
+misses, merged indexes, per-repository dictionaries (codec 2), and garbage
+collection (`braid gc`), which must keep every base and chunk that something
+still needs.
