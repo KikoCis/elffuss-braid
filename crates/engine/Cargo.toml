@@ -1,0 +1,25 @@
+[package]
+name = "elffuss-braid-engine"
+description = "The semantic core of elffuss-braid: change lists, admission, ancestry, merges and landing. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lib]
+name = "braid_engine"
+
+[dependencies]
+braid-format.workspace = true
+imara-diff = { version = "0.2.0", default-features = false }
+thiserror = "2.0"
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+proptest = "1.12"
+
+[lints]
+workspace = true
