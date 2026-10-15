@@ -3,6 +3,7 @@
 
 //! `braid`, the command-line tool.
 
+mod history;
 mod sync;
 mod work;
 
@@ -87,7 +88,9 @@ enum Command {
     },
     /// Revert the newest operation that is not already undone.
     Undo,
-    /// Show history, following first parents.
+    /// Show history, following first parents; after `--`, only the
+    /// changesets that change one of the paths or anything below them.
+    #[command(long_about = LOG_HELP)]
     Log {
         /// Where to start: a ref, a changeset id, or a short id (6 hex
         /// digits or more).
@@ -96,6 +99,28 @@ enum Command {
         /// How many changesets to show.
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
+        /// Paths, from the repository's root, after `--`.
+        #[arg(last = true, value_name = "PATH")]
+        paths: Vec<String>,
+    },
+    /// Show the changeset that last changed each line of a file, along
+    /// first parents.
+    #[command(long_about = history::BLAME_HELP)]
+    Blame {
+        /// The revision: a ref, a changeset id, or a short id.
+        revision: String,
+        /// The file, from the repository's root.
+        path: String,
+    },
+    /// Compute derived data ahead of time: generation numbers, skip
+    /// pointers and changed-path filters.
+    #[command(long_about = history::DERIVE_HELP)]
+    Derive {
+        /// Every changeset reachable from any ref.
+        #[arg(long)]
+        all: bool,
+        /// Revisions whose history to derive (default: main, unless --all).
+        revisions: Vec<String>,
     },
     /// Show one changeset: parents, root, signatures, agent, message, and
     /// the files it changes against its first parent, as A, M, D or T.
@@ -248,7 +273,13 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             action: OpAction::Log { limit },
         } => op_log(cli, *limit),
         Command::Undo => undo(cli),
-        Command::Log { revision, limit } => log(cli, revision, *limit),
+        Command::Log {
+            revision,
+            limit,
+            paths,
+        } => log(cli, revision, *limit, paths),
+        Command::Blame { revision, path } => history::blame(cli, revision, path),
+        Command::Derive { all, revisions } => history::derive(cli, *all, revisions),
         Command::Show { revision } => show(cli, revision),
         Command::Diff { from, to } => diff(cli, from, to),
         Command::Git {
@@ -668,17 +699,37 @@ fn subject(message: &[u8]) -> String {
         .to_owned()
 }
 
-fn log(cli: &Cli, revision: &str, limit: usize) -> Result<ExitCode> {
+/// The long help of `log`.
+const LOG_HELP: &str = "Show history from a revision, following first parents, newest first: the
+short id, the author's date, the author with the agent, and the subject.
+
+With paths after `--` (log main -- src/lib.rs docs), only the changesets
+whose changes, against their first parent, touch one of the paths or
+anything below them, as `git log --first-parent -- <path>` lists them.
+Paths are given from the repository's root and renames are not followed.
+Changed-path filters, derived data kept in the store, let the walk skip the
+other changesets without reading them.
+
+With --json, log prints each changeset as show does, without its changes.";
+
+fn log(cli: &Cli, revision: &str, limit: usize, paths: &[String]) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
-    let mut next = Some(resolve_changeset(&repo, revision)?);
+    let head = resolve_changeset(&repo, revision)?;
     let mut entries = Vec::new();
-    while let Some(id) = next {
-        if entries.len() == limit {
-            break;
+    if paths.is_empty() {
+        let mut next = Some(head);
+        while let Some(id) = next {
+            if entries.len() == limit {
+                break;
+            }
+            let changeset = read_changeset(&repo, &id)?;
+            next = changeset.parents.first().copied();
+            entries.push((id, changeset));
         }
-        let changeset = read_changeset(&repo, &id)?;
-        next = changeset.parents.first().copied();
-        entries.push((id, changeset));
+    } else {
+        for id in history::path_log(&repo, head, paths, limit)? {
+            entries.push((id, read_changeset(&repo, &id)?));
+        }
     }
     if cli.json {
         print_json(&Value::Array(
