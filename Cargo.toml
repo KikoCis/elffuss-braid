@@ -14,6 +14,7 @@ publish = false
 
 [workspace.dependencies]
 braid-format = { package = "elffuss-braid-format", path = "crates/format" }
+braid-engine = { package = "elffuss-braid-engine", path = "crates/engine" }
 braid-store = { package = "elffuss-braid-store", path = "crates/store" }
 braid-repo = { package = "elffuss-braid-repo", path = "crates/repo" }
 braid-git = { package = "elffuss-braid-git", path = "crates/git" }

@@ -1,0 +1,25 @@
+[package]
+name = "elffuss-braid-sim"
+description = "Deterministic simulation of many agents landing changes on one branch, checked against a reference model."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "braid_sim"
+
+[dependencies]
+braid-engine.workspace = true
+braid-format.workspace = true
+braid-store.workspace = true
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[lints]
+workspace = true
