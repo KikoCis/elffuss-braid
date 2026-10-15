@@ -33,6 +33,7 @@ use braid_format::{
 use unicode_normalization::UnicodeNormalization;
 
 use crate::access::{Found, Trees, lookup, read_blob, read_changes, read_changeset};
+use crate::ancestry::all_ancestors;
 use crate::apply::{Applied, apply_sorted, write_nodes};
 use crate::commit::store_assembled;
 use crate::diff::diff_trees;
@@ -58,8 +59,10 @@ pub enum LandOutcome {
         /// The paths both sides changed, merged line by line or by kind.
         merged_paths: Vec<Vec<u8>>,
     },
-    /// The head already has everything the change does: rebased, it would
-    /// change nothing.
+    /// The head already has everything the change does: the change itself
+    /// is on the head's first-parent chain, or, rebased, it would change no
+    /// file and every parent it has besides its base is already an ancestor
+    /// of the head. Nothing was stored.
     AlreadyApplied,
     /// The change conflicts with the head. Nothing was stored, and the branch
     /// does not move.
@@ -145,20 +148,25 @@ impl ConflictKind {
 /// first-parent chain, or else the branch is empty and the change has no
 /// parents; otherwise this fails with [`Error::BaseNotOnBranch`].
 ///
-/// If the base is the head, the branch fast-forwards to `change`. If `change`
-/// is already on the head's first-parent chain, it has landed before, and the
-/// outcome is [`AlreadyApplied`](LandOutcome::AlreadyApplied). Otherwise the
-/// change is rebased onto the head: the new changeset has the parents
-/// `[head] + change.parents[1..]`, the merged tree, the change list against
-/// the head, the author, message and extra fields of `change` (with
-/// [`REBASED_FROM`] naming it), and `committer`. Blobs, directories and the
-/// changeset are stored only when the outcome is
-/// [`Rebased`](LandOutcome::Rebased).
+/// If `change` is already on the head's first-parent chain, it has landed
+/// before, and the outcome is [`AlreadyApplied`](LandOutcome::AlreadyApplied).
+/// If its base is the head, the branch fast-forwards to `change`, whatever it
+/// contains. Otherwise the change is rebased onto the head: the new changeset
+/// has the parents `[head] + change.parents[1..]`, the merged tree, the change
+/// list against the head, the author, message and extra fields of `change`
+/// (with [`REBASED_FROM`] naming it), and `committer`. When the merged tree is
+/// the head's own, the outcome is `AlreadyApplied` only if every parent of
+/// `change` after the first is already an ancestor of the head; otherwise the
+/// new changeset is made anyway, with an empty change list, so that a merge
+/// keeps its ancestry. Blobs, directories and the changeset are stored only
+/// when the outcome is [`Rebased`](LandOutcome::Rebased).
 ///
 /// This decides and writes objects, but does not move the branch: the caller
 /// runs it inside its serialized section for the branch and publishes the
-/// outcome. The cost follows the size of the change, except for the walk that
-/// checks the base, which follows its distance from the head.
+/// outcome. The cost follows the size of the change, except for two walks of
+/// history: the one that checks the base, which follows its distance from the
+/// head, and, for a merge that changes no file, the one that looks for its
+/// other parents among the head's ancestors.
 pub fn land<O: Objects>(
     objects: &O,
     head: Option<ObjectId>,
@@ -199,7 +207,7 @@ pub fn land<O: Objects>(
     if !rebase.conflicts.is_empty() {
         return Ok(LandOutcome::Conflicts(rebase.into_conflicts()));
     }
-    if applied.root == ours.root {
+    if applied.root == ours.root && all_ancestors(objects, &theirs.parents[1..], head_id)? {
         return Ok(LandOutcome::AlreadyApplied);
     }
 
@@ -662,6 +670,7 @@ mod tests {
     use crate::merge::HunkSide;
     use crate::path::MAX_PATH_DEPTH;
     use crate::testing::{Repo, deep_path, delete, gitlink, signature, text_map};
+    use braid_format::Changes;
 
     struct Setup {
         repo: Repo,
@@ -778,6 +787,55 @@ mod tests {
         assert_eq!(
             land(objects, Some(root), root, signature("x")).unwrap(),
             LandOutcome::AlreadyApplied
+        );
+    }
+
+    #[test]
+    fn merges_that_change_no_file_keep_their_ancestry() {
+        let repo = Repo::new();
+        let base = repo.commit(&[], vec![repo.set("a", "1")]);
+        let head = repo.commit(&[base], vec![repo.set("h", "1")]);
+        let side = repo.commit(&[base], vec![repo.set("s", "1")]);
+        // Merges `side` but keeps none of its files: no change against `base`.
+        let merge = commit_with_extras(&repo, vec![base, side], Vec::new(), Vec::new());
+        let objects = &repo.objects;
+
+        let outcome = land(objects, Some(head), merge, signature("x")).unwrap();
+        let LandOutcome::Rebased {
+            changeset,
+            merged_paths,
+        } = outcome
+        else {
+            panic!("expected a rebase, got {outcome:?}");
+        };
+        assert!(merged_paths.is_empty());
+        let new = read_changeset(objects, changeset).unwrap();
+        assert_eq!(new.parents, [head, side]);
+        assert_eq!(new.root, repo.root(head));
+        assert_eq!(new.changes, Changes::Inline(Vec::new()));
+        admit(objects, changeset, |id| [head, side].contains(id)).unwrap();
+
+        // Landed again on the new head, the merge has nothing left to add.
+        assert_eq!(
+            land(objects, Some(changeset), merge, signature("x")).unwrap(),
+            LandOutcome::AlreadyApplied
+        );
+        // Nor has another merge of the same side, once `side` is in history.
+        let again = commit_with_extras(
+            &repo,
+            vec![base, side],
+            Vec::new(),
+            vec![(b"note".to_vec(), b"again".to_vec())],
+        );
+        assert_eq!(
+            land(objects, Some(changeset), again, signature("x")).unwrap(),
+            LandOutcome::AlreadyApplied
+        );
+        // A merge built on the head fast-forwards, changes or not.
+        let on_head = commit_with_extras(&repo, vec![head, side], Vec::new(), Vec::new());
+        assert_eq!(
+            land(objects, Some(head), on_head, signature("x")).unwrap(),
+            LandOutcome::FastForward(on_head)
         );
     }
 

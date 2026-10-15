@@ -96,6 +96,47 @@ pub fn merge_base<O: Objects>(
     Ok(merge_bases(objects, a, b)?.into_iter().next())
 }
 
+/// Whether `ancestor` is `descendant` or one of its ancestors, through any
+/// parents. The walk goes back from `descendant` and stops when it finds
+/// `ancestor`, so a "no" covers the whole history behind `descendant`.
+pub fn is_ancestor<O: Objects>(
+    objects: &O,
+    ancestor: ObjectId,
+    descendant: ObjectId,
+) -> Result<bool, Error> {
+    all_ancestors(objects, &[ancestor], descendant)
+}
+
+/// Whether each of `ids` is `head` or one of its ancestors: one walk back
+/// from `head`, which stops as soon as all of them are found.
+pub(crate) fn all_ancestors<O: Objects>(
+    objects: &O,
+    ids: &[ObjectId],
+    head: ObjectId,
+) -> Result<bool, Error> {
+    let mut wanted: HashSet<ObjectId> = ids.iter().copied().collect();
+    if wanted.is_empty() {
+        return Ok(true);
+    }
+    let mut graph = Graph {
+        objects,
+        parents: HashMap::new(),
+    };
+    let mut seen = HashSet::from([head]);
+    let mut queue = VecDeque::from([head]);
+    while let Some(id) = queue.pop_front() {
+        if wanted.remove(&id) && wanted.is_empty() {
+            return Ok(true);
+        }
+        for parent in graph.parents(id)? {
+            if seen.insert(parent) {
+                queue.push_back(parent);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Parents of changesets, read once each.
 struct Graph<'o, O> {
     objects: &'o O,
@@ -202,6 +243,24 @@ mod tests {
             merge_base(&repo.objects, m1, m2).unwrap(),
             Some(expected[0])
         );
+    }
+
+    #[test]
+    fn ancestors_through_any_parent() {
+        let repo = Repo::new();
+        let root = node(&repo, &[], "root");
+        let side = node(&repo, &[root], "side");
+        let main = node(&repo, &[root], "main");
+        let merge = node(&repo, &[main, side], "merge");
+        let objects = &repo.objects;
+        for ancestor in [merge, main, side, root] {
+            assert!(is_ancestor(objects, ancestor, merge).unwrap());
+        }
+        assert!(!is_ancestor(objects, merge, main).unwrap());
+        assert!(!is_ancestor(objects, side, main).unwrap());
+        assert!(all_ancestors(objects, &[side, main, root], merge).unwrap());
+        assert!(!all_ancestors(objects, &[side, merge], main).unwrap());
+        assert!(all_ancestors(objects, &[], main).unwrap());
     }
 
     #[test]

@@ -13,7 +13,8 @@
 //! - [`apply`] and [`diff`]: a change list, and the two trees it connects.
 //! - [`commit`] and [`admit`]: creating a changeset, and the check a store
 //!   runs before it accepts one.
-//! - [`first_parent_chain_contains`] and [`merge_base`]: ancestry.
+//! - [`first_parent_chain_contains`], [`is_ancestor`] and [`merge_base`]:
+//!   ancestry.
 //! - [`merge3`]: three-way merges of file contents.
 //! - [`land`]: landing a change on a branch, with conflicts reported as data.
 //!
@@ -60,7 +61,7 @@ pub use access::{
     EMPTY_TREE, entry_at, read_blob, read_changes, read_changeset, read_object, read_tree,
     stat_object, write_tree,
 };
-pub use ancestry::{first_parent_chain_contains, merge_base, merge_bases};
+pub use ancestry::{first_parent_chain_contains, is_ancestor, merge_base, merge_bases};
 pub use apply::apply;
 pub use commit::{admit, commit};
 pub use diff::diff;
