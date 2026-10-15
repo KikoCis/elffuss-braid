@@ -545,7 +545,7 @@ mod tests {
     use crate::access::{entry_at, read_tree};
     use crate::diff::diff;
     use crate::path::MAX_PATH_DEPTH;
-    use crate::testing::{Repo, deep_path, delete, gitlink, text_map};
+    use crate::testing::{Hinted, Repo, deep_path, delete, gitlink, text_map};
 
     fn problem(result: Result<ObjectId, Error>) -> (String, ApplyProblem) {
         match result {
@@ -818,37 +818,6 @@ mod tests {
             entry_at(&repo.objects, root, deeper.as_bytes()),
             Err(Error::TooDeep { .. })
         ));
-    }
-
-    /// Objects in memory that remember the hints they get: the id stored
-    /// and the id it was said to be similar to.
-    #[derive(Default)]
-    struct Hinted {
-        objects: braid_format::MemoryObjects,
-        hints: std::cell::RefCell<Vec<(ObjectId, ObjectId)>>,
-    }
-
-    impl Objects for Hinted {
-        type Error = std::convert::Infallible;
-
-        fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Self::Error> {
-            self.objects.get(id)
-        }
-
-        fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Self::Error> {
-            self.objects.put(kind, payload)
-        }
-
-        fn put_similar(
-            &self,
-            kind: Kind,
-            payload: &[u8],
-            similar: &ObjectId,
-        ) -> Result<ObjectId, Self::Error> {
-            let id = self.objects.put(kind, payload)?;
-            self.hints.borrow_mut().push((id, *similar));
-            Ok(id)
-        }
     }
 
     fn file(objects: &Hinted, path: &str, content: &str) -> Change {

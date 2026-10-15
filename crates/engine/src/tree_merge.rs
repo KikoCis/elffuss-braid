@@ -91,8 +91,10 @@ pub fn merge<O: Objects>(
         return Ok(MergeOutcome::Conflicts(rebase.into_conflicts()));
     }
 
-    for (_, bytes) in &rebase.blobs {
-        objects.put(Kind::Blob, bytes).map_err(store_error)?;
+    for (_, bytes, ours) in &rebase.blobs {
+        objects
+            .put_similar(Kind::Blob, bytes, ours)
+            .map_err(store_error)?;
     }
     write_nodes(objects, &applied.nodes)?;
     if applied.root == EMPTY_TREE {

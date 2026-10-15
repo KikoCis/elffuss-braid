@@ -4,11 +4,44 @@
 //! Helpers for the unit tests: an in-memory repository with short ways to
 //! write files, trees and changesets, and to read them back.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 
 use braid_format::{
     Change, ChangeOp, EntryKind, GitId, Kind, MemoryObjects, ObjectId, Objects, Signature,
 };
+
+/// Objects in memory that remember the hints they get: the id stored and
+/// the id it was said to be similar to.
+#[derive(Default)]
+pub(crate) struct Hinted {
+    pub(crate) objects: MemoryObjects,
+    pub(crate) hints: RefCell<Vec<(ObjectId, ObjectId)>>,
+}
+
+impl Objects for Hinted {
+    type Error = Infallible;
+
+    fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Self::Error> {
+        self.objects.get(id)
+    }
+
+    fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Self::Error> {
+        self.objects.put(kind, payload)
+    }
+
+    fn put_similar(
+        &self,
+        kind: Kind,
+        payload: &[u8],
+        similar: &ObjectId,
+    ) -> Result<ObjectId, Self::Error> {
+        let id = self.objects.put(kind, payload)?;
+        self.hints.borrow_mut().push((id, *similar));
+        Ok(id)
+    }
+}
 
 use crate::access::{EMPTY_TREE, read_blob, read_changeset, read_tree};
 use crate::apply::apply;
