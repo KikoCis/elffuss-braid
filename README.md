@@ -106,6 +106,7 @@ braid git import /path/to/any/git/repository   # every branch and tag
 braid log main -n 5
 braid show main --json
 braid fsck
+braid stats        # objects by kind, and how they are stored: whole, deltas, chunks
 ```
 
 Exporting writes the same commits back, with the same ids:
