@@ -1129,3 +1129,32 @@ fn eight_agents_land_at_once() {
     }
     assert!(repo.fsck_is_clean());
 }
+
+#[test]
+fn workspaces_made_before_main_existed_land_without_an_update() {
+    // Both workspaces start on an empty branch, so their first changesets
+    // have no parent. The second to land is rebased from the empty tree.
+    let repo = Repo::new();
+    let a = repo.workspace("first-a");
+    let b = repo.workspace("first-b");
+    write(&a, "a.txt", "from a\n");
+    write(&b, "b.txt", "from b\n");
+    json(&a, &["commit", "-m", "a"]);
+    json(&b, &["commit", "-m", "b"]);
+    assert_eq!(json(&a, &["land"])["outcome"], "fast-forward");
+    let landed = json(&b, &["land"]);
+    assert_eq!(landed["outcome"], "rebased");
+    assert_eq!(read(&b, "a.txt"), "from a\n");
+
+    // The same path added on both sides is a conflict, never an overwrite.
+    let c = repo.workspace("first-c");
+    let d = repo.workspace("first-d");
+    write(&c, "same.txt", "from c\n");
+    write(&d, "same.txt", "from d\n");
+    json(&c, &["commit", "-m", "c"]);
+    json(&d, &["commit", "-m", "d"]);
+    json(&c, &["land"]);
+    let conflict = json_status(&d, &["land"], 2);
+    assert_eq!(conflict["conflicts"][0]["path"], "same.txt");
+    assert!(repo.fsck_is_clean());
+}

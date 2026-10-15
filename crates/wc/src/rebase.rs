@@ -92,6 +92,15 @@ pub(crate) fn replay<O: Objects>(
             _ => match land(objects, tip, change, committer.clone()) {
                 Err(braid_engine::Error::BaseNotOnBranch { .. }) => match (first, tip) {
                     (First::Anywhere, Some(onto)) => replay_one(objects, onto, change, committer)?,
+                    // A first changeset without a parent is based on the
+                    // empty tree, where every branch starts: rebase it from
+                    // there rather than asking for an update. A path the
+                    // branch added too is a conflict, never overwritten.
+                    (First::MustBeOnBranch, Some(onto))
+                        if read_changeset(objects, change)?.parents.is_empty() =>
+                    {
+                        replay_one(objects, onto, change, committer)?
+                    }
                     _ => {
                         return Err(Error::NotOnBranch {
                             branch: branch.to_owned(),
