@@ -205,6 +205,9 @@ Repositories come in with their whole history and keep a git mirror.
 - `braid git import` reads a git repository through
   [gitoxide](https://github.com/GitoxideLabs/gitoxide). Each commit is exported
   again and compared with the original, so the round trip is bit for bit.
+  Running it again imports only what is new, and a braid branch follows git's
+  only forward: one where braid has work git does not have stays where it is,
+  and the import lists it under `kept`.
 - `braid git sync` keeps a branch of GitHub, Gitea or any git remote in step
   with a braid branch: it fetches and imports the remote branch, then
   fast-forwards braid, or pushes braid's branch, merging first when both
