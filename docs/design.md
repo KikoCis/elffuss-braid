@@ -50,9 +50,9 @@ the reasons behind it. The byte-level format is in
   agent that made the change wherever it lands. The git bridge writes extra
   fields as commit headers.
 - Ids are shown as their first 12 hex digits, and any unique prefix of six
-  digits or more names an object; the lookup scans the store's in-memory map
-  of ids, and a prefix that several objects share is an error that lists
-  them.
+  digits or more names an object; the lookup reads the fan-out bucket of
+  each index that the prefix falls in, and a prefix that several objects
+  share is an error that lists them.
 
 ## Store
 
@@ -66,8 +66,13 @@ process dies, atomic rename, and ordered syncs.
   truncated: after a crash, the next writer appends after the last valid record.
 - **Journals and indexes.** Each open segment has a journal of fixed-size,
   checksummed entries, so readers find new objects without scanning payloads. A
-  full segment is sealed with a sorted index; compaction can merge indexes.
-  Only files that can no longer change are memory-mapped.
+  segment is sealed with a sorted index once it is full or its journal lists
+  8,192 records, and a writer merges the indexes of sealed segments once 8 of
+  them pile up, so that a lookup goes through few. A process keeps a map of
+  ids only for the open segments, and reads an index as lookups need it, one
+  fan-out bucket at a time, each entry checked by its own checksum: opening a
+  store reads no index entry, whatever the store holds. Nothing is
+  memory-mapped.
 - **Deltas.** Writers say which object a new one is probably close to: the
   engine names the directory node a rebuilt one replaces and, for a merged
   file, the branch's version; a workspace commit names the file's previous
@@ -93,12 +98,17 @@ process dies, atomic rename, and ordered syncs.
   record's description is written inside the transaction, once the outcome
   is known: a landing says how it went, which changeset landed as which, and
   how many paths it merged.
-- **Publish order.** Objects, then their journal entries, then a barrier, then
-  the op log record that refers to them. The op log never points at an object
-  that is not durable.
+- **Publish order.** Objects and their journal entries, flushed in one batch,
+  then the op log record that refers to them, flushed in a second. The op log
+  never points at an object that is not durable, and an index never reaches
+  the disk before the segment it points into.
 - **Durability modes.** `ordered` (local default) may lose the last operations
-  on power loss but is never inconsistent; `full` (server default) syncs fully
-  before acknowledging.
+  on power loss but is never inconsistent; where the system has a write
+  barrier (`F_BARRIERFSYNC` on Apple systems), it keeps the order of writes
+  with one instead of waiting for the drive to write out its whole cache.
+  `full` (server default) syncs fully before acknowledging. Either way,
+  inside its lock a transaction flushes the two batches above, however many
+  files it wrote to.
 - **Derived data** (generation numbers, ancestry skip pointers, changed-path
   filters, blame, git mappings) is stored as records keyed by their inputs, and
   can always be recomputed.
@@ -397,6 +407,9 @@ Stated as complexity and as ratios against git on the same machine. Braid's
 published benchmarks will only ever be ratios with the script that reproduces
 them.
 
+- Opening a store: proportional to its number of segments, of up to 8,192
+  objects each, not to its number of objects. A lookup reads one fan-out
+  bucket of each index it goes through, the first time it needs it.
 - Commit and land: proportional to the changed paths times the tree depth.
 - `log -- path`: proportional to the changes that touched the path, plus one
   filter check per changeset walked.

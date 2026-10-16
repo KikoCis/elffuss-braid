@@ -61,9 +61,9 @@
 //! - Each handle maps ids to records only for the open segments, from their
 //!   journals, which the record limit keeps short. Sealed segments are
 //!   looked up in their indexes, which it reads as lookups need them, a
-//!   fan-out bucket at a time: opening a store costs the same whatever it
-//!   holds. On a miss a handle reads the directory again once. Short ids,
-//!   hex prefixes of ids, are looked up the same way
+//!   fan-out bucket at a time: opening a store reads no index entry,
+//!   whatever it holds. On a miss a handle reads the directory again once.
+//!   Short ids, hex prefixes of ids, are looked up the same way
 //!   ([`Store::ids_with_prefix`]).
 //! - Transactions hold an exclusive lock on `oplog/lock`; readers of the op
 //!   log hold it shared, so they never see an operation before it is
@@ -453,7 +453,7 @@ impl Store {
     }
 
     /// Opens an existing store and reads the journals of its open segments.
-    /// Indexes are read as lookups need them, so opening costs the same
+    /// Indexes are read as lookups need them: opening reads no index entry,
     /// whatever the store holds.
     ///
     /// A store that needs a newer version of braid is refused with

@@ -23,11 +23,11 @@
 //!   segments only, built from their journals, which the record limit keeps
 //!   short. Sealed segments are looked up in their indexes, which a handle
 //!   reads as lookups need them (see the `sources` submodule): opening a
-//!   store costs the same whatever it holds. On a miss a handle reads the
-//!   directory again once, since another process may have written, sealed
-//!   or merged something since. When it knows several copies of one object,
-//!   a lookup takes the first that serves: a delta's base must be stored
-//!   whole, and a chunk must not be chunked itself.
+//!   store reads no index entry, whatever it holds. On a miss a handle
+//!   reads the directory again once, since another process may have
+//!   written, sealed or merged something since. When it knows several
+//!   copies of one object, a lookup takes the first that serves: a delta's
+//!   base must be stored whole, and a chunk must not be chunked itself.
 //! - **Durability.** [`Segments::put`] appends without flushing;
 //!   [`Segments::sync`] flushes everything this handle wrote, segments and
 //!   journals, in one batch. A copy written by someone else stands for a new
