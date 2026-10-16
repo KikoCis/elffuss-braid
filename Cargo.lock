@@ -519,6 +519,7 @@ version = "0.0.1"
 dependencies = [
  "elffuss-braid-format",
  "gix",
+ "rayon",
  "tempfile",
 ]
 
@@ -1032,6 +1033,7 @@ checksum = "bc5024cc503cd29461a705ae90b9eae772fa8f0e6fafc1c48513877dc374de05"
 dependencies = [
  "clru",
  "crc32fast",
+ "crossbeam-deque",
  "gix-chunk",
  "gix-error",
  "gix-hash",

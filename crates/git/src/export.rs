@@ -6,11 +6,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use braid_format::{Changeset, Entry, EntryKind, GitId, Kind, ObjectId, Objects};
 
 use crate::error::Error;
-use crate::fetch;
+use crate::fetch::{self, TreeCache};
 use crate::map::{GitMap, Pairings};
 use crate::oid::{GitKind, GitOid};
 use crate::raw::{self, EntryType, TreeItem};
@@ -46,6 +47,9 @@ pub struct Exporter<'a, O: Objects> {
     /// Commits exported here, and back.
     commits: HashMap<ObjectId, GitOid>,
     commit_sources: HashMap<GitOid, ObjectId>,
+    /// Directories read back already, shared with whoever made this
+    /// exporter, if anyone.
+    cache: Option<&'a TreeCache>,
 }
 
 impl<O: Objects> fmt::Debug for Exporter<'_, O> {
@@ -71,6 +75,24 @@ impl<'a, O: Objects> Exporter<'a, O> {
             blob_sources: HashMap::new(),
             commits: HashMap::new(),
             commit_sources: HashMap::new(),
+            cache: None,
+        }
+    }
+
+    /// An exporter that reads directories through `cache`, and keeps what it
+    /// reads there.
+    pub(crate) fn with_cache(objects: &'a O, map: &'a GitMap, cache: &'a TreeCache) -> Self {
+        Self {
+            cache: Some(cache),
+            ..Self::new(objects, map)
+        }
+    }
+
+    /// Every entry of a braid directory.
+    fn entries(&self, tree: ObjectId) -> Result<Arc<[Entry]>, Error> {
+        match self.cache {
+            Some(cache) => cache.entries(self.objects, tree),
+            None => Ok(fetch::tree_entries(self.objects, tree)?.into()),
         }
     }
 
@@ -248,8 +270,19 @@ impl<'a, O: Objects> Exporter<'a, O> {
 
     /// The canonical git tree of a braid tree: its id and its bytes.
     pub fn tree(&mut self, tree: &ObjectId) -> Result<(GitOid, Vec<u8>), Error> {
-        let entries = fetch::tree_entries(self.objects, *tree)?;
-        let bytes = self.encode_entries(tree, &entries)?;
+        let entries = self.entries(*tree)?;
+        self.tree_of(tree, &entries)
+    }
+
+    /// [`tree`](Self::tree) for the braid tree `tree` whose entries the caller
+    /// has already: those it was just built from, which is what reading it
+    /// back from the store gives.
+    pub(crate) fn tree_of(
+        &mut self,
+        tree: &ObjectId,
+        entries: &[Entry],
+    ) -> Result<(GitOid, Vec<u8>), Error> {
+        let bytes = self.encode_entries(tree, entries)?;
         let oid = GitOid::for_object(GitKind::Tree, &bytes)?;
         match self.known_tree(tree) {
             Some(known) if known != oid => Err(Error::BadBraidObject {
@@ -272,7 +305,7 @@ impl<'a, O: Objects> Exporter<'a, O> {
         }
         // Directories waiting for their subdirectories: id, entries, and the
         // index of the next entry to look at.
-        let mut stack = vec![(*tree, fetch::tree_entries(self.objects, *tree)?, 0usize)];
+        let mut stack = vec![(*tree, self.entries(*tree)?, 0usize)];
         while let Some((_, entries, next)) = stack.last_mut() {
             let mut child = None;
             while child.is_none() && *next < entries.len() {
@@ -284,7 +317,7 @@ impl<'a, O: Objects> Exporter<'a, O> {
                 *next += 1;
             }
             if let Some(child) = child {
-                let entries = fetch::tree_entries(self.objects, child)?;
+                let entries = self.entries(child)?;
                 stack.push((child, entries, 0));
                 continue;
             }

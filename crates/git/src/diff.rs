@@ -4,17 +4,21 @@
 //! The change list of a changeset: every file whose entry differs between two
 //! braid trees.
 
+use std::sync::Arc;
+
 use braid_format::{Change, ChangeOp, Entry, EntryKind, ObjectId, Objects};
 
 use crate::error::Error;
-use crate::fetch;
+use crate::fetch::TreeCache;
 
 /// The per-file changes from `old` to `new`, in no particular order. `None`
 /// stands for the empty tree. Subtrees with equal ids are skipped without
 /// being read, so the cost follows what changed. A directory replaced by a
 /// file is a delete for every file below it and one set for the file.
+/// Directories are read through `trees`.
 pub(crate) fn changes<O: Objects>(
     objects: &O,
+    trees: &TreeCache,
     old: Option<ObjectId>,
     new: ObjectId,
 ) -> Result<Vec<Change>, Error> {
@@ -22,20 +26,20 @@ pub(crate) fn changes<O: Objects>(
     // Directories still to compare: path prefix, old side, new side.
     let mut pending: Vec<(Vec<u8>, Option<ObjectId>, Option<ObjectId>)> =
         vec![(Vec::new(), old, Some(new))];
+    let read = |side: Option<ObjectId>| -> Result<Arc<[Entry]>, Error> {
+        match side {
+            Some(id) => trees.entries(objects, id),
+            None => Ok(Arc::from(Vec::new())),
+        }
+    };
     while let Some((prefix, old, new)) = pending.pop() {
         if old == new {
             continue;
         }
-        let old_entries = match old {
-            Some(id) => fetch::tree_entries(objects, id)?,
-            None => Vec::new(),
-        };
-        let new_entries = match new {
-            Some(id) => fetch::tree_entries(objects, id)?,
-            None => Vec::new(),
-        };
-        let mut olds = old_entries.into_iter().peekable();
-        let mut news = new_entries.into_iter().peekable();
+        let old_entries = read(old)?;
+        let new_entries = read(new)?;
+        let mut olds = old_entries.iter().peekable();
+        let mut news = new_entries.iter().peekable();
         loop {
             // Both sides are sorted by name bytes.
             let (before, after) = match (olds.peek(), news.peek()) {
@@ -55,8 +59,8 @@ pub(crate) fn changes<O: Objects>(
             let path = join(&prefix, &name);
             compare(
                 path,
-                before.map(|e: Entry| e.kind),
-                after.map(|e: Entry| e.kind),
+                before.map(|e: &Entry| e.kind.clone()),
+                after.map(|e: &Entry| e.kind.clone()),
                 &mut changes,
                 &mut pending,
             );
@@ -161,14 +165,18 @@ mod tests {
         let sub = put_tree(&objects, vec![file("b", "2"), file("c", "3")]);
         let root = put_tree(&objects, vec![file("a", "1"), dir("sub", sub)]);
         assert_eq!(
-            summary(changes(&objects, None, root).unwrap()),
+            summary(changes(&objects, &TreeCache::default(), None, root).unwrap()),
             [
                 ("a".into(), "file"),
                 ("sub/b".into(), "file"),
                 ("sub/c".into(), "file")
             ]
         );
-        assert!(changes(&objects, Some(root), root).unwrap().is_empty());
+        assert!(
+            changes(&objects, &TreeCache::default(), Some(root), root)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -217,7 +225,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            summary(changes(&objects, Some(old), new).unwrap()),
+            summary(changes(&objects, &TreeCache::default(), Some(old), new).unwrap()),
             [
                 ("becomes-dir".into(), "delete"),
                 ("becomes-dir/x".into(), "file"),
@@ -237,7 +245,7 @@ mod tests {
         let objects = MemoryObjects::new();
         let missing = ObjectId::hash(Kind::Tree, b"nowhere");
         assert!(matches!(
-            changes(&objects, None, missing),
+            changes(&objects, &TreeCache::default(), None, missing),
             Err(Error::MissingBraidObject { .. })
         ));
     }

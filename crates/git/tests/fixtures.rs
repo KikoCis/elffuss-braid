@@ -15,7 +15,7 @@ use braid_format::{
 };
 use braid_git::{
     Error, GitKind, GitMap, GitOid, ImportOptions, RefTarget, RefUpdate, RoundTripReport,
-    export_commit, export_object, import, verify_round_trip, write_to_repo,
+    export_commit, export_object, import, import_parallel, verify_round_trip, write_to_repo,
     write_to_repo_recording,
 };
 use common::{Repo, exec, file, link, raw_tree, submodule};
@@ -36,10 +36,52 @@ fn import_all(repo: &Repo, objects: &MemoryObjects, map: &mut GitMap) -> braid_g
         .unwrap_or_else(|err| panic!("{err}"))
 }
 
+/// The thread counts of the parallel imports `check` compares.
+const THREADS: [usize; 2] = [1, 4];
+
+/// Every object held, with its kind and payload.
+fn contents(objects: &MemoryObjects) -> BTreeMap<ObjectId, (Kind, Vec<u8>)> {
+    objects
+        .ids()
+        .into_iter()
+        .map(|id| (id, objects.get(&id).unwrap().unwrap()))
+        .collect()
+}
+
+/// Imports into `objects` and `map` in parallel, and checks that the report,
+/// the map and the objects are the one-thread import's.
+fn assert_parallel_same(
+    repo: &Repo,
+    (objects, map): (&MemoryObjects, &mut GitMap),
+    threads: usize,
+    (expected_objects, expected_map, expected_report): (
+        &MemoryObjects,
+        &GitMap,
+        &braid_git::ImportReport,
+    ),
+) {
+    let report = import_parallel(
+        repo.path(),
+        objects,
+        map,
+        &ImportOptions::default(),
+        threads,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(&report, expected_report, "{threads} threads");
+    assert_eq!(map.to_bytes(), expected_map.to_bytes(), "{threads} threads");
+    assert!(
+        contents(objects) == contents(expected_objects),
+        "{threads} threads: the objects differ"
+    );
+}
+
 /// The checks every fixture goes through: the round trip holds; importing
 /// imports every commit; importing again with the saved map imports nothing;
 /// after `extend` adds commits, importing brings in exactly those; the round
-/// trip still holds; and every imported changeset passes admission.
+/// trip still holds; and every imported changeset passes admission. The
+/// parallel import, from scratch and then after `extend`, gives the same
+/// reports, maps and objects as the one-thread import.
 fn check(repo: &mut Repo, extend: impl FnOnce(&mut Repo) -> usize) -> (MemoryObjects, GitMap) {
     round_trip(repo);
     let objects = MemoryObjects::new();
@@ -47,6 +89,19 @@ fn check(repo: &mut Repo, extend: impl FnOnce(&mut Repo) -> usize) -> (MemoryObj
     let first = import_all(repo, &objects, &mut map);
     assert_eq!(first.commits, repo.count_commits());
     assert_eq!(map.counts().commits, first.commits);
+    let mut parallel: Vec<(MemoryObjects, GitMap)> = THREADS
+        .iter()
+        .map(|threads| {
+            let (many, mut many_map) = (MemoryObjects::new(), GitMap::new());
+            assert_parallel_same(
+                repo,
+                (&many, &mut many_map),
+                *threads,
+                (&objects, &map, &first),
+            );
+            (many, many_map)
+        })
+        .collect();
 
     let mut map = GitMap::from_bytes(&map.to_bytes()).unwrap();
     let again = import_all(repo, &objects, &mut map);
@@ -62,6 +117,9 @@ fn check(repo: &mut Repo, extend: impl FnOnce(&mut Repo) -> usize) -> (MemoryObj
     let next = import_all(repo, &objects, &mut map);
     assert_eq!(next.commits, added, "only the new commits are imported");
     assert_eq!(map.counts().commits, repo.count_commits());
+    for ((many, many_map), threads) in parallel.iter_mut().zip(THREADS) {
+        assert_parallel_same(repo, (many, many_map), threads, (&objects, &map, &next));
+    }
     round_trip(repo);
     assert_admissible(&objects, &map);
     (objects, map)

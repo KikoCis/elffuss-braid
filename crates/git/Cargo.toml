@@ -15,12 +15,16 @@ name = "braid_git"
 [dependencies]
 braid-format.workspace = true
 # Local repositories only: no network, no TLS. `sha256` is there so that a
-# SHA-256 repository opens and can be refused with a clear error.
+# SHA-256 repository opens and can be refused with a clear error, and
+# `parallel` so that handles can move between the threads of a parallel
+# import.
 gix = { version = "0.89", default-features = false, features = [
     "sha1",
     "sha256",
     "pack-cache-lru-dynamic",
+    "parallel",
 ] }
+rayon = "1.12.0"
 
 [features]
 # Exposes the git object parsers to the fuzz targets in `fuzz/`; not a stable
