@@ -549,3 +549,64 @@ fn a_commit_of_some_paths_reads_only_those() {
         ]
     );
 }
+
+/// Waits until a file written now is dated after every change made so far
+/// to the directories under `dir`: the stat cache's records of them are
+/// then not racy, whatever the granularity of the file system's clock.
+#[cfg(unix)]
+fn settle(f: &Fixture, dir: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let mut newest = (0, 0);
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let meta = fs::symlink_metadata(&current).unwrap();
+        newest = newest
+            .max((meta.mtime(), meta.mtime_nsec()))
+            .max((meta.ctime(), meta.ctime_nsec()));
+        for entry in fs::read_dir(&current).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    let probe = f.path("probe");
+    loop {
+        fs::write(&probe, "now").unwrap();
+        let meta = fs::metadata(&probe).unwrap();
+        if (meta.mtime(), meta.mtime_nsec()) > newest {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_leaves_the_stat_cache_on_its_changeset() {
+    let f = Fixture::new();
+    let first = f.commit(&[], vec![("a/x", f.file("1")), ("b/y", f.file("2"))]);
+    let dir = f.path("ws");
+    let (ws, _) = Workspace::create(&f.repo, "ws", &dir, Some(first), "main").unwrap();
+    fs::write(dir.join("a/x"), "edited").unwrap();
+    fs::create_dir(dir.join("c")).unwrap();
+    fs::write(dir.join("c/new"), "new").unwrap();
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+    for path in ["a/x", "c/new"] {
+        fs::File::options()
+            .write(true)
+            .open(dir.join(path))
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    }
+    settle(&f, &dir);
+    commit_all(&ws, "edit and add");
+
+    // The status after it finds the working copy as the commit left it,
+    // and has nothing to write.
+    let cache = f.repo.root().join(".braid/ws/ws/stat");
+    let before = fs::read(&cache).unwrap();
+    assert!(ws.status().unwrap().status.is_clean());
+    assert_eq!(fs::read(&cache).unwrap(), before);
+}

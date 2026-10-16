@@ -492,6 +492,35 @@ pub(crate) enum Record<'c> {
 }
 
 impl Record<'_> {
+    /// The record as one a scan made.
+    pub(crate) fn into_made(self) -> DirRecord {
+        let dir = match self {
+            Record::Made(dir) => return dir,
+            Record::Kept(dir) => dir,
+        };
+        DirRecord {
+            path: dir.path().to_vec(),
+            base: dir.base(),
+            clean: dir.clean(),
+            stamp: dir.stamp(),
+            ignored: dir.ignored(),
+            rules: dir.rules(),
+            ignore_files: dir.ignore_files(),
+            files: dir
+                .files()
+                .map(|file| FileRecord {
+                    name: file.name.to_vec(),
+                    mtime: file.mtime,
+                    size: file.size,
+                    ino: file.ino,
+                    kind: file.kind,
+                    vouches: file.vouches,
+                    blob: file.blob,
+                })
+                .collect(),
+        }
+    }
+
     /// The directory's path.
     pub(crate) fn path(&self) -> &[u8] {
         match self {
@@ -759,6 +788,12 @@ mod tests {
             fs::read(other.path().join(FILE)).unwrap(),
             fs::read(dir.path().join(FILE)).unwrap()
         );
+
+        // Read back as made, a kept record is the one written.
+        for record in &written {
+            let made = Record::Kept(cache.dir(&record.path).unwrap()).into_made();
+            assert_eq!(&made, record);
+        }
 
         // A record that differs in anything is not the same.
         let mut changed = written[0].clone();

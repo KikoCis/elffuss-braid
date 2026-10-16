@@ -22,8 +22,11 @@
 //!
 //! A scan may cover only some paths, as committing those paths needs: it
 //! then reads only the directories on the way to them and below them, and
-//! makes no records.
+//! makes no records. After a commit, the records of a scan of the whole
+//! working copy are brought onto the new base, so that the next scan finds
+//! the committed directories as the commit left them.
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -42,7 +45,7 @@ use crate::cache::{
 use crate::error::Error;
 use crate::fsprobe::{FileSystem, SCRATCH_PREFIX};
 use crate::ignores::{self, Chain};
-use crate::paths::{is_within, join, os_name};
+use crate::paths::{ancestors, is_within, join, os_name};
 use crate::safe::{
     DirStamp, Found, Root, Stat, StatKind, dir_stamp, list, open_child_dir, open_file, read_link,
     stat_entry,
@@ -190,6 +193,96 @@ fn scan_holding<'c, O: Objects + Sync>(
         #[cfg(test)]
         listed,
     })
+}
+
+/// The records of a scan of the whole working copy, brought onto a new
+/// base: one made from the scanned base by changing `paths`, whose tree is
+/// `root`. Only the directories on the way to those paths have new trees;
+/// each is compared with its new tree, from what its record says, so that
+/// the next scan finds it as this one left it.
+pub(crate) fn follow<'c, O: Objects>(
+    objects: &O,
+    records: Vec<Record<'c>>,
+    root: ObjectId,
+    paths: &[Vec<u8>],
+) -> Result<Vec<Record<'c>>, Error> {
+    let mut changed: HashSet<&[u8]> = paths.iter().flat_map(|path| ancestors(path)).collect();
+    changed.insert(b"");
+    // The new trees of those directories, each read once, from the root
+    // down.
+    let mut trees: HashMap<Vec<u8>, (ObjectId, Vec<Entry>)> = HashMap::new();
+    let mut pending = vec![(Vec::new(), root)];
+    while let Some((path, tree)) = pending.pop() {
+        let entries = read_tree(objects, tree)?;
+        for entry in &entries {
+            if let EntryKind::Tree { tree } = entry.kind {
+                let child = join(&path, &entry.name);
+                if changed.contains(child.as_slice()) {
+                    pending.push((child, tree));
+                }
+            }
+        }
+        trees.insert(path, (tree, entries));
+    }
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            if !changed.contains(record.path()) {
+                return record;
+            }
+            let dir = record.into_made();
+            let rebased = match trees.get(&dir.path) {
+                Some((tree, entries)) => rebased(dir, Some(*tree), entries),
+                None => rebased(dir, None, &[]),
+            };
+            Record::Made(rebased)
+        })
+        .collect())
+}
+
+/// A directory's record, compared with `tree`, whose entries are `entries`,
+/// instead of the tree it was made against.
+fn rebased(mut dir: DirRecord, tree: Option<ObjectId>, entries: &[Entry]) -> DirRecord {
+    let mut leaves = entries
+        .iter()
+        .filter(|entry| !matches!(entry.kind, EntryKind::Tree { .. }));
+    let mut same = true;
+    for file in &mut dir.files {
+        if file.kind >= KIND_TREE {
+            let subtree = match at_tree(entries, &file.name) {
+                At::Tree(subtree) => Some(subtree),
+                _ => None,
+            };
+            file.kind = if subtree.is_some() {
+                KIND_TREE
+            } else {
+                KIND_SUBDIR
+            };
+            file.blob = subtree.unwrap_or(ObjectId::from_bytes([0; 32]));
+            continue;
+        }
+        same &= leaves.next().is_some_and(|entry| {
+            let (kind, blob) = match &entry.kind {
+                EntryKind::File { blob, .. } => (KIND_FILE, Some(*blob)),
+                EntryKind::Executable { blob, .. } => (KIND_EXECUTABLE, Some(*blob)),
+                EntryKind::Symlink { blob, .. } => (KIND_SYMLINK, Some(*blob)),
+                _ => (KIND_GITLINK, None),
+            };
+            entry.name == file.name
+                && kind == file.kind
+                && blob.is_none_or(|blob| blob == file.blob)
+        });
+    }
+    let subtrees_there = entries.iter().all(|entry| match entry.kind {
+        EntryKind::Tree { .. } => dir
+            .files
+            .binary_search_by(|file| file.name.as_slice().cmp(&entry.name))
+            .is_ok_and(|index| dir.files[index].kind == KIND_TREE),
+        _ => true,
+    });
+    dir.clean = tree.is_some() && same && leaves.next().is_none() && subtrees_there;
+    dir.base = tree;
+    dir
 }
 
 /// What part of a directory a scan covers.
@@ -1610,6 +1703,75 @@ mod tests {
         assert!(!record_holds(&dir, tree, false, Some(stamp), older.time()));
         // Where the system gives no stamp, the directory is always listed.
         assert!(!record_holds(&dir, None, false, None, older.time()));
+    }
+
+    /// A commit of `changes` on `base`, as `braid commit` makes one from a
+    /// scan: what it changed, and the new base's tree.
+    fn commit(f: &Fixture, base: ObjectId, changes: &[&Delta]) -> (Vec<Vec<u8>>, ObjectId) {
+        let changes: Vec<Change> = changes
+            .iter()
+            .map(|delta| Change {
+                path: delta.path.clone(),
+                op: delta.new.clone().unwrap_or(ChangeOp::Delete),
+            })
+            .collect();
+        let tree = braid_engine::apply(&f.objects, base, &changes).unwrap();
+        (
+            changes.into_iter().map(|change| change.path).collect(),
+            tree,
+        )
+    }
+
+    /// Scans, commits the deltas `keep` accepts, and saves the scan's
+    /// records brought onto the new base. Returns the new base's tree.
+    fn scan_and_commit(f: &Fixture, base: ObjectId, keep: impl Fn(&Delta) -> bool) -> ObjectId {
+        let old = Cache::load(f.state.path());
+        let found = scan(&f.root, &f.objects, base, &old, FileSystem::default(), &[]).unwrap();
+        let kept: Vec<&Delta> = found.deltas.iter().filter(|delta| keep(delta)).collect();
+        let (paths, tree) = commit(f, base, &kept);
+        let next = found.cache.unwrap();
+        let records = follow(&f.objects, next.records, tree, &paths).unwrap();
+        cache::save(f.state.path(), next.time, &records).unwrap();
+        tree
+    }
+
+    // Directories have a stamp only where the system gives one.
+    #[cfg(unix)]
+    #[test]
+    fn a_scan_brought_onto_its_commit_leaves_nothing_to_do() {
+        let f = Fixture::new();
+        let base = f.base(&[("a/x", "1"), ("a/y", "2"), ("c/d/e", "3"), ("top", "4")]);
+        fs::write(f.at("a/x"), "edited").unwrap();
+        fs::create_dir_all(f.at("new/dir")).unwrap();
+        fs::write(f.at("new/dir/f"), "f").unwrap();
+        fs::remove_dir_all(f.at("c")).unwrap();
+        set_mtime(&f.at("a/x"), past());
+        set_mtime(&f.at("new/dir/f"), past());
+        f.settle();
+        let committed = scan_and_commit(&f, base, |_| true);
+        let (deltas, saved, reads, listed) = f.scan_counting(committed, &[], HELD_HANDLES);
+        assert!(deltas.is_empty(), "{:?}", show(&deltas));
+        assert_eq!((saved, reads, listed), (false, 0, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scan_brought_onto_a_commit_of_some_paths() {
+        let f = Fixture::new();
+        let base = f.base(&[("a/x", "1"), ("a/y", "2"), ("c/d/e", "3"), ("top", "4")]);
+        fs::write(f.at("a/x"), "edited").unwrap();
+        fs::create_dir_all(f.at("new/dir")).unwrap();
+        fs::write(f.at("new/dir/f"), "f").unwrap();
+        fs::remove_dir_all(f.at("c")).unwrap();
+        set_mtime(&f.at("a/x"), past());
+        set_mtime(&f.at("new/dir/f"), past());
+        f.settle();
+        let committed = scan_and_commit(&f, base, |delta| delta.path == b"a/x");
+        let (deltas, saved, reads, listed) = f.scan_counting(committed, &[], HELD_HANDLES);
+        assert_eq!(show(&deltas), ["c/d/e f>-", "new/dir/f ->f"]);
+        // The root's tree, to find what went missing, and the trees below
+        // it: a is as the commit left it.
+        assert_eq!((saved, reads, listed), (false, 3, 0));
     }
 
     #[test]

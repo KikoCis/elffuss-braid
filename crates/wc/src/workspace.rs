@@ -705,18 +705,58 @@ impl<'r> Workspace<'r> {
     /// changesets that were waiting are rebased onto it.
     pub fn commit(&self, request: &CommitRequest) -> Result<CommitOutcome, Error> {
         let (_lock, mut state, root) = self.begin()?;
-        let store = self.store();
         if state.rebase.is_some() && !request.paths.is_empty() {
             return Err(Error::PathsDuringRebase);
         }
+        let store = self.store();
+        let base = root_of(store, state.base)?;
+        let cache = Cache::load(&self.state_dir);
         // With paths, only what lies at or below them is read.
-        let deltas = self.scan(&root, &state, &request.paths)?;
-        let status = status::compare(&deltas, &state.tracked);
+        let Scan {
+            deltas,
+            cache: next,
+            ..
+        } = scan::scan(&root, store, base, &cache, state.fs, &request.paths)?;
+        let committed = self.commit_scanned(&root, &mut state, request, &deltas);
+        // The scan's records serve the next scan. When the commit moved the
+        // base and nothing else, they are brought onto it first, so that
+        // the next scan finds the committed directories as this one left
+        // them. The cache is only a cache: failing to write it fails
+        // nothing.
+        if let Some(next) = next {
+            let records = match &committed {
+                Ok((outcome, paths)) if outcome.rebase == RebaseProgress::None => {
+                    outcome.changeset.and_then(|id| {
+                        let root = root_of(store, Some(id)).ok()?;
+                        scan::follow(store, next.records, root, paths).ok()
+                    })
+                }
+                _ => next.changed.then_some(next.records),
+            };
+            if let Some(records) = records {
+                let _ = cache::save(&self.state_dir, next.time, &records);
+            }
+        }
+        committed.map(|(outcome, _)| outcome)
+    }
+
+    /// The rest of [`Self::commit`], once the working copy is scanned and
+    /// found to differ from the base by `deltas`. Also returns the paths
+    /// the changeset changed.
+    fn commit_scanned(
+        &self,
+        root: &Root,
+        state: &mut State,
+        request: &CommitRequest,
+        deltas: &[Delta],
+    ) -> Result<(CommitOutcome, Vec<Vec<u8>>), Error> {
+        let store = self.store();
+        let status = status::compare(deltas, &state.tracked);
         let in_scope = |path: &[u8]| {
             request.paths.is_empty() || request.paths.iter().any(|p| is_within(path, p))
         };
         if !request.force {
-            let conflicts = conflict_states(&root, state.rebase.as_ref())?;
+            let conflicts = conflict_states(root, state.rebase.as_ref())?;
             let blocking = blockers(&conflicts, &status.needs_track, in_scope);
             if !blocking.is_empty() {
                 return Err(Error::Blocked(blocking));
@@ -739,19 +779,20 @@ impl<'r> Workspace<'r> {
             // The resolution is the tree the rebase went onto: nothing of
             // this changeset is left to record.
             let progress = self.continue_rebase(
-                &root,
-                &mut state,
+                root,
+                state,
                 rebase.pending,
                 rebase.onto,
                 &request.committer.now(),
             )?;
             state.save(&self.state_dir)?;
-            return Ok(CommitOutcome {
+            let outcome = CommitOutcome {
                 changeset: None,
                 changes: 0,
                 message_replaced: false,
                 rebase: progress,
-            });
+            };
+            return Ok((outcome, Vec::new()));
         }
 
         let message = match (&request.message, &original) {
@@ -779,7 +820,7 @@ impl<'r> Workspace<'r> {
                         ) => Some(*blob),
                         _ => None,
                     };
-                    self.store_file(&root, &change.path, similar)?
+                    self.store_file(root, &change.path, similar)?
                 }
             };
             changes.push(Change {
@@ -823,17 +864,17 @@ impl<'r> Workspace<'r> {
         state.base = Some(id);
         let progress = match state.rebase.take() {
             None => RebaseProgress::None,
-            Some(rebase) => {
-                self.continue_rebase(&root, &mut state, rebase.pending, id, &committer)?
-            }
+            Some(rebase) => self.continue_rebase(root, state, rebase.pending, id, &committer)?,
         };
         state.save(&self.state_dir)?;
-        Ok(CommitOutcome {
+        let paths = selected.iter().map(|change| change.path.clone()).collect();
+        let outcome = CommitOutcome {
             changeset: Some(id),
             changes: count,
             message_replaced,
             rebase: progress,
-        })
+        };
+        Ok((outcome, paths))
     }
 
     /// Reads a changed file again and stores it as a blob: the content
