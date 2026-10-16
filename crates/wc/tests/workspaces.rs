@@ -89,6 +89,61 @@ fn commits_keep_edits_as_deltas_and_large_files_in_chunks() {
 }
 
 #[test]
+fn a_large_file_that_does_not_read_back_is_never_checked_out() {
+    let f = Fixture::new();
+    let first = f.commit(&[], vec![("README", f.file("hello\n"))]);
+    f.set_branch("main", first);
+    let dir = f.path("ws");
+    let (ws, _) = Workspace::create(&f.repo, "ws", &dir, Some(first), "main").unwrap();
+
+    let big = noise((5 << 20) + 9);
+    let blob = f.repo.store().put(Kind::Blob, &big).unwrap();
+    let second = f.commit(
+        &[first],
+        vec![(
+            "model.bin",
+            ChangeOp::File {
+                blob,
+                size: big.len() as u64,
+            },
+        )],
+    );
+    f.set_branch("main", second);
+
+    // Damage one chunk: chunks of random bytes are stored raw.
+    let needle = &big[3 << 20..(3 << 20) + 64];
+    let mut damaged = false;
+    for entry in fs::read_dir(f.repo.store().root().join("seg")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut bytes = fs::read(&path).unwrap();
+        if let Some(at) = bytes.windows(64).position(|window| window == needle) {
+            bytes[at + 7] ^= 0x20;
+            fs::write(&path, bytes).unwrap();
+            damaged = true;
+        }
+    }
+    assert!(damaged);
+
+    let result = ws.update(&ada());
+    assert!(
+        matches!(
+            result,
+            Err(Error::Store(braid_store::Error::Corrupt { .. }))
+        ),
+        "{result:?}"
+    );
+    // Neither the file nor a half-written scratch copy of it is left.
+    assert!(!dir.join("model.bin").exists());
+    assert_eq!(fs::read(dir.join("README")).unwrap(), b"hello\n");
+    let leftovers: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().contains("tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
 fn a_file_replacing_a_directory_with_untracked_files_is_refused() {
     let f = Fixture::new();
     let first = f.commit(
