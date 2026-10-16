@@ -1,4 +1,6 @@
-/* Elffuss Braid · braid.elffuss.com
+/* SPDX-License-Identifier: Apache-2.0
+   Copyright (c) 2026 UtopiaIA
+   Elffuss Braid · braid.elffuss.com
    Static: no web fonts, no external requests. Dark by default, as on
    elffuss.com; light when the system asks for it. Terminals stay dark in
    both. */
@@ -378,7 +380,7 @@ h1 {
   letter-spacing: .02em;
 }
 .term-bar > span:first-child { white-space: nowrap; }
-.term-bar .bar-note { color: var(--term-dim); font-style: italic; text-align: right; }
+.term-bar .bar-note { color: var(--term-dim); font-style: italic; text-align: right; text-wrap: balance; }
 .term pre, .code pre {
   padding: 14px 16px;
   overflow-x: auto;
@@ -423,9 +425,22 @@ h1 {
   vertical-align: 1px;
 }
 .story .term pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-/* blame and the op log are columns: they keep their lines, like the
-   copyable blocks below */
+/* blame is columns: it keeps its lines, like the copyable blocks below.
+   On a phone it leaves the ids out, and its bar note says so, and on the
+   narrowest its type is a little smaller, so that every line fits whole */
 .story .term-cols pre { white-space: pre; overflow-wrap: normal; }
+.bn-ids { display: none; }
+@media (max-width: 480px) {
+  .term-blame .bl-id { display: none; }
+  .term-blame .bn-ids { display: inline; }
+}
+@media (max-width: 359px) {
+  .story .term-blame pre { padding-inline: 12px; font-size: .76rem; }
+}
+/* the op log wraps an entry that does not fit under itself, past its
+   number, so what each landing did stays in view. Its lines are inline
+   blocks, not blocks, so its text reads and copies as braid prints it */
+.term-oplog .ol { display: inline-block; width: 100%; padding-left: 4ch; text-indent: -4ch; }
 
 /* copyable blocks and column transcripts keep their exact text and scroll
    in their own box; site.js marks one that is wider than its box, and the

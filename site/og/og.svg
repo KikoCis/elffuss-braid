@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0
+     Copyright (c) 2026 UtopiaIA -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
 <defs>
 <radialGradient id="og-t" cx="0.12" cy="0.02" r="0.62"><stop offset="0" stop-color="#54dcc6" stop-opacity=".2"/><stop offset="1" stop-color="#54dcc6" stop-opacity="0"/></radialGradient>

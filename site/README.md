@@ -9,7 +9,11 @@ build step and no requests to anything but its own files.
 | `site.css` | Dark by default, as on elffuss.com; light under `prefers-color-scheme: light`. Terminals stay dark in both. |
 | `site.js` | The language toggle, the copy buttons, the faded edge of a code block that scrolls, which blocks take keyboard focus, and the markers of the ratio table. Without it the page is complete, in English, every block takes focus, and the toggle and the copy buttons stay hidden. |
 | `og.png`, `og/og.svg` | The Open Graph image, 1200 × 630, and its source. |
-| `favicon.svg`, `favicon-32.png`, `apple-touch-icon.png` | The icons: the strands around one crossing of the logo. |
+| `favicon.svg`, `favicon-32.png`, `apple-touch-icon.png`, `favicon.ico` | The icons: the strands around one crossing of the logo. `favicon.ico` is for the clients that ask for it whatever the page declares. |
+
+The HTML, the CSS, the JavaScript and the SVGs open with
+`SPDX-License-Identifier: Apache-2.0` and `Copyright (c) 2026 UtopiaIA` in a
+comment, as every source file of the repository does.
 
 To look at it locally:
 
@@ -31,9 +35,17 @@ Transcripts, commands and JSON are not translated, and carry `lang="en"`.
 In the ratio table, what each row compares is written in both languages;
 its commands and its ratio are not translated.
 
-Every code block keeps its lines and scrolls in its own box, and so do the
-two story transcripts that are columns (`braid blame` and `braid op log`,
-marked `term-cols`). In the HTML, the `<pre>` of each, and the wrapper of
+Every code block keeps its lines and scrolls in its own box, and so does
+the story's `braid blame`, whose columns must line up (`term-cols`). At 480
+pixels and below, blame leaves its ids out (`span.bl-id`) and its bar note
+says so (`span.bn-ids`); below 360 its type is a little smaller, so every
+line fits a phone whole. The story's `braid op log` (`term-oplog`) never
+scrolls: an entry that does not fit wraps under itself, four columns in, so
+what each landing did stays in view. Each of its lines is a `span.ol`, an
+inline block with its newline inside, so the text reads and copies as braid
+prints it. The other story transcripts wrap as plain text.
+
+In the HTML, the `<pre>` of every block that may scroll, and the wrapper of
 each table, is a labelled region that takes keyboard focus. `site.js` keeps
 that only where the box does scroll at the current width, and takes the
 `tabindex`, the role and the label away elsewhere, so a keyboard does not
@@ -70,10 +82,11 @@ stay in English.
   writes thousands with a no-break space (`10&nbsp;287`) and four digits
   together (`1000`). The second cell holds the ratio alone, as the script
   prints it: `site.js` draws a marker per row from it, on a log scale with a
-  line at 1. Then rewrite the sentences in both languages. Keep the
-  `table-wrap` around the table, with its attributes. Outside the block, the
-  line about speed under "What is honest about this" names the commit
-  measured and what that run showed: change it with the table.
+  line at 1. Then rewrite the sentences in both languages, including the
+  list of work that came after the commit measured. Keep the `table-wrap`
+  around the table, with its attributes. Nothing outside the block depends
+  on the run: the line about speed under "What is honest about this" only
+  sends the reader to the table.
 
 ## What the page may say
 
@@ -90,23 +103,44 @@ stay in English.
   repository" run as one session, top to bottom. `braid undo` comes after the
   agent lands, so it takes that landing back; before it, it would take the
   import back and leave the agent an empty repository.
-- Every link into the repository points at `main` on GitHub. Before the page
-  is served, check them against what `main` holds, not against github.com,
-  which answers 200 for any path of an empty repository: a file answers 200
-  at `https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/<path>`,
-  and a directory is listed by
-  `gh api 'repos/KikoCis/elffuss-braid/contents/<path>?ref=main'`.
+- Every link into the repository points at `main` on GitHub.
+
+## Before it is served
+
+The page describes what `main` holds on GitHub, so it goes out only once
+all of this is true:
+
+1. `main` on GitHub holds this tree, `site/` included, pushed after
+   `scripts/privacy-check.sh` passes. The quick start clones and builds it,
+   and CI has run on it: the story says CI runs the scene on every push to
+   `main`.
+2. Every link into the repository answers from `main`. Check them against
+   what `main` holds, not against github.com, which answers 200 for any path
+   of an empty repository: a file answers 200 at
+   `https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/<path>`,
+   and a directory (`crates/sim`, `fuzz/fuzz_targets`, `bench`) is listed by
+   `gh api 'repos/KikoCis/elffuss-braid/contents/<path>?ref=main'`.
+3. The text matches `main`. The ratios block, for one, lists the work on
+   speed that came after the commit measured, and that list grows.
+4. `https://braid.elffuss.com/` answers 200 with a certificate for that
+   name, `http://braid.elffuss.com/` redirects to it, and
+   `https://braid.elffuss.com/og.png` answers 200 as `image/png`. Only then
+   does the link go anywhere: the repository's homepage
+   (`gh repo edit KikoCis/elffuss-braid --homepage https://braid.elffuss.com`),
+   and posts, whose link previews are fetched once and kept.
 
 ## Images
 
 `og.png` is `og/og.svg` rendered at 1200 × 630 in a headless browser. The
 icons are `favicon.svg` rendered at 32 and 180 pixels; the 180-pixel one is
-drawn on a square without rounded corners, since iOS rounds it. Before a PNG
-is committed, strip every chunk but the image data and look through it with
-`strings` for anything that names a person or a machine. Check a PNG by its
-chunks (only `IHDR`, `IDAT` and `IEND`), not with a text search: compressed
-image data can match any short pattern. A text search of the page skips
-binary files and also catches units written after `&nbsp;`:
+drawn on a square without rounded corners, since iOS rounds it.
+`favicon.ico` holds `favicon-32.png`, byte for byte, as its one image: an
+ICO file may hold a PNG. Before a PNG is committed, strip every chunk but
+the image data and look through it with `strings` for anything that names a
+person or a machine. Check a PNG by its chunks (only `IHDR`, `IDAT` and
+`IEND`), not with a text search: compressed image data can match any short
+pattern. A text search of the page skips binary files and also catches
+units written after `&nbsp;`:
 
 ```bash
 grep -rnIE --exclude=README.md "/(Users|home)/|[0-9]+(&nbsp;|\s)?(ms|MB|GB|MiB|GiB)\b" site/

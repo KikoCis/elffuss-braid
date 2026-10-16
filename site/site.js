@@ -1,4 +1,6 @@
-/* Elffuss Braid · braid.elffuss.com
+/* SPDX-License-Identifier: Apache-2.0
+   Copyright (c) 2026 UtopiaIA
+   Elffuss Braid · braid.elffuss.com
    The language toggle, the copy buttons, the faded edge of code blocks that
    scroll (only those take keyboard focus), and the markers of the ratio
    table. No dependencies, no requests. Without this file the page is

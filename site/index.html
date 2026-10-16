@@ -1,4 +1,6 @@
 <!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     Copyright (c) 2026 UtopiaIA -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -263,26 +265,26 @@ Landed <span class="id">4938acdd0794</span> on main <span class="nw">(fast-forwa
 <h3><span class="sr-only">5. </span><span data-l="en" lang="en">Everyone ends with the same file, and git sees all of it</span><span data-l="es" lang="es">Todos acaban con el mismo fichero, y git lo ve todo</span></h3>
 <p data-l="en" lang="en">A and C run <code>braid update</code> and get the same file as B. Each line names the agent that last changed it, even through a rebase:</p>
 <p data-l="es" lang="es">A y C hacen <code>braid update</code> y les llega el mismo fichero que tiene B. Cada línea dice qué agente la cambió por última vez, también tras un rebase:</p>
-<figure class="term term-cols t-n" lang="en">
-<figcaption class="term-bar"><span>repo</span><span class="bar-note"><span data-l="en" lang="en">dates left out</span><span data-l="es" lang="es">sin fechas</span></span></figcaption>
+<figure class="term term-cols term-blame t-n" lang="en">
+<figcaption class="term-bar"><span>repo</span><span class="bar-note"><span data-l="en" lang="en"><span class="bn-ids">ids and </span>dates left out</span><span data-l="es" lang="es">sin <span class="bn-ids">ids ni </span>fechas</span></span></figcaption>
 <pre tabindex="0" role="region" aria-label="Blame of notes.txt, one row per line" data-aria-en="Blame of notes.txt, one row per line" data-aria-es="Blame de notes.txt, una fila por línea"><code><span class="pr">$ </span><span class="cmd">braid blame main notes.txt</span>
-<span class="id">f161e3fa5539</span>  seeder   <span class="el">…</span>  1  title
-<span class="ln-b"><span class="id">4938acdd0794</span>  agent-b  <span class="el">…</span>  2  alpha, from a and b</span>
-<span class="id">f161e3fa5539</span>  seeder   <span class="el">…</span>  3  beta
-<span class="id">f161e3fa5539</span>  seeder   <span class="el">…</span>  4  gamma
-<span class="ln-c"><span class="id">e39b1668831b</span>  agent-c  <span class="el">…</span>  5  delta, from c</span></code></pre>
+<span class="bl-id"><span class="id">f161e3fa5539</span>  </span>seeder   <span class="el">…</span>  1  title
+<span class="ln-b"><span class="bl-id"><span class="id">4938acdd0794</span>  </span>agent-b  <span class="el">…</span>  2  alpha, from a and b</span>
+<span class="bl-id"><span class="id">f161e3fa5539</span>  </span>seeder   <span class="el">…</span>  3  beta
+<span class="bl-id"><span class="id">f161e3fa5539</span>  </span>seeder   <span class="el">…</span>  4  gamma
+<span class="ln-c"><span class="bl-id"><span class="id">e39b1668831b</span>  </span>agent-c  <span class="el">…</span>  5  delta, from c</span></code></pre>
 </figure>
 <p data-l="en" lang="en">The op log says who did what, and how:</p>
 <p data-l="es" lang="es">El registro de operaciones cuenta quién hizo qué, y cómo:</p>
-<figure class="term term-cols t-n" lang="en">
+<figure class="term term-oplog t-n" lang="en">
 <figcaption class="term-bar"><span>repo</span><span class="bar-note"><span data-l="en" lang="en">times left out</span><span data-l="es" lang="es">sin horas</span></span></figcaption>
-<pre tabindex="0" role="region" aria-label="The last three entries of the op log" data-aria-en="The last three entries of the op log" data-aria-es="Las tres últimas entradas del registro de operaciones"><code><span class="pr">$ </span><span class="cmd">braid op log -n 3</span>
-#4  <span class="ag ag-b">agent-b</span>  land workspace b on main: fast-forward <span class="id">4938acdd0794</span> -&gt; <span class="id">4938acdd0794</span> (0 paths merged)
-    main: <span class="id">e0c85ddea85b</span> -&gt; <span class="id">4938acdd0794</span>
-#3  <span class="ag ag-a">agent-a</span>  land workspace a on main: rebased <span class="id">a984ef34e1c9</span> -&gt; <span class="id">e0c85ddea85b</span> (1 path merged)
-    main: <span class="id">e39b1668831b</span> -&gt; <span class="id">e0c85ddea85b</span>
-#2  <span class="ag ag-c">agent-c</span>  land workspace c on main: fast-forward <span class="id">e39b1668831b</span> -&gt; <span class="id">e39b1668831b</span> (0 paths merged)
-    main: <span class="id">f161e3fa5539</span> -&gt; <span class="id">e39b1668831b</span></code></pre>
+<pre><code><span class="pr">$ </span><span class="cmd">braid op log -n 3</span>
+<span class="ol">#4  <span class="ag ag-b">agent-b</span>  land workspace b on main: fast-forward <span class="id">4938acdd0794</span> -&gt; <span class="id">4938acdd0794</span> <span class="nw">(0 paths merged)</span>
+</span><span class="ol">    main: <span class="id">e0c85ddea85b</span> -&gt; <span class="id">4938acdd0794</span>
+</span><span class="ol">#3  <span class="ag ag-a">agent-a</span>  land workspace a on main: rebased <span class="id">a984ef34e1c9</span> -&gt; <span class="id">e0c85ddea85b</span> <span class="nw">(1 path merged)</span>
+</span><span class="ol">    main: <span class="id">e39b1668831b</span> -&gt; <span class="id">e0c85ddea85b</span>
+</span><span class="ol">#2  <span class="ag ag-c">agent-c</span>  land workspace c on main: fast-forward <span class="id">e39b1668831b</span> -&gt; <span class="id">e39b1668831b</span> <span class="nw">(0 paths merged)</span>
+</span><span class="ol">    main: <span class="id">f161e3fa5539</span> -&gt; <span class="id">e39b1668831b</span></span></code></pre>
 </figure>
 <p data-l="en" lang="en">And git keeps working. One command pushes main to a git remote as a fast-forward, with a lease; history there is never rewritten. Each changeset arrives as one git commit that names its agent in an <code>agent</code> header:</p>
 <p data-l="es" lang="es">Y git sigue funcionando. Un solo comando sube main a un remoto de git como fast-forward y con lease: la historia del remoto nunca se reescribe. Cada changeset llega como un commit de git que nombra a su agente en una cabecera <code>agent</code>:</p>
@@ -382,18 +384,18 @@ git init --quiet --bare remote.git
 <li><strong>Everything is an immutable object named by its BLAKE3 hash:</strong> file contents, directories and changesets. Objects are never rewritten in place; the exact bytes are in <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, with golden vectors.</li>
 <li><strong>A changeset records the files that changed against its first parent,</strong> plus the root tree it produces. History, blame and rebase read that short list, and the root id still commits to the whole repository.</li>
 <li><strong>Agents commit in parallel, each in its own workspace.</strong> Landing is the one step they take in turn, and it is short: a fast-forward, or a rebase path by path that merges only the files both sides touched. Conflicts come back as data, and the branch does not move.</li>
-<li><strong>Many processes share one store without a daemon.</strong> Segments are leased with locks the kernel releases if a process dies, objects are made durable before anything refers to them, and an append-only op log records every ref change, so <code>braid undo</code> can step back.</li>
+<li><strong>Many processes share one store without a daemon.</strong> Segments are leased with locks the kernel releases if a process dies, objects reach the disk before anything that refers to them, and an append-only op log records every ref change, so <code>braid undo</code> can step back.</li>
 <li><strong>Planned (milestones 6 and 7): the same API at every tier,</strong> so a local store, a per-machine daemon, a cache and a server all answer the same requests. The daemon, the cache and the server do not exist yet.</li>
 </ol>
 <ol class="points" data-l="es" lang="es">
 <li><strong>Todo es un objeto inmutable que se nombra por su hash BLAKE3:</strong> el contenido de los ficheros, los directorios y los changesets. Ningún objeto se reescribe en su sitio; los bytes exactos están en <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, con vectores de referencia.</li>
 <li><strong>Un changeset registra los ficheros que cambiaron respecto a su primer padre,</strong> más el árbol raíz que resulta. La historia, blame y el rebase leen esa lista corta, y el id de la raíz sigue fijando el estado de todo el repositorio.</li>
 <li><strong>Los agentes hacen commit en paralelo, cada uno en su propio espacio de trabajo.</strong> Aterrizar es el único paso que dan por turnos, y es corto: un fast-forward, o un rebase ruta a ruta que solo fusiona los ficheros que han tocado los dos lados. Los conflictos vuelven como datos, y la rama no se mueve.</li>
-<li><strong>Muchos procesos comparten un almacén sin daemon.</strong> Los segmentos se reservan con cerrojos que el kernel libera si un proceso muere, los objetos quedan guardados de forma duradera antes de que nada apunte a ellos, y un registro de operaciones que solo crece apunta cada cambio de ref, para que <code>braid undo</code> pueda dar marcha atrás.</li>
+<li><strong>Muchos procesos comparten un almacén sin daemon.</strong> Los segmentos se reservan con cerrojos que el kernel libera si un proceso muere, los objetos llegan al disco antes que lo que apunta a ellos, y un registro de operaciones que solo crece apunta cada cambio de ref, para que <code>braid undo</code> pueda dar marcha atrás.</li>
 <li><strong>Previsto (fases 6 y 7): la misma API en cada nivel,</strong> de modo que un almacén local, un daemon por máquina, una caché y un servidor respondan a las mismas peticiones. El daemon, la caché y el servidor aún no existen.</li>
 </ol>
-<p class="credit" data-l="en" lang="en">The ideas come from what Anthropic published about Scion, its internal source control system (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>). Braid is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
-<p class="credit" data-l="es" lang="es">Las ideas vienen de lo que Anthropic publicó sobre Scion, su sistema interno de control de versiones (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>). Braid es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
+<p class="credit" data-l="en" lang="en">Braid starts from ideas Anthropic published about Scion, its internal source control system (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets stored against the first parent, server-side merges, minimal branch state, immutable objects any cache can serve. Braid is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
+<p class="credit" data-l="es" lang="es">Braid parte de ideas que Anthropic publicó sobre Scion, su sistema interno de control de versiones (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets guardados respecto al primer padre, fusiones en el servidor, ramas con un estado mínimo y objetos inmutables que cualquier caché puede servir. Braid es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
 </div>
 </section>
 
@@ -410,7 +412,8 @@ git init --quiet --bare remote.git
 cd elffuss-braid
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
-SRC="$PWD"                       # any git repository will do; this one is at hand
+SRC="$PWD"                       # this clone; another repository works too, with
+                                 # its branch for main and one of its files for README.md
 
 braid init /tmp/demo
 cd /tmp/demo
@@ -472,8 +475,8 @@ braid undo        # takes the landing back</code></pre>
 <h3 class="grid-title"><span data-l="en" lang="en">What an agent can rely on</span><span data-l="es" lang="es">Con qué puede contar un agente</span></h3>
 <ul class="contract">
 <li><h4><span data-l="en" lang="en">Identity</span><span data-l="es" lang="es">Identidad</span></h4>
-<p data-l="en" lang="en"><code>BRAID_AGENT</code> is written into the op log and into every changeset, and survives rebases. <code>BRAID_AUTHOR</code> signs the changesets the agent commits, or creates without a checkout, and the ones it remakes in a rebase. A merge made by <code>git sync</code> is signed instead with the agent label and the email in <code>.braid/config</code>, or <code>&lt;agent&gt;@example.org</code>.</p>
-<p data-l="es" lang="es"><code>BRAID_AGENT</code> queda escrito en el registro de operaciones y en cada changeset, y sobrevive a los rebases. <code>BRAID_AUTHOR</code> firma los changesets que el agente crea, con commit o sin checkout, y los que rehace en un rebase. Una fusión hecha por <code>git sync</code>, en cambio, se firma con la etiqueta del agente y el correo de <code>.braid/config</code>, o con <code>&lt;agente&gt;@example.org</code>.</p></li>
+<p data-l="en" lang="en"><code>BRAID_AGENT</code> is written into the op log and into every changeset the agent makes, and survives rebases; changesets imported from git name no agent. <code>BRAID_AUTHOR</code> signs the changesets the agent commits, or creates without a checkout, and the ones it remakes in a rebase. A merge made by <code>git sync</code> is signed instead with the agent label and the email in <code>.braid/config</code>, or <code>&lt;agent&gt;@example.org</code>.</p>
+<p data-l="es" lang="es"><code>BRAID_AGENT</code> queda escrito en el registro de operaciones y en cada changeset que crea el agente, y sobrevive a los rebases; los changesets importados de git no nombran agente. <code>BRAID_AUTHOR</code> firma los changesets que el agente crea, con commit o sin checkout, y los que rehace en un rebase. Una fusión hecha por <code>git sync</code>, en cambio, se firma con la etiqueta del agente y el correo de <code>.braid/config</code>, o con <code>&lt;agente&gt;@example.org</code>.</p></li>
 <li><h4><span data-l="en" lang="en">Output</span><span data-l="es" lang="es">Salida</span></h4>
 <p data-l="en" lang="en"><code class="nw">--json</code> on every command; <code>change create</code> always prints JSON.</p>
 <p data-l="es" lang="es"><code class="nw">--json</code> en todos los comandos; <code>change create</code> imprime siempre JSON.</p></li>
@@ -517,8 +520,8 @@ braid change create --base main --set src/lib.rs=@new-lib.rs \
 <dl class="rows">
 <div class="row">
 <dt><span data-l="en" lang="en">Import</span><span data-l="es" lang="es">Importar</span><code lang="en">braid git import</code></dt>
-<dd><p data-l="en" lang="en">Goes through <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a> and brings every local branch and tag; to bring every branch of a remote, import a <code>git clone <span class="nw">--mirror</span></code>. Each commit is exported again as it is imported, and the import stops unless its id comes back the same. Running it again imports only what is new. Shallow and <span class="nw">SHA-256</span> repositories are refused for now.</p>
-<p data-l="es" lang="es">Pasa por <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a> y trae todas las ramas locales y etiquetas; para traer todas las ramas de un remoto, importa un <code>git clone <span class="nw">--mirror</span></code>. Cada commit se vuelve a exportar al importarlo, y la importación se detiene si su id no sale idéntico. Si se repite, solo importa lo nuevo. Los clones superficiales y los repositorios <span class="nw">SHA-256</span> se rechazan por ahora.</p></dd>
+<dd><p data-l="en" lang="en">Goes through <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a> and brings every local branch and tag; to bring every branch of a remote, import a <code>git clone <span class="nw">--mirror</span></code>. Each commit is exported again as it is imported, and the import stops unless its id comes back the same. Running it again imports only what is new, and points braid's branches and tags at git's, even backwards, which drops from the branch any changeset landed in braid that git does not have (the op log keeps it: <code>braid undo</code>). To keep a branch in step with a git remote, use <code class="nw">git sync</code>. Shallow and <span class="nw">SHA-256</span> repositories are refused for now.</p>
+<p data-l="es" lang="es">Pasa por <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a> y trae todas las ramas locales y etiquetas; para traer todas las ramas de un remoto, importa un <code>git clone <span class="nw">--mirror</span></code>. Cada commit se vuelve a exportar al importarlo, y la importación se detiene si su id no sale idéntico. Si se repite, solo importa lo nuevo, y apunta las ramas y etiquetas de braid a las de git, aunque sea hacia atrás, con lo que sale de la rama todo changeset aterrizado en braid que git no tenga (el registro de operaciones lo conserva: <code>braid undo</code>). Para mantener una rama al día con un remoto de git, usa <code class="nw">git sync</code>. Los clones superficiales y los repositorios <span class="nw">SHA-256</span> se rechazan por ahora.</p></dd>
 </div>
 <div class="row">
 <dt><span data-l="en" lang="en">Export</span><span data-l="es" lang="es">Exportar</span><code lang="en">braid git export</code></dt>
@@ -561,7 +564,7 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 <li>braid and git run in alternating order, with warm caches, and the result is the median.</li>
 <li>Each scenario checks both tools did the same work. A failed check is reported as an error, never as a number.</li>
 <li>Git runs with its defaults, with automatic gc and maintenance turned off.</li>
-<li>Only ratios and git's retry counts are published, never times or sizes, together with <a href="https://github.com/KikoCis/elffuss-braid/blob/main/bench/README.md">the script</a>.</li>
+<li>Only ratios and git's retry counts are published, never times or sizes, together with <a href="https://github.com/KikoCis/elffuss-braid/tree/main/bench">the script</a>.</li>
 <li>Not measured: cold caches, git's fsmonitor daemon or <code>feature.manyFiles</code>, and transfers between machines (there is no server yet).</li>
 </ul>
 <ul class="method" data-l="es" lang="es">
@@ -569,7 +572,7 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 <li>braid y git se ejecutan en orden alterno, con las cachés calientes, y el resultado es la mediana.</li>
 <li>Cada escenario comprueba que las dos herramientas hicieron el mismo trabajo. Una comprobación fallida sale como error, nunca como número.</li>
 <li>Git se ejecuta con su configuración por defecto, con el gc y el mantenimiento automáticos desactivados.</li>
-<li>Solo se publican ratios y los reintentos de git, nunca tiempos ni tamaños, junto con <a href="https://github.com/KikoCis/elffuss-braid/blob/main/bench/README.md">el script</a>.</li>
+<li>Solo se publican ratios y los reintentos de git, nunca tiempos ni tamaños, junto con <a href="https://github.com/KikoCis/elffuss-braid/tree/main/bench">el script</a>.</li>
 <li>No se mide: cachés frías, el daemon fsmonitor de git o <code>feature.manyFiles</code>, ni transferencias entre máquinas (aún no hay servidor).</li>
 </ul>
 <p class="mk-legend" id="mk-legend" hidden><span data-l="en" lang="en">Each marker is drawn from its row's ratio, on a log scale. The line is 1: to its left braid is faster or smaller, to its right slower or larger.</span><span data-l="es" lang="es">Cada marca sale de la ratio de su fila, en escala logarítmica. La línea es el 1: a su izquierda braid es más rápido o más pequeño; a su derecha, más lento o más grande.</span></p>
@@ -604,8 +607,8 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 <p data-l="es" lang="es">Git reintentó cada push 1,1, 2,5 y 5,2 veces de media con 4, 8 y 16 agentes; ningún agente de braid reintentó, y casi todos los aterrizajes fueron un rebase.</p>
 <p data-l="en" lang="en">In that run, braid was faster when many agents landed at once, and slower at importing and storing history, and at status and commit on a large tree.</p>
 <p data-l="es" lang="es">En esa ejecución, braid fue más rápido cuando muchos agentes aterrizaban a la vez, y más lento al importar y guardar historia, y en status y commit sobre un árbol grande.</p>
-<p class="run-note" data-l="en" lang="en">This run predates later work on storage and speed: deltas, chunked large files, <code class="nw">log -- path</code>, blame, a parallel working-copy walk and lazy index lookups.</p>
-<p class="run-note" data-l="es" lang="es">Esta ejecución es anterior a lo que se ha hecho después en almacenamiento y velocidad: deltas, ficheros grandes troceados, <code class="nw">log -- path</code>, blame, un recorrido en paralelo de la copia de trabajo y búsquedas perezosas en los índices.</p>
+<p class="run-note" data-l="en" lang="en">This run predates later work on storage and speed: deltas, chunked large files, editing a large directory in place, a parallel working-copy walk and lazy index lookups. <code class="nw">log -- path</code> and blame came later too, and are not in this table.</p>
+<p class="run-note" data-l="es" lang="es">Esta ejecución es anterior a lo que se ha hecho después en almacenamiento y velocidad: deltas, ficheros grandes troceados, la edición en su sitio de los directorios grandes, un recorrido en paralelo de la copia de trabajo y búsquedas perezosas en los índices. <code class="nw">log -- path</code> y blame también llegaron después y no están en esta tabla.</p>
 </div>
 <!-- ratios:end -->
 </div>
@@ -622,7 +625,7 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 <tr><th scope="col"><span data-l="en" lang="en">Guarantee</span><span data-l="es" lang="es">Garantía</span></th><th scope="col"><span data-l="en" lang="en">How it is checked</span><span data-l="es" lang="es">Cómo se comprueba</span></th></tr>
 </thead>
 <tbody>
-<tr><td><span data-l="en" lang="en">Landing only moves a branch forward; <code>braid undo</code> and <code>braid ref set</code> can move it back.</span><span data-l="es" lang="es">Aterrizar solo hace avanzar la rama; <code>braid undo</code> y <code>braid ref set</code> pueden hacerla retroceder.</span></td>
+<tr><td><span data-l="en" lang="en">Landing only moves a branch forward; <code>braid undo</code>, <code>braid ref set</code> and <code>braid git import</code> can move it back.</span><span data-l="es" lang="es">Aterrizar solo hace avanzar la rama; <code>braid undo</code>, <code>braid ref set</code> y <code>braid git import</code> pueden hacerla retroceder.</span></td>
 <td><span data-l="en" lang="en">Simulation invariant I1, checked after every step (<a href="https://github.com/KikoCis/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span><span data-l="es" lang="es">Invariante I1 de la simulación, comprobada tras cada paso (<a href="https://github.com/KikoCis/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span></td></tr>
 <tr><td><span data-l="en" lang="en">A conflict leaves the branch where it was and exits 2.</span><span data-l="es" lang="es">Un conflicto deja la rama donde estaba y sale con 2.</span></td>
 <td><span data-l="en" lang="en">I5; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span><span data-l="es" lang="es">I5; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span></td></tr>
@@ -661,7 +664,7 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 </div>
 <ul class="honest" data-l="en" lang="en">
 <li>Pre-alpha: keep git as the source of truth, and nothing only in braid.</li>
-<li>In the last measured run (commit <code>5330054</code>), braid was slower than git at most things: <a href="#measured">Measured against git</a> shows where, with the script to check.</li>
+<li>Speed and size against git are in <a href="#measured">Measured against git</a>, as ratios from one run of the script, with the commit measured: check them before relying on braid for speed.</li>
 <li>One machine for now. There is no server, daemon or cache yet, and repositories move between machines only through git.</li>
 <li>Nothing is ever removed from a store; there is no garbage collection yet.</li>
 <li>Format v1 is frozen. Storage and protocols can still change, and an older braid refuses a newer store rather than guess.</li>
@@ -673,7 +676,7 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 </ul>
 <ul class="honest" data-l="es" lang="es">
 <li>Pre-alfa: deja git como fuente de verdad, y no guardes nada solo en braid.</li>
-<li>En la última medición (commit <code>5330054</code>), braid era más lento que git en casi todo: <a href="#measured">«Medido frente a git»</a> muestra dónde, con el script para comprobarlo.</li>
+<li>La velocidad y el tamaño frente a git están en <a href="#measured">«Medido frente a git»</a>, como ratios de una ejecución del script y con el commit medido: compruébalos antes de contar con la velocidad de braid.</li>
 <li>Por ahora, una sola máquina. Aún no hay servidor, daemon ni caché, y los repositorios solo pasan de una máquina a otra a través de git.</li>
 <li>Nunca se borra nada de un almacén; aún no hay recolección de basura.</li>
 <li>El formato v1 está congelado. El almacenamiento y los protocolos aún pueden cambiar, y un braid antiguo rechaza un almacén más nuevo en vez de adivinar.</li>
@@ -683,8 +686,8 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 <li>La integración continua prueba Linux y otros sistemas tipo Unix; Windows aún no se prueba.</li>
 <li>Las fases 0 a 4 están terminadas. La 5 está en marcha: ya están los deltas, los ficheros grandes troceados, los índices derivados, blame y el script de benchmarks. La 6 y la 7 están previstas.</li>
 </ul>
-<p class="scion" data-l="en" lang="en">The ideas come from what Anthropic published about Scion, its internal source control system. Braid is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
-<p class="scion" data-l="es" lang="es">Las ideas vienen de lo que Anthropic publicó sobre Scion, su sistema interno de control de versiones. Braid es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
+<p class="scion" data-l="en" lang="en">Braid starts from ideas Anthropic published about Scion, its internal source control system. It is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
+<p class="scion" data-l="es" lang="es">Braid parte de ideas que Anthropic publicó sobre Scion, su sistema interno de control de versiones. Es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
 <p class="credits" data-l="en" lang="en">Credits: <a href="https://github.com/jj-vcs/jj">Jujutsu</a>, for the operation log and undo; <a href="https://sapling-scm.com">Sapling</a>, for history served at scale, and compressing a file version against the previous one; <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a>, for the git bridge; <a href="https://github.com/BLAKE3-team/BLAKE3">BLAKE3</a>, <a href="https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia">FastCDC</a>, <a href="https://www.dolthub.com/docs/architecture/storage-engine/prolly-tree/">prolly trees</a> and <a class="nw" href="https://github.com/pascalkuthe/imara-diff">imara-diff</a>.</p>
 <p class="credits" data-l="es" lang="es">Créditos: <a href="https://github.com/jj-vcs/jj">Jujutsu</a>, por el registro de operaciones y el deshacer; <a href="https://sapling-scm.com">Sapling</a>, por servir historia a gran escala y comprimir cada versión de un fichero respecto a la anterior; <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a>, por el puente con git; <a href="https://github.com/BLAKE3-team/BLAKE3">BLAKE3</a>, <a href="https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia">FastCDC</a>, los <a href="https://www.dolthub.com/docs/architecture/storage-engine/prolly-tree/">prolly trees</a> e <a class="nw" href="https://github.com/pascalkuthe/imara-diff">imara-diff</a>.</p>
 </div>
