@@ -14,13 +14,14 @@
 //! where there was nothing, a directory or a gitlink, is all its own:
 //! renames are not followed.
 //!
-//! The line diff is imara-diff's Myers algorithm with its indentation
-//! heuristic, which is what git's blame uses by default, so the two agree
-//! line for line with two exceptions. Git follows a file across whole-file
-//! renames, and braid does not. And when a change has several shortest line
-//! diffs, the two implementations may pick different ones: they delete and
-//! insert as many lines, but keep different copies of lines that repeat,
-//! such as closing braces and blank lines, and blame gives those copies to
+//! The line diff, [`line_diff`], is imara-diff's Myers algorithm with its
+//! indentation heuristic, which is what git's blame uses by default, so the
+//! two agree line for line except in two ways. Git follows a file across
+//! whole-file renames, and braid does not. And the two diffs can differ:
+//! when a change has several shortest line diffs, they may keep different
+//! copies of lines that repeat, such as closing braces and blank lines; and
+//! neither always finds a shortest diff, so on some changes one inserts and
+//! deletes a few more lines than the other. Blame then gives those lines to
 //! different changesets.
 //!
 //! The derived function `blame`, version 1, of a changeset and a path (the
@@ -36,6 +37,7 @@
 //! line without one is a line too, as in three-way merges.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 
 use braid_format::codec::{Reader, put_id, put_uv};
@@ -208,27 +210,63 @@ fn count_lines(content: &[u8]) -> usize {
     byte_lines(content).count()
 }
 
-/// The origins of the lines of `new`, a later version of `old` whose lines
-/// come from `old_origins`, when `id` made it: kept lines keep their origin,
-/// the others are `id`'s.
-fn carry(old: &[u8], new: &[u8], old_origins: &[ObjectId], id: ObjectId) -> Vec<ObjectId> {
+/// One change of a line diff: lines of the old version, replaced by lines of
+/// the new one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineChange {
+    /// The lines of the old version it replaces, counted from 0, end
+    /// excluded; empty for an insertion, which goes before line `old.start`.
+    pub old: Range<usize>,
+    /// The lines of the new version it puts there; empty for a deletion.
+    pub new: Range<usize>,
+}
+
+/// The line diff blame uses between two versions of a file: its changes, in
+/// order. The lines between changes are kept: equal, in the same order.
+///
+/// It is imara-diff's Myers algorithm with its indentation heuristic, which
+/// is what git's blame uses by default. Like git's, it does not always find
+/// the shortest diff: it gives up on it where the search would cost too
+/// much, and its preprocessing, which sets aside lines that cannot be kept,
+/// can miss it too. So a diff may insert, and delete, a few more lines than
+/// the fewest possible, and not on the same changes as git's. Content of
+/// [`i32::MAX`] bytes or more is not diffed: all of it is replaced.
+pub fn line_diff(old: &[u8], new: &[u8]) -> Vec<LineChange> {
     if old.len() >= MAX_DIFF_BYTES || new.len() >= MAX_DIFF_BYTES {
-        return vec![id; count_lines(new)];
+        let (old_lines, new_lines) = (count_lines(old), count_lines(new));
+        if old_lines == 0 && new_lines == 0 {
+            return Vec::new();
+        }
+        return vec![LineChange {
+            old: 0..old_lines,
+            new: 0..new_lines,
+        }];
     }
     let input = InternedInput::new(old, new);
     let mut diff = Diff::compute(Algorithm::Myers, &input);
     diff.postprocess_lines(&input);
-    let mut origins = Vec::with_capacity(input.after.len());
-    // The next line of `old` that is not in a hunk yet.
+    diff.hunks()
+        .map(|hunk| LineChange {
+            old: hunk.before.start as usize..hunk.before.end as usize,
+            new: hunk.after.start as usize..hunk.after.end as usize,
+        })
+        .collect()
+}
+
+/// The origins of the lines of `new`, a later version of `old` whose lines
+/// come from `old_origins`, when `id` made it: kept lines keep their origin,
+/// the others are `id`'s.
+fn carry(old: &[u8], new: &[u8], old_origins: &[ObjectId], id: ObjectId) -> Vec<ObjectId> {
+    let mut origins = Vec::with_capacity(old_origins.len());
+    // The next line of `old` that no change has reached yet.
     let mut kept = 0;
-    for hunk in diff.hunks() {
-        let start = hunk.before.start as usize;
-        origins.extend_from_slice(&old_origins[kept..start]);
-        origins.extend(std::iter::repeat_n(id, hunk.after.len()));
-        kept = hunk.before.end as usize;
+    for change in line_diff(old, new) {
+        origins.extend_from_slice(&old_origins[kept..change.old.start]);
+        origins.extend(std::iter::repeat_n(id, change.new.len()));
+        kept = change.old.end;
     }
     origins.extend_from_slice(&old_origins[kept..]);
-    debug_assert_eq!(origins.len(), input.after.len());
+    debug_assert_eq!(origins.len(), count_lines(new));
     origins
 }
 
@@ -378,6 +416,19 @@ mod tests {
         ] {
             assert_eq!(Runs::decode(&encode(changesets, runs)), None, "{runs:?}");
         }
+    }
+
+    #[test]
+    fn line_diffs_list_changes_between_kept_lines() {
+        let change = |old: Range<usize>, new: Range<usize>| LineChange { old, new };
+        assert_eq!(
+            line_diff(b"a\nb\nc\n", b"a\nB\nc\nd\n"),
+            [change(1..2, 1..2), change(3..3, 3..4)]
+        );
+        assert_eq!(line_diff(b"x\ny\n", b"x\ny\n"), []);
+        assert_eq!(line_diff(b"", b""), []);
+        assert_eq!(line_diff(b"", b"one\n"), [change(0..0, 0..1)]);
+        assert_eq!(line_diff(b"a\nb\n", b"b\n"), [change(0..1, 0..0)]);
     }
 
     #[test]
