@@ -201,7 +201,7 @@ pub(crate) fn head(bytes: &[u8]) -> Result<Head, IndexError> {
     }
     let (table, fanout) = checked.split_at(COVERED_LEN * segments);
     let mut covered = Vec::with_capacity(segments);
-    for slot in table.chunks_exact(COVERED_LEN) {
+    for slot in table.as_chunks::<COVERED_LEN>().0 {
         let name = hex(&slot[..16]);
         if covered.iter().any(|seen: &Covered| seen.name == name) {
             return Err(Damaged("index names a segment twice"));
@@ -212,8 +212,10 @@ pub(crate) fn head(bytes: &[u8]) -> Result<Head, IndexError> {
         });
     }
     let fanout: Vec<u32> = fanout
-        .chunks_exact(4)
-        .map(|value| u32::from_le_bytes(array(value)))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|value| u32::from_le_bytes(*value))
         .collect();
     if fanout.windows(2).any(|pair| pair[0] > pair[1]) || u64::from(fanout[255]) != count {
         return Err(Damaged(
@@ -235,7 +237,7 @@ pub(crate) fn bucket(head: &Head, byte: u8, bytes: &[u8]) -> Result<Vec<(Entry, 
         return Err(IndexError::Damaged("index bucket cut short"));
     }
     let mut entries: Vec<(Entry, u16)> = Vec::with_capacity(bytes.len() / ENTRY_LEN as usize);
-    for slot in bytes.chunks_exact(ENTRY_LEN as usize) {
+    for slot in bytes.as_chunks::<{ ENTRY_LEN as usize }>().0 {
         let (entry, segment) = Entry::decode_in(slot).map_err(|unusable| match unusable {
             Unusable::Invalid => IndexError::Damaged("index entry fails its checksum"),
             Unusable::Newer => {
@@ -409,7 +411,7 @@ fn decode_v1(bytes: &[u8]) -> Result<(Vec<Entry>, u64), IndexError> {
     }
 
     let mut below = 0usize;
-    for (byte, value) in fanout.chunks_exact(4).enumerate() {
+    for (byte, value) in fanout.as_chunks::<4>().0.iter().enumerate() {
         below += entries[below..]
             .iter()
             .take_while(|entry| usize::from(entry.id.as_bytes()[0]) == byte)
@@ -440,7 +442,7 @@ fn unhex(name: &str) -> [u8; 16] {
         _ => b - b'a' + 10,
     };
     let mut out = [0u8; 16];
-    for (slot, pair) in out.iter_mut().zip(name.as_bytes().chunks_exact(2)) {
+    for (slot, pair) in out.iter_mut().zip(name.as_bytes().as_chunks::<2>().0) {
         *slot = digit(pair[0]) << 4 | digit(pair[1]);
     }
     out

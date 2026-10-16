@@ -297,10 +297,10 @@ fn as_version_1(bytes: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&(count as u64).to_le_bytes());
     out.extend_from_slice(segment_len);
     out.extend_from_slice(fanout);
-    for entry in entries.chunks_exact(64) {
+    for entry in entries.as_chunks::<64>().0 {
         out.extend_from_slice(&entry[..32]);
     }
-    for entry in entries.chunks_exact(64) {
+    for entry in entries.as_chunks::<64>().0 {
         out.extend_from_slice(&entry[32..60]);
         out.extend_from_slice(&0u32.to_le_bytes());
     }

@@ -143,7 +143,7 @@ impl DerivedIndexFile {
         }
         let bytes = read_range(file, state.read_to, end - state.read_to)
             .map_err(io_error("read", &self.path))?;
-        for slot in bytes.chunks_exact(ENTRY_LEN as usize) {
+        for slot in bytes.as_chunks::<{ ENTRY_LEN as usize }>().0 {
             if let Some((key, id)) = decode(slot) {
                 state.map.insert(key, id);
             }

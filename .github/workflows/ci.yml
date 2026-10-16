@@ -12,6 +12,8 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# The toolchain is pinned so that a new stable release, with new lints,
+# never breaks the build by surprise: bump it on purpose.
 jobs:
   test:
     name: test (${{ matrix.os }})
@@ -26,7 +28,7 @@ jobs:
           # The git bridge round-trips this repository's own history, which a
           # shallow checkout does not have.
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -48,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: wasm32-unknown-unknown
       - run: cargo check -p elffuss-braid-format -p elffuss-braid-engine --target wasm32-unknown-unknown --locked
@@ -68,7 +70,7 @@ jobs:
         with:
           # The quick import scenario reads this repository's own history.
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       # Small inputs, only to keep the suite working: the ratios of a quick
       # run mean nothing, and its results stay on the runner, unpublished.
@@ -88,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo install b3sum --locked
       - run: python3 docs/spec/check_vectors.py
@@ -106,5 +108,5 @@ jobs:
         working-directory: fuzz
         run: |
           for target in decode_tree decode_changeset names git_map git_objects; do
-            cargo fuzz run "$target" -- -max_total_time=60
+            cargo fuzz run --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=60
           done

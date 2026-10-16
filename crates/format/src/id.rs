@@ -189,9 +189,10 @@ impl FromStr for ObjectId {
             return Err(ParseIdError::Length(digits.len()));
         }
         let mut bytes = [0u8; 32];
-        for (i, pair) in digits.chunks_exact(2).enumerate() {
-            let high = hex_value(pair[0]).ok_or(ParseIdError::Digit(2 * i))?;
-            let low = hex_value(pair[1]).ok_or(ParseIdError::Digit(2 * i + 1))?;
+        let (pairs, _) = digits.as_chunks::<2>();
+        for (i, [high, low]) in pairs.iter().enumerate() {
+            let high = hex_value(*high).ok_or(ParseIdError::Digit(2 * i))?;
+            let low = hex_value(*low).ok_or(ParseIdError::Digit(2 * i + 1))?;
             bytes[i] = (high << 4) | low;
         }
         Ok(Self(bytes))

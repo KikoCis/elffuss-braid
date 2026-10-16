@@ -129,7 +129,7 @@ impl GitOid {
             return None;
         }
         let mut bytes = [0u8; 20];
-        for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
+        for (byte, pair) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
             *byte = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
         }
         Some(Self(bytes))
