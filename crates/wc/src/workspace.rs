@@ -10,7 +10,7 @@
 //! except for the short op log transaction in which a landing moves a
 //! branch.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ use braid_repo::{DIR, Repo, WORKSPACES_DIR, WorkspaceLink};
 use braid_store::{RefUpdate, Store, TransactError};
 
 use crate::blocker::{Blocker, blockers};
-use crate::cache::Cache;
+use crate::cache::{self, Cache};
 use crate::checkout::{self, Mode, Plan};
 use crate::error::Error;
 use crate::fsprobe::FileSystem;
@@ -32,10 +32,10 @@ use crate::markers::has_markers;
 use crate::paths::{is_within, os_name, split_last};
 use crate::rebase::{First, Replayed, agent_extras, conflict_tree, rebased_extras, replay};
 use crate::safe::{Found, Root, Stat, StatKind, open_file, read_link};
-use crate::scan;
+use crate::scan::{self, Delta, Scan};
 use crate::state::{Checkout, Lock, Rebase, RecordedConflict, State};
 use crate::status::{self, Status};
-use crate::tree::{Flat, flatten, root_of};
+use crate::tree::root_of;
 
 /// A workspace of a repository.
 #[derive(Debug)]
@@ -621,21 +621,27 @@ impl<'r> Workspace<'r> {
         Ok(plan.paths())
     }
 
-    /// Scans the working copy, saves the new stat cache, and compares it
-    /// with the base.
-    fn scan_status(&self, root: &Root, state: &State) -> Result<Status, Error> {
-        Ok(self.scan_against_base(root, state)?.0)
+    /// Scans the working copy and returns where it differs from the base,
+    /// saving the stat cache if it changed.
+    fn scan(&self, root: &Root, state: &State) -> Result<Vec<Delta>, Error> {
+        let store = self.store();
+        let base = root_of(store, state.base)?;
+        let cache = Cache::load(&self.state_dir);
+        let Scan {
+            deltas,
+            cache: next,
+            ..
+        } = scan::scan(root, store, base, &cache, state.fs)?;
+        if next.changed {
+            cache::save(&self.state_dir, next.time, &next.records)?;
+        }
+        Ok(deltas)
     }
 
-    /// Like [`Self::scan_status`], and also returns the base's files.
-    fn scan_against_base(&self, root: &Root, state: &State) -> Result<(Status, Flat), Error> {
-        let store = self.store();
-        let base = flatten(store, root_of(store, state.base)?)?;
-        let cache = Cache::load(&self.state_dir);
-        let scan = scan::scan(root, &base, &cache)?;
-        scan.cache.save(&self.state_dir)?;
-        let status = status::compare(&base, &scan, &state.tracked);
-        Ok((status, base))
+    /// Scans the working copy and compares it with the base.
+    fn scan_status(&self, root: &Root, state: &State) -> Result<Status, Error> {
+        let deltas = self.scan(root, state)?;
+        Ok(status::compare(&deltas, &state.tracked))
     }
 
     /// Fails if the working copy has uncommitted changes.
@@ -699,7 +705,8 @@ impl<'r> Workspace<'r> {
     pub fn commit(&self, request: &CommitRequest) -> Result<CommitOutcome, Error> {
         let (_lock, mut state, root) = self.begin()?;
         let store = self.store();
-        let (status, base) = self.scan_against_base(&root, &state)?;
+        let deltas = self.scan(&root, &state)?;
+        let status = status::compare(&deltas, &state.tracked);
         if state.rebase.is_some() && !request.paths.is_empty() {
             return Err(Error::PathsDuringRebase);
         }
@@ -751,6 +758,10 @@ impl<'r> Workspace<'r> {
             (None, None) => return Err(Error::NoMessage),
         };
         let message_replaced = request.message.is_some() && original.is_some();
+        let olds: HashMap<&[u8], &ChangeOp> = deltas
+            .iter()
+            .filter_map(|delta| Some((delta.path.as_slice(), delta.old.as_ref()?)))
+            .collect();
         let mut changes = Vec::with_capacity(selected.len());
         for change in &selected {
             let op = match &change.op {
@@ -758,7 +769,7 @@ impl<'r> Workspace<'r> {
                 _ => {
                     // The base's file at the same path: what the store may
                     // keep the new content as a delta against.
-                    let similar = match base.files.get(&change.path) {
+                    let similar = match olds.get(change.path.as_slice()) {
                         Some(
                             ChangeOp::File { blob, .. }
                             | ChangeOp::Executable { blob, .. }

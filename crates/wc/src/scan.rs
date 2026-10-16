@@ -1,183 +1,779 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 UtopiaIA
 
-//! Reading a working copy: every file that counts, and its blob id.
+//! Reading a working copy: where it differs from its base, and the records
+//! of the stat cache for the next scan.
 //!
-//! The walk goes one directory at a time from the workspace root, never
-//! through a symlink, skips `.braid`, `.git` and the names that alias them,
-//! braid's own scratch files, ignored paths that are not tracked, and
-//! untracked directories that are another workspace or repository. Files
-//! the stat cache cannot vouch for are hashed afterwards, in parallel, one
-//! directory per task.
+//! The walk opens each directory once, by its name in its parent's handle
+//! and never through a symlink, and reads its entries once, taking their
+//! types from the listing where the platform gives them and asking for the
+//! metadata of files only. Directories are read in parallel. The walk skips
+//! `.braid`, `.git` and the names that alias them, braid's own scratch
+//! files, ignored paths that are not tracked, and untracked directories that
+//! are another workspace or repository. Files the stat cache cannot vouch
+//! for are hashed, in parallel.
+//!
+//! The base is read a directory at a time, where it is needed: a directory
+//! whose record says it was clean against the tree the base still has at its
+//! path, and whose entries still match their records, differs in nothing,
+//! and its tree is not read.
 
-use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::io::{self, Read};
-use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use braid_format::{ChangeOp, IdHasher, Kind, ObjectId};
+use braid_engine::read_tree;
+use braid_format::{ChangeOp, Entry, EntryKind, IdHasher, Kind, ObjectId, Objects};
 use cap_std::fs::Dir;
 use rayon::prelude::*;
 
-use crate::cache::{self, Cache};
+use crate::cache::{
+    Cache, CachedDir, DirRecord, FileRecord, KIND_EXECUTABLE, KIND_FILE, KIND_GITLINK, KIND_SUBDIR,
+    KIND_SYMLINK, KIND_TREE, Record,
+};
 use crate::error::Error;
-use crate::fsprobe::SCRATCH_PREFIX;
+use crate::fsprobe::{FileSystem, SCRATCH_PREFIX};
 use crate::ignores::{self, Chain};
-use crate::paths::{join, name_bytes, os_name};
-use crate::safe::{Found, Root, Stat, StatKind, open_file, read_link};
-use crate::tree::Flat;
+use crate::paths::{join, os_name};
+use crate::safe::{
+    Found, Root, Stat, StatKind, list, open_child_dir, open_file, read_link, stat_entry,
+};
+use crate::tree::leaves;
+
+/// How many threads read the working copy, at most. File systems serialise
+/// much of their work on names and metadata: past a few threads, more of
+/// them add contention, not speed.
+const THREADS: usize = 4;
+
+/// How many directory handles the walk keeps open for directories whose
+/// subdirectories are still to be read. Past this, a subdirectory is opened
+/// from the root again, one name at a time: deep trees read in parallel
+/// would otherwise hold a handle for every level on every thread.
+const HELD_HANDLES: usize = 128;
+
+/// A path where the working copy differs from the base.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Delta {
+    pub path: Vec<u8>,
+    /// What the base has there: a file, a symlink or a gitlink.
+    pub old: Option<ChangeOp>,
+    /// What the working copy has there that counts.
+    pub new: Option<ChangeOp>,
+}
 
 /// What a scan found.
-#[derive(Debug, Default)]
-pub(crate) struct Scan {
-    /// Every file that counts, by path: regular files, executables and
-    /// symlinks with their blobs, and the gitlinks of the base whose
-    /// directory is there.
-    pub files: BTreeMap<Vec<u8>, ChangeOp>,
+#[derive(Debug)]
+pub(crate) struct Scan<'c> {
+    /// Every path where the working copy differs from the base, sorted.
+    pub deltas: Vec<Delta>,
     /// The stat cache for the next scan.
-    pub cache: Cache,
+    pub cache: Next<'c>,
 }
 
-/// A file the cache could not vouch for.
-struct Miss {
+/// The stat cache a scan leaves for the next.
+#[derive(Debug)]
+pub(crate) struct Next<'c> {
+    /// When the scan started, by the file system's clock.
+    pub time: (i64, u32),
+    /// Every directory's record, by path.
+    pub records: Vec<Record<'c>>,
+    /// Whether they say something the old cache does not.
+    pub changed: bool,
+}
+
+/// Scans the working copy at `root` against the base tree `base`, using
+/// `old` so that files and trees that did not change are not read again.
+/// `fs` says which names the file system takes for the same.
+pub(crate) fn scan<'c, O: Objects + Sync>(
+    root: &Root,
+    objects: &O,
+    base: ObjectId,
+    old: &'c Cache,
+    fs: FileSystem,
+) -> Result<Scan<'c>, Error> {
+    scan_holding(root, objects, base, old, fs, HELD_HANDLES)
+}
+
+/// [`scan`], keeping at most `held` directory handles open for directories
+/// still to read.
+fn scan_holding<'c, O: Objects + Sync>(
+    root: &Root,
+    objects: &O,
+    base: ObjectId,
+    old: &'c Cache,
+    fs: FileSystem,
+    held: usize,
+) -> Result<Scan<'c>, Error> {
+    let time = root.file_system_now().unwrap_or_else(|_| fallback_now());
+    let dir = root
+        .dir()
+        .try_clone()
+        .map_err(Error::io("open", root.path()))?;
+    let walk = Walk {
+        root,
+        objects,
+        old,
+        fs,
+        time,
+        held_limit: held,
+        held: AtomicUsize::new(0),
+        failed: AtomicBool::new(false),
+        out: Mutex::new(Out::default()),
+    };
+    let job = Job {
+        open: Open::Ready(dir),
+        path: Vec::new(),
+        base: Some(base),
+        rules: None,
+        ignored: false,
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(THREADS));
+    match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+        Ok(pool) => pool.scope(|s| walk.run(s, job)),
+        Err(_) => rayon::scope(|s| walk.run(s, job)),
+    }
+    let out = walk
+        .out
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(error) = out.error {
+        return Err(error);
+    }
+    let mut deltas = out.deltas;
+    deltas.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    let mut records = out.records;
+    records.sort_unstable_by(|a, b| a.path().cmp(b.path()));
+    let cache = Next {
+        time,
+        records,
+        changed: out.changed || out.seen != old.dir_count(),
+    };
+    Ok(Scan { deltas, cache })
+}
+
+/// One directory to read.
+struct Job<'s> {
+    open: Open<'s>,
+    path: Vec<u8>,
+    /// The base's tree at this path, if it has one.
+    base: Option<ObjectId>,
+    /// The ignore rules in force above it.
+    rules: Chain,
+    /// Whether it is ignored: inside, only what the base has counts.
+    ignored: bool,
+}
+
+/// How a job gets its directory's handle.
+enum Open<'s> {
+    /// It has it: the root.
+    Ready(Dir),
+    /// By its name in its parent's handle, which the parent's jobs share.
+    Child(Arc<Shared<'s>>, Vec<u8>),
+    /// From the root, one name at a time.
+    FromRoot,
+}
+
+/// A directory handle that jobs not started yet share, counted while it is
+/// open.
+struct Shared<'s> {
+    dir: Dir,
+    held: &'s AtomicUsize,
+}
+
+impl Drop for Shared<'_> {
+    fn drop(&mut self) {
+        self.held.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// What every job adds to.
+#[derive(Default)]
+struct Out<'c> {
+    deltas: Vec<Delta>,
+    records: Vec<Record<'c>>,
+    /// Whether a record differs from the old cache's, or a file was read
+    /// whose record will vouch for it.
+    changed: bool,
+    /// How many directories read had a record in the old cache.
+    seen: usize,
+    error: Option<Error>,
+}
+
+/// What the base has at a name of a directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum At {
+    Nothing,
+    /// A file, executable or symlink.
+    Leaf,
+    Gitlink,
+    Tree(ObjectId),
+}
+
+/// An entry of a directory, as listed.
+struct Listed {
+    name: Vec<u8>,
+    /// The listing says it is a directory.
+    dir: bool,
+}
+
+/// A file, symlink or gitlink of the working copy that counts.
+struct Counted {
+    name: Vec<u8>,
+    /// Its metadata; `None` for a gitlink's directory.
+    stat: Option<Stat>,
+    /// What it is now, once known; `None` for a gitlink, which is what the
+    /// base has.
+    op: Option<ChangeOp>,
+    /// Whether its record may vouch for it in the next scan.
+    vouches: bool,
+    /// Whether this scan read it.
+    read: bool,
+}
+
+impl Counted {
+    fn kind(&self) -> u8 {
+        match &self.op {
+            None => KIND_GITLINK,
+            Some(ChangeOp::Executable { .. }) => KIND_EXECUTABLE,
+            Some(ChangeOp::Symlink { .. }) => KIND_SYMLINK,
+            Some(_) => KIND_FILE,
+        }
+    }
+
+    fn blob(&self) -> Option<ObjectId> {
+        match &self.op {
+            Some(
+                ChangeOp::File { blob, .. }
+                | ChangeOp::Executable { blob, .. }
+                | ChangeOp::Symlink { blob, .. },
+            ) => Some(*blob),
+            _ => None,
+        }
+    }
+
+    fn record(self) -> FileRecord {
+        let kind = self.kind();
+        match (&self.stat, self.blob()) {
+            (Some(stat), Some(blob)) => FileRecord::new(self.name, stat, kind, self.vouches, blob),
+            _ => FileRecord::bare(self.name, kind, None),
+        }
+    }
+}
+
+/// What a directory holds, sorted by [`Walk::classify`].
+struct Sorted {
+    /// What counts, by name.
+    counted: Vec<Counted>,
+    /// The subdirectories to read, by name.
+    children: Vec<Child>,
+}
+
+/// A subdirectory to read.
+struct Child {
     name: Vec<u8>,
     path: Vec<u8>,
-    stat: Stat,
+    base: Option<ObjectId>,
+    ignored: bool,
 }
 
-/// Scans the working copy at `root`, whose tracked files are those of
-/// `base`, using `old` to avoid hashing files that did not change.
-pub(crate) fn scan(root: &Root, base: &Flat, old: &Cache) -> Result<Scan, Error> {
-    let time = root.file_system_now().unwrap_or_else(|_| fallback_now());
-    let mut found = Scan {
-        files: BTreeMap::new(),
-        cache: Cache {
-            time,
-            entries: HashMap::new(),
-        },
-    };
-    let mut misses: BTreeMap<Vec<u8>, Vec<Miss>> = BTreeMap::new();
+struct Walk<'a, 'c, O> {
+    root: &'a Root,
+    objects: &'a O,
+    old: &'c Cache,
+    fs: FileSystem,
+    /// When the scan started, by the file system's clock.
+    time: (i64, u32),
+    /// How many directory handles to keep open for jobs not started yet.
+    held_limit: usize,
+    /// Directory handles kept open for jobs not started yet.
+    held: AtomicUsize,
+    failed: AtomicBool,
+    out: Mutex<Out<'c>>,
+}
 
-    // Directories to read: path, rules in force above them, and whether
-    // they are ignored (so only tracked files count inside).
-    let mut pending: Vec<(Vec<u8>, Chain, bool)> = vec![(Vec::new(), None, false)];
-    while let Some((path, above, ignored)) = pending.pop() {
-        let dir = match root.open_dir(&path)? {
-            Found::Here(dir) => dir,
-            // Replaced while the walk ran: whatever is there now is not a
-            // directory to read.
-            Found::Missing | Found::Blocked(_) => continue,
+impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
+    fn out(&self) -> MutexGuard<'_, Out<'c>> {
+        self.out.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn run<'s>(&'s self, scope: &rayon::Scope<'s>, job: Job<'s>) {
+        if self.failed.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Err(error) = self.visit(scope, job) {
+            self.failed.store(true, Ordering::Relaxed);
+            self.out().error.get_or_insert(error);
+        }
+    }
+
+    fn visit<'s>(&'s self, scope: &rayon::Scope<'s>, job: Job<'s>) -> Result<(), Error> {
+        let Job {
+            open,
+            path,
+            base,
+            rules: above,
+            ignored,
+        } = job;
+        let dir = match open {
+            Open::Ready(dir) => Some(dir),
+            Open::Child(parent, name) => {
+                let os = os_name(&name).ok_or_else(|| unrepresentable(&path))?;
+                let opened = open_child_dir(&parent.dir, os);
+                drop(parent);
+                opened.map_err(|err| self.root.error("open", &path, err))?
+            }
+            Open::FromRoot => match self.root.open_dir(&path)? {
+                Found::Here(dir) => Some(dir),
+                Found::Missing | Found::Blocked(_) => None,
+            },
         };
+        let Some(dir) = dir else {
+            // Gone since its parent was read, or not a directory any more:
+            // what the base has there is not in the working copy.
+            return self.gone(&path, base);
+        };
+        if base.is_none() && holds_marker(&dir) {
+            // Another workspace or repository: not part of this one.
+            return Ok(());
+        }
+        let cached = self.old.dir(&path);
+
+        // The base's tree is read unless the directory's record may stand
+        // for it: the directory was clean against the same tree.
+        let trusted =
+            base.is_some() && cached.is_some_and(|record| record.clean() && record.base() == base);
+        let mut tree: Option<Vec<Entry>> = match base {
+            Some(id) if !trusted => Some(read_tree(self.objects, id)?),
+            _ => None,
+        };
+
+        let at = |name: &[u8]| match (&tree, cached) {
+            (Some(entries), _) => at_tree(entries, name),
+            (None, Some(record)) if trusted => at_record(&record, name),
+            _ => At::Nothing,
+        };
+        let listed = self.list(&dir, &path)?;
+        let files = ignores::ignore_files(self.fs, listed.iter().map(|e| e.name.as_slice()));
         let rules = if ignored {
             above
         } else {
-            ignores::enter(&dir, &path, &above)
+            ignores::enter(&dir, &path, &above, &files)
         };
-        for os in sorted_names(root, &dir, &path)? {
-            let Some(name) = name_bytes(&os) else {
-                continue;
-            };
-            if skipped(name) {
-                continue;
+        let Sorted { counted, children } =
+            self.classify(&dir, &path, listed, &rules, ignored, &at, cached)?;
+        let counted = self.hash(&dir, &path, counted)?;
+
+        let clean_by_record =
+            trusted && cached.is_some_and(|record| matches_record(&record, &counted, &children));
+        let (deltas, clean) = if clean_by_record {
+            (Vec::new(), true)
+        } else {
+            if tree.is_none()
+                && let Some(id) = base
+            {
+                tree = Some(read_tree(self.objects, id)?);
             }
-            let child = join(&path, name);
-            let stat = match dir.symlink_metadata(&os) {
-                Ok(meta) => Stat::of(&meta),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(root.error("read", &child, err)),
+            self.differ(&path, tree.as_deref().unwrap_or(&[]), &counted, &children)?
+        };
+
+        let record = {
+            // Records that will vouch where the old ones could not.
+            let fresh = counted.iter().any(|file| {
+                file.read && file.vouches && file.stat.is_some_and(|stat| stat.mtime < self.time)
+            });
+            let mut files: Vec<FileRecord> = counted.into_iter().map(Counted::record).collect();
+            files.extend(children.iter().map(|child| {
+                let kind = if child.base.is_some() {
+                    KIND_TREE
+                } else {
+                    KIND_SUBDIR
+                };
+                FileRecord::bare(child.name.clone(), kind, child.base)
+            }));
+            files.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+            let made = DirRecord {
+                path: path.clone(),
+                base,
+                clean,
+                files,
             };
-            let tracked = base.files.get(&child);
-            match stat.kind {
-                StatKind::Dir => {
-                    if let Some(gitlink @ ChangeOp::Gitlink { .. }) = tracked {
-                        // A submodule's directory: its content is not ours.
-                        found.files.insert(child, gitlink.clone());
-                        continue;
-                    }
-                    let tracked_dir = base.dirs.contains(&child);
-                    let child_ignored = ignored || ignores::is_ignored(&rules, &child, true);
-                    if child_ignored && !tracked_dir {
-                        continue;
-                    }
-                    if !tracked_dir && holds_marker(&dir, &os) {
-                        continue;
-                    }
-                    pending.push((child, rules.clone(), child_ignored));
+            match cached {
+                Some(old) if !fresh && made.same_as(&old) => (Record::Kept(old), false),
+                _ => (Record::Made(made), true),
+            }
+        };
+
+        if !children.is_empty() {
+            let shared = (self.held.load(Ordering::Relaxed) < self.held_limit).then(|| {
+                self.held.fetch_add(1, Ordering::Relaxed);
+                Arc::new(Shared {
+                    dir,
+                    held: &self.held,
+                })
+            });
+            for child in children {
+                let open = match &shared {
+                    Some(shared) => Open::Child(Arc::clone(shared), child.name),
+                    None => Open::FromRoot,
+                };
+                let job = Job {
+                    open,
+                    path: child.path,
+                    base: child.base,
+                    rules: rules.clone(),
+                    ignored: child.ignored,
+                };
+                scope.spawn(move |s| self.run(s, job));
+            }
+        }
+
+        let mut out = self.out();
+        out.deltas.extend(deltas);
+        let (record, changed) = record;
+        out.records.push(record);
+        out.changed |= changed;
+        out.seen += usize::from(cached.is_some());
+        Ok(())
+    }
+
+    /// Sorts a directory's entries into what counts and what to read next.
+    /// `at` says what the base has at a name, and `cached` is the
+    /// directory's record. An entry that is gone by the time it is looked at
+    /// is left out.
+    #[allow(clippy::too_many_arguments)]
+    fn classify(
+        &self,
+        dir: &Dir,
+        path: &[u8],
+        listed: Vec<Listed>,
+        rules: &Chain,
+        ignored: bool,
+        at: &dyn Fn(&[u8]) -> At,
+        cached: Option<CachedDir<'_>>,
+    ) -> Result<Sorted, Error> {
+        let mut found = Sorted {
+            counted: Vec::with_capacity(listed.len()),
+            children: Vec::new(),
+        };
+        for Listed { name, dir: is_dir } in listed {
+            let base_at = at(&name);
+            let stat = if is_dir {
+                None
+            } else {
+                let os = os_name(&name).ok_or_else(|| unrepresentable(&join(path, &name)))?;
+                match stat_entry(dir, os) {
+                    Ok(stat) => Some(stat),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(self.root.error("read", &join(path, &name), err)),
                 }
-                StatKind::File | StatKind::Symlink => {
-                    let child_ignored = ignored || ignores::is_ignored(&rules, &child, false);
-                    if child_ignored && tracked.is_none() {
+            };
+            match stat {
+                None
+                | Some(Stat {
+                    kind: StatKind::Dir,
+                    ..
+                }) => {
+                    if base_at == At::Gitlink {
+                        // A submodule's directory: its content is not ours.
+                        found.counted.push(Counted {
+                            name,
+                            stat: None,
+                            op: None,
+                            vouches: false,
+                            read: false,
+                        });
+                        continue;
+                    }
+                    let child_path = join(path, &name);
+                    let child_ignored = ignored || ignores::is_ignored(rules, &child_path, true);
+                    let child_base = match base_at {
+                        At::Tree(id) => Some(id),
+                        _ if child_ignored => continue,
+                        _ => None,
+                    };
+                    found.children.push(Child {
+                        name,
+                        path: child_path,
+                        base: child_base,
+                        ignored: child_ignored,
+                    });
+                }
+                Some(
+                    stat @ Stat {
+                        kind: StatKind::File | StatKind::Symlink,
+                        ..
+                    },
+                ) => {
+                    let tracked = matches!(base_at, At::Leaf | At::Gitlink);
+                    if !tracked
+                        && (ignored || ignores::is_ignored(rules, &join(path, &name), false))
+                    {
                         continue;
                     }
                     // Symlinks are cheap to read again, and their size in
                     // the metadata is not reliable everywhere.
-                    let cached = match stat.kind {
-                        StatKind::File => old.lookup(&child, &stat),
+                    let vouched = match stat.kind {
+                        StatKind::File => cached
+                            .and_then(|record| record.file(&name))
+                            .and_then(|file| file.vouch(&stat, self.old.time())),
                         _ => None,
                     };
-                    match cached {
-                        Some(blob) => {
-                            found
-                                .files
-                                .insert(child.clone(), op_for(&stat, blob, stat.size));
-                            if let Some(entry) = cache::Entry::new(&stat, blob) {
-                                found.cache.entries.insert(child, entry);
+                    found.counted.push(Counted {
+                        name,
+                        stat: Some(stat),
+                        op: vouched.map(|blob| op_for(&stat, blob, stat.size)),
+                        vouches: vouched.is_some(),
+                        read: false,
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(found)
+    }
+
+    /// A directory the base has, whose path holds no directory any more:
+    /// everything the base has below it is gone.
+    fn gone(&self, path: &[u8], base: Option<ObjectId>) -> Result<(), Error> {
+        let Some(tree) = base else {
+            return Ok(());
+        };
+        let removed = leaves(self.objects, tree, path)?;
+        self.out()
+            .deltas
+            .extend(removed.into_iter().map(|(path, op)| Delta {
+                path,
+                old: Some(op),
+                new: None,
+            }));
+        Ok(())
+    }
+
+    /// The entries of `dir`, by name, less those the walk never looks at.
+    fn list(&self, dir: &Dir, path: &[u8]) -> Result<Vec<Listed>, Error> {
+        let mut listed: Vec<Listed> = list(dir)
+            .map_err(|err| self.root.error("read", path, err))?
+            .into_iter()
+            .filter(|(name, _)| !skipped(name))
+            .map(|(name, dir)| Listed { name, dir })
+            .collect();
+        listed.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        Ok(listed)
+    }
+
+    /// Reads the files and symlinks the cache did not vouch for, in
+    /// parallel. Files that vanished since they were listed are left out.
+    fn hash(&self, dir: &Dir, path: &[u8], counted: Vec<Counted>) -> Result<Vec<Counted>, Error> {
+        let missing = |file: &Counted| file.stat.is_some() && file.op.is_none();
+        let misses = counted.iter().filter(|file| missing(file)).count();
+        if misses == 0 {
+            return Ok(counted);
+        }
+        let read = |mut file: Counted| -> Result<Option<Counted>, Error> {
+            if !missing(&file) {
+                return Ok(Some(file));
+            }
+            let os = os_name(&file.name).ok_or_else(|| unrepresentable(&file.name))?;
+            let symlink = file.stat.is_some_and(|stat| stat.kind == StatKind::Symlink);
+            let result = if symlink {
+                hash_symlink(dir, os)
+            } else {
+                match hash_file(dir, os) {
+                    // Replaced by a symlink since it was listed.
+                    Err(_) if dir.symlink_metadata(os).is_ok_and(|meta| meta.is_symlink()) => {
+                        hash_symlink(dir, os)
+                    }
+                    other => other,
+                }
+            };
+            match result {
+                Ok((op, stable)) => {
+                    file.vouches = stable.is_some() && !matches!(op, ChangeOp::Symlink { .. });
+                    if let Some(stable) = stable {
+                        file.stat = Some(stable);
+                    }
+                    file.op = Some(op);
+                    file.read = true;
+                    Ok(Some(file))
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(self.root.error("read", &join(path, &file.name), err)),
+            }
+        };
+        let read: Vec<Option<Counted>> = if misses > 1 {
+            counted
+                .into_par_iter()
+                .map(read)
+                .collect::<Result<_, _>>()?
+        } else {
+            counted.into_iter().map(read).collect::<Result<_, _>>()?
+        };
+        Ok(read.into_iter().flatten().collect())
+    }
+
+    /// Where a directory's own entries differ from the base tree's
+    /// `entries`, and whether it is clean: nothing differs, and every
+    /// subdirectory of the tree is there as a directory.
+    fn differ(
+        &self,
+        path: &[u8],
+        entries: &[Entry],
+        counted: &[Counted],
+        children: &[Child],
+    ) -> Result<(Vec<Delta>, bool), Error> {
+        let added = |file: &Counted| {
+            file.op.as_ref().map(|op| Delta {
+                path: join(path, &file.name),
+                old: None,
+                new: Some(op.clone()),
+            })
+        };
+        let mut deltas = Vec::new();
+        let mut all_there = true;
+        let mut news = counted.iter().peekable();
+        for entry in entries {
+            while let Some(file) = news.next_if(|file| file.name < entry.name) {
+                deltas.extend(added(file));
+            }
+            match &entry.kind {
+                EntryKind::Tree { tree } => {
+                    let there = children
+                        .binary_search_by(|child| child.name.as_slice().cmp(&entry.name))
+                        .is_ok_and(|index| children[index].base.is_some());
+                    if !there {
+                        all_there = false;
+                        let removed = leaves(self.objects, *tree, &join(path, &entry.name))?;
+                        deltas.extend(removed.into_iter().map(|(path, op)| Delta {
+                            path,
+                            old: Some(op),
+                            new: None,
+                        }));
+                    }
+                }
+                kind => {
+                    let Some(old) = ChangeOp::from_entry(kind) else {
+                        continue;
+                    };
+                    match news.next_if(|file| file.name == entry.name) {
+                        // A gitlink whose directory is there is the base's.
+                        Some(Counted { op: None, .. }) => {}
+                        Some(Counted { op: Some(new), .. }) => {
+                            if *new != old {
+                                deltas.push(Delta {
+                                    path: join(path, &entry.name),
+                                    old: Some(old),
+                                    new: Some(new.clone()),
+                                });
                             }
                         }
-                        None => misses.entry(path.clone()).or_default().push(Miss {
-                            name: name.to_vec(),
-                            path: child,
-                            stat,
+                        None => deltas.push(Delta {
+                            path: join(path, &entry.name),
+                            old: Some(old),
+                            new: None,
                         }),
                     }
                 }
-                StatKind::Other => {}
             }
         }
+        deltas.extend(news.filter_map(added));
+        let clean = deltas.is_empty() && all_there;
+        Ok((deltas, clean))
     }
+}
 
-    let hashed: Vec<Vec<Hashed>> = misses
-        .into_par_iter()
-        .map(|(dir_path, files)| hash_directory(root, &dir_path, files))
-        .collect::<Result<_, Error>>()?;
-    for hashed in hashed.into_iter().flatten() {
-        if let Some(entry) = hashed
-            .stable
-            .and_then(|stat| cache::Entry::new(&stat, hashed.blob))
-        {
-            found.cache.entries.insert(hashed.path.clone(), entry);
-        }
-        found.files.insert(hashed.path, hashed.op);
+/// What the base tree's `entries` have at `name`.
+fn at_tree(entries: &[Entry], name: &[u8]) -> At {
+    match entries.binary_search_by(|entry| entry.name.as_slice().cmp(name)) {
+        Ok(index) => match &entries[index].kind {
+            EntryKind::Tree { tree } => At::Tree(*tree),
+            EntryKind::Gitlink { .. } => At::Gitlink,
+            _ => At::Leaf,
+        },
+        Err(_) => At::Nothing,
     }
-    Ok(found)
+}
+
+/// What the base has at `name`, by the record of a directory that was
+/// clean against the same tree: the record lists every entry of that tree.
+fn at_record(record: &CachedDir<'_>, name: &[u8]) -> At {
+    match record.file(name).map(|file| (file.kind, file.blob)) {
+        Some((KIND_TREE, tree)) => At::Tree(tree),
+        Some((KIND_GITLINK, _)) => At::Gitlink,
+        Some((KIND_SUBDIR, _)) | None => At::Nothing,
+        Some(_) => At::Leaf,
+    }
+}
+
+/// Whether a directory's entries match, one for one, the record of a clean
+/// directory: the same files, symlinks and gitlinks with the same content,
+/// and the same subdirectories of the base tree, there as directories.
+fn matches_record(record: &CachedDir<'_>, counted: &[Counted], children: &[Child]) -> bool {
+    let mut files = counted.iter();
+    let mut dirs = children.iter().filter(|child| child.base.is_some());
+    for entry in record.files() {
+        let matched = match entry.kind {
+            KIND_SUBDIR => true,
+            KIND_TREE => dirs
+                .next()
+                .is_some_and(|dir| dir.name == entry.name && dir.base == Some(entry.blob)),
+            _ => files.next().is_some_and(|file| {
+                file.name == entry.name
+                    && file.kind() == entry.kind
+                    && (entry.kind == KIND_GITLINK || file.blob() == Some(entry.blob))
+            }),
+        };
+        if !matched {
+            return false;
+        }
+    }
+    files.next().is_none() && dirs.next().is_none()
 }
 
 /// Names the walk never looks at: `.braid` and `.git` and every name that
 /// some file system would read as one of them, and braid's scratch files.
 fn skipped(name: &[u8]) -> bool {
-    braid_format::name::is_reserved(name) || name.starts_with(SCRATCH_PREFIX.as_bytes())
+    name.starts_with(SCRATCH_PREFIX.as_bytes())
+        || (may_be_reserved(name) && braid_format::name::is_reserved(name))
 }
 
-/// Whether the directory `name` of `dir` holds a `.braid` or `.git` entry:
-/// another workspace or repository, which an untracked directory is not part
-/// of this one.
-fn holds_marker(dir: &Dir, name: &OsStr) -> bool {
+/// Whether `name` may alias `.braid` or `.git`, a quick test before the
+/// full one. Aliases fold to `.braid`, `.git`, `braid~N` or `git~N`, and an
+/// ASCII name folds by changing letter case only, after cutting it at its
+/// first `:` and dropping trailing dots and spaces.
+fn may_be_reserved(name: &[u8]) -> bool {
+    if !name.is_ascii() {
+        return true;
+    }
+    let end = name
+        .iter()
+        .position(|byte| *byte == b':')
+        .unwrap_or(name.len());
+    let mut stem = &name[..end];
+    while let [rest @ .., b'.' | b' '] = stem {
+        stem = rest;
+    }
+    match stem.len() {
+        4 | 6 => stem[0] == b'.',
+        5 | 7 => stem[stem.len() - 2] == b'~',
+        _ => false,
+    }
+}
+
+/// Whether the directory holds a `.braid` or `.git` entry: another workspace
+/// or repository, which an untracked directory is not part of this one.
+fn holds_marker(dir: &Dir) -> bool {
     [braid_repo::DIR, ".git"]
         .iter()
-        .any(|marker| dir.symlink_metadata(Path::new(name).join(marker)).is_ok())
+        .any(|marker| dir.symlink_metadata(marker).is_ok())
 }
 
-/// The names in `dir`, sorted.
-fn sorted_names(root: &Root, dir: &Dir, path: &[u8]) -> Result<Vec<std::ffi::OsString>, Error> {
-    let mut names = Vec::new();
-    let entries = dir.entries().map_err(|err| root.error("read", path, err))?;
-    for entry in entries {
-        let entry = entry.map_err(|err| root.error("read", path, err))?;
-        names.push(entry.file_name());
+fn unrepresentable(path: &[u8]) -> Error {
+    Error::Unsafe {
+        path: path.to_vec(),
+        reason: "this platform cannot represent the name".to_owned(),
     }
-    names.sort();
-    Ok(names)
 }
 
 /// The change operation that sets a path to this file.
@@ -189,54 +785,11 @@ fn op_for(stat: &Stat, blob: ObjectId, size: u64) -> ChangeOp {
     }
 }
 
-/// One file hashed.
-struct Hashed {
-    path: Vec<u8>,
-    op: ChangeOp,
-    blob: ObjectId,
-    /// Its metadata, if it did not change while it was read.
-    stable: Option<Stat>,
-}
+/// What reading a file gave: the change that sets it, and its metadata if
+/// it did not change while it was read.
+type Hashed = (ChangeOp, Option<Stat>);
 
-/// Hashes the files of one directory. Files that vanished since the walk
-/// are left out.
-fn hash_directory(root: &Root, dir_path: &[u8], files: Vec<Miss>) -> Result<Vec<Hashed>, Error> {
-    let dir = match root.open_dir(dir_path)? {
-        Found::Here(dir) => dir,
-        Found::Missing | Found::Blocked(_) => return Ok(Vec::new()),
-    };
-    let mut out = Vec::with_capacity(files.len());
-    for miss in files {
-        let Some(os) = os_name(&miss.name) else {
-            continue;
-        };
-        let read = match miss.stat.kind {
-            StatKind::Symlink => hash_symlink(&dir, os),
-            _ => match hash_file(&dir, os) {
-                // Replaced by a symlink since the walk.
-                Err(_) if dir.symlink_metadata(os).is_ok_and(|meta| meta.is_symlink()) => {
-                    hash_symlink(&dir, os)
-                }
-                other => other,
-            },
-        };
-        match read {
-            Ok((op, blob, stable)) => out.push(Hashed {
-                path: miss.path,
-                op,
-                blob,
-                stable,
-            }),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(root.error("read", &miss.path, err)),
-        }
-    }
-    Ok(out)
-}
-
-type Read3 = (ChangeOp, ObjectId, Option<Stat>);
-
-fn hash_file(dir: &Dir, name: &OsStr) -> io::Result<Read3> {
+fn hash_file(dir: &Dir, name: &OsStr) -> io::Result<Hashed> {
     let mut file = open_file(dir, name)?;
     let before = Stat::of(&file.metadata()?);
     if before.kind != StatKind::File {
@@ -258,10 +811,10 @@ fn hash_file(dir: &Dir, name: &OsStr) -> io::Result<Read3> {
     let after = Stat::of(&file.metadata()?);
     let blob = hasher.finalize();
     let stable = (before == after && size == after.size).then_some(after);
-    Ok((op_for(&before, blob, size), blob, stable))
+    Ok((op_for(&before, blob, size), stable))
 }
 
-fn hash_symlink(dir: &Dir, name: &OsStr) -> io::Result<Read3> {
+fn hash_symlink(dir: &Dir, name: &OsStr) -> io::Result<Hashed> {
     let target = read_link(dir, name)?;
     let blob = ObjectId::hash(Kind::Blob, &target);
     Ok((
@@ -269,7 +822,6 @@ fn hash_symlink(dir: &Dir, name: &OsStr) -> io::Result<Read3> {
             blob,
             size: target.len() as u64,
         },
-        blob,
         None,
     ))
 }
@@ -290,21 +842,129 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
-    use std::time::Duration;
+    use std::path::Path;
 
-    fn blob(content: &str) -> ChangeOp {
-        ChangeOp::File {
-            blob: ObjectId::hash(Kind::Blob, content.as_bytes()),
-            size: content.len() as u64,
+    use braid_engine::EMPTY_TREE;
+    use braid_format::{Change, MemoryObjects};
+
+    use crate::cache;
+
+    /// Objects in memory, counting the directories read.
+    #[derive(Default)]
+    struct Counting {
+        objects: MemoryObjects,
+        trees: AtomicUsize,
+    }
+
+    impl Objects for Counting {
+        type Error = std::convert::Infallible;
+
+        fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Self::Error> {
+            let found = self.objects.get(id)?;
+            if matches!(found, Some((Kind::Tree, _))) {
+                self.trees.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(found)
+        }
+
+        fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Self::Error> {
+            self.objects.put(kind, payload)
         }
     }
 
-    /// A directory with a `.braid` file, as every workspace has.
-    fn workspace() -> (tempfile::TempDir, Root) {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(braid_repo::DIR), b"braid-workspace 1\n").unwrap();
-        let root = Root::open(dir.path()).unwrap();
-        (dir, root)
+    /// A working copy with a `.braid` file, as every workspace has, a
+    /// directory for its stat cache, and objects for its base.
+    struct Fixture {
+        dir: tempfile::TempDir,
+        state: tempfile::TempDir,
+        root: Root,
+        objects: Counting,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join(braid_repo::DIR), b"braid-workspace 1\n").unwrap();
+            let root = Root::open(dir.path()).unwrap();
+            Fixture {
+                dir,
+                state: tempfile::tempdir().unwrap(),
+                root,
+                objects: Counting::default(),
+            }
+        }
+
+        fn at(&self, path: &str) -> std::path::PathBuf {
+            self.dir.path().join(path)
+        }
+
+        fn file(&self, content: &str) -> ChangeOp {
+            ChangeOp::File {
+                blob: self.objects.put(Kind::Blob, content.as_bytes()).unwrap(),
+                size: content.len() as u64,
+            }
+        }
+
+        /// A base tree with these files, also written into the working copy
+        /// and dated in the past, as a checkout leaves them.
+        fn base(&self, files: &[(&str, &str)]) -> ObjectId {
+            let changes: Vec<Change> = files
+                .iter()
+                .map(|(path, content)| {
+                    let full = self.at(path);
+                    fs::create_dir_all(full.parent().unwrap()).unwrap();
+                    fs::write(&full, content).unwrap();
+                    set_mtime(&full, past());
+                    Change {
+                        path: path.as_bytes().to_vec(),
+                        op: self.file(content),
+                    }
+                })
+                .collect();
+            braid_engine::apply(&self.objects, EMPTY_TREE, &changes).unwrap()
+        }
+
+        /// Scans against `base`, with the stat cache of the previous scan,
+        /// and saves the new one. Also returns whether it was saved, and how
+        /// many directories of the base were read.
+        fn scan_in(&self, base: ObjectId, held: usize) -> (Vec<Delta>, bool, usize) {
+            let old = Cache::load(self.state.path());
+            self.objects.trees.store(0, Ordering::Relaxed);
+            let found = scan_holding(
+                &self.root,
+                &self.objects,
+                base,
+                &old,
+                FileSystem::default(),
+                held,
+            )
+            .unwrap();
+            let next = &found.cache;
+            let saved = next.changed;
+            if saved {
+                cache::save(self.state.path(), next.time, &next.records).unwrap();
+            }
+            let reads = self.objects.trees.load(Ordering::Relaxed);
+            (found.deltas, saved, reads)
+        }
+
+        fn scan(&self, base: ObjectId) -> (Vec<Delta>, bool, usize) {
+            self.scan_in(base, HELD_HANDLES)
+        }
+
+        /// Waits until the file system's clock has moved on from every
+        /// change made so far: records the next scan makes of them are then
+        /// not racy, whatever the clock's granularity.
+        fn settle(&self) {
+            let then = self.root.file_system_now().unwrap();
+            while self.root.file_system_now().unwrap() <= then {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    fn past() -> SystemTime {
+        SystemTime::now() - Duration::from_secs(30)
     }
 
     fn set_mtime(path: &Path, time: SystemTime) {
@@ -316,94 +976,285 @@ mod tests {
             .unwrap();
     }
 
+    fn blob(content: &str) -> ChangeOp {
+        ChangeOp::File {
+            blob: ObjectId::hash(Kind::Blob, content.as_bytes()),
+            size: content.len() as u64,
+        }
+    }
+
+    /// The deltas as `path old>new`, with `-` for nothing and `f` for a
+    /// file, `l` for a symlink and `g` for a gitlink.
+    fn show(deltas: &[Delta]) -> Vec<String> {
+        let kind = |op: &Option<ChangeOp>| match op {
+            None => "-",
+            Some(ChangeOp::Symlink { .. }) => "l",
+            Some(ChangeOp::Gitlink { .. }) => "g",
+            Some(_) => "f",
+        };
+        deltas
+            .iter()
+            .map(|delta| {
+                let path = String::from_utf8_lossy(&delta.path);
+                format!("{path} {}>{}", kind(&delta.old), kind(&delta.new))
+            })
+            .collect()
+    }
+
     #[test]
     fn unchanged_files_are_not_read_again() {
-        let (dir, root) = workspace();
-        let path = dir.path().join("a.txt");
+        let f = Fixture::new();
+        let path = f.at("a.txt");
         fs::write(&path, "one").unwrap();
-        let past = SystemTime::now() - Duration::from_secs(30);
-        set_mtime(&path, past);
-        let base = Flat::default();
-
-        let first = scan(&root, &base, &Cache::default()).unwrap();
-        assert_eq!(first.files[&b"a.txt".to_vec()], blob("one"));
-        assert!(first.cache.entries.contains_key(b"a.txt".as_slice()));
+        set_mtime(&path, past());
+        let (first, _, _) = f.scan(EMPTY_TREE);
+        assert_eq!(first[0].new, Some(blob("one")));
 
         // Rewrite the content in place behind the cache's back: same inode,
         // same size, same modification time. The cache vouches for it, so
         // the file is not read, and the old blob is what the scan reports.
-        let mut file = fs::File::options().write(true).open(&path).unwrap();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        file.write_all(b"two").unwrap();
-        drop(file);
-        set_mtime(&path, past);
-        let second = scan(&root, &base, &first.cache).unwrap();
-        assert_eq!(second.files[&b"a.txt".to_vec()], blob("one"));
+        let later = past() + Duration::from_secs(1);
+        let rewrite = |content: &[u8]| {
+            let mut file = fs::File::options().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(content).unwrap();
+            drop(file);
+            set_mtime(&path, later);
+        };
+        rewrite(b"two");
+        let (second, _, _) = f.scan(EMPTY_TREE);
+        assert_eq!(second[0].new, Some(blob("two")), "the time changed");
+        rewrite(b"one");
+        let (third, _, _) = f.scan(EMPTY_TREE);
+        assert_eq!(third[0].new, Some(blob("two")), "vouched for by the cache");
 
         // A file whose time is not strictly older than the cache's scan is
         // read again, whatever the rest of its metadata says.
-        let (seconds, nanos) = second.cache.time;
-        let same_instant = UNIX_EPOCH + Duration::new(seconds as u64, nanos);
-        set_mtime(&path, same_instant);
-        let mut racy = second.cache.clone();
-        racy.entries.get_mut(b"a.txt".as_slice()).unwrap().mtime = (seconds, nanos);
-        let third = scan(&root, &base, &racy).unwrap();
-        assert_eq!(third.files[&b"a.txt".to_vec()], blob("two"));
+        let (seconds, nanos) = Cache::load(f.state.path()).time();
+        set_mtime(&path, UNIX_EPOCH + Duration::new(seconds as u64, nanos));
+        let (fourth, _, _) = f.scan(EMPTY_TREE);
+        assert_eq!(fourth[0].new, Some(blob("one")));
     }
 
     #[test]
     fn what_the_walk_skips() {
-        let (dir, root) = workspace();
-        let at = |p: &str| dir.path().join(p);
-        fs::write(at(".gitignore"), "*.log\nbuild/\n").unwrap();
-        fs::write(at("app.log"), "ignored").unwrap();
-        fs::write(at("kept.log"), "tracked, so not ignored").unwrap();
-        fs::create_dir_all(at("build/sub")).unwrap();
-        fs::write(at("build/out.o"), "ignored").unwrap();
-        fs::write(at("build/sub/tracked.txt"), "tracked").unwrap();
-        fs::create_dir_all(at(".git")).unwrap();
-        fs::write(at(".git/config"), "skipped").unwrap();
-        fs::write(at(".braid-tmp-0123"), "scratch").unwrap();
-        fs::create_dir_all(at("nested")).unwrap();
-        fs::write(at("nested/.braid"), "another workspace").unwrap();
-        fs::write(at("nested/file"), "not ours").unwrap();
-        fs::write(at("src.rs"), "code").unwrap();
+        let f = Fixture::new();
+        let base = f.base(&[
+            ("kept.log", "old"),
+            ("build/sub/tracked.txt", "tracked"),
+            (".gitignore", "*.log\nbuild/\n"),
+        ]);
+        let write = |path: &str, content: &str| {
+            fs::create_dir_all(f.at(path).parent().unwrap()).unwrap();
+            fs::write(f.at(path), content).unwrap();
+        };
+        write("app.log", "ignored");
+        write("kept.log", "tracked, so not ignored");
+        write("build/out.o", "ignored");
+        write("build/new/file", "ignored");
+        write(".git/config", "skipped");
+        write(".braid-tmp-0123", "scratch");
+        write("nested/.braid", "another workspace");
+        write("nested/file", "not ours");
+        write("repo/.git/HEAD", "another repository");
+        write("src.rs", "code");
 
-        let mut base = Flat::default();
-        base.files.insert(b"kept.log".to_vec(), blob("old"));
-        base.files
-            .insert(b"build/sub/tracked.txt".to_vec(), blob("tracked"));
-        base.dirs.insert(b"build".to_vec());
-        base.dirs.insert(b"build/sub".to_vec());
-
-        let found = scan(&root, &base, &Cache::default()).unwrap();
-        let paths: Vec<String> = found
-            .files
-            .keys()
-            .map(|p| String::from_utf8(p.clone()).unwrap())
-            .collect();
-        assert_eq!(
-            paths,
-            [".gitignore", "build/sub/tracked.txt", "kept.log", "src.rs"]
-        );
+        let (deltas, _, _) = f.scan(base);
+        assert_eq!(show(&deltas), ["kept.log f>f", "src.rs ->f"]);
     }
 
     #[cfg(unix)]
     #[test]
     fn symlinks_are_read_not_followed() {
-        let (dir, root) = workspace();
+        let f = Fixture::new();
+        let base = f.base(&[("dir/x", "x")]);
         let outside = tempfile::tempdir().unwrap();
-        fs::write(outside.path().join("secret"), "outside").unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
-        let found = scan(&root, &Flat::default(), &Cache::default()).unwrap();
+        fs::write(outside.path().join("x"), "outside").unwrap();
+        fs::remove_dir_all(f.at("dir")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), f.at("dir")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("x"), f.at("link")).unwrap();
+        let (deltas, _, _) = f.scan(base);
+        assert_eq!(show(&deltas), ["dir ->l", "dir/x f>-", "link ->l"]);
         let target = outside.path().as_os_str().as_encoded_bytes().to_vec();
-        assert_eq!(found.files.len(), 1);
         assert_eq!(
-            found.files[&b"link".to_vec()],
-            ChangeOp::Symlink {
+            deltas[0].new,
+            Some(ChangeOp::Symlink {
                 blob: ObjectId::hash(Kind::Blob, &target),
                 size: target.len() as u64,
-            }
+            })
         );
+    }
+
+    #[test]
+    fn clean_directories_are_not_compared_again() {
+        let f = Fixture::new();
+        let base = f.base(&[("a/x", "1"), ("a/y", "2"), ("b/z", "3"), ("top", "4")]);
+        f.settle();
+        let (deltas, saved, reads) = f.scan(base);
+        assert!(deltas.is_empty());
+        assert!(saved);
+        assert_eq!(reads, 3, "every directory of the base, once");
+
+        // Nothing changed: no directory of the base is read, and the cache
+        // is left as it is.
+        let (deltas, saved, reads) = f.scan(base);
+        assert!(deltas.is_empty());
+        assert_eq!((saved, reads), (false, 0));
+
+        // An edit in one directory reads that directory's tree only.
+        fs::write(f.at("a/x"), "edited").unwrap();
+        f.settle();
+        let (deltas, saved, reads) = f.scan(base);
+        assert_eq!(show(&deltas), ["a/x f>f"]);
+        assert_eq!((saved, reads), (true, 1));
+        let (deltas, saved, reads) = f.scan(base);
+        assert_eq!(show(&deltas), ["a/x f>f"]);
+        assert_eq!((saved, reads), (false, 1));
+    }
+
+    #[test]
+    fn entries_added_or_removed_in_a_clean_directory_are_seen() {
+        let f = Fixture::new();
+        let base = f.base(&[("a/x", "1"), ("a/y", "2"), ("b/z", "3")]);
+        f.scan(base);
+        let a_time = fs::metadata(f.at("a")).unwrap().modified().unwrap();
+        let keep_time = |path: &str| {
+            fs::File::open(f.at(path))
+                .unwrap()
+                .set_modified(a_time)
+                .unwrap()
+        };
+
+        // A file added, the directory's time set back as a coarse clock
+        // would leave it.
+        fs::write(f.at("a/new"), "new").unwrap();
+        keep_time("a");
+        let (deltas, _, _) = f.scan(base);
+        assert_eq!(show(&deltas), ["a/new ->f"]);
+
+        // A file removed, the same way.
+        fs::remove_file(f.at("a/y")).unwrap();
+        keep_time("a");
+        let (deltas, _, _) = f.scan(base);
+        assert_eq!(show(&deltas), ["a/new ->f", "a/y f>-"]);
+
+        // Back as it was: clean again.
+        fs::remove_file(f.at("a/new")).unwrap();
+        fs::write(f.at("a/y"), "2").unwrap();
+        keep_time("a");
+        let (deltas, _, _) = f.scan(base);
+        assert!(deltas.is_empty());
+
+        // A directory of the base replaced by a file, and a file by a
+        // directory.
+        fs::remove_dir_all(f.at("b")).unwrap();
+        fs::write(f.at("b"), "now a file").unwrap();
+        fs::remove_file(f.at("a/x")).unwrap();
+        fs::create_dir(f.at("a/x")).unwrap();
+        fs::write(f.at("a/x/inside"), "i").unwrap();
+        let (deltas, _, _) = f.scan(base);
+        assert_eq!(
+            show(&deltas),
+            ["a/x f>-", "a/x/inside ->f", "b ->f", "b/z f>-"]
+        );
+    }
+
+    #[test]
+    fn a_new_base_reads_only_the_directories_that_changed() {
+        let f = Fixture::new();
+        let first = f.base(&[("a/x", "1"), ("b/z", "3"), ("c/d/e", "5")]);
+        f.scan(first);
+        // The same working copy against a base where a/x and c/d/e differ.
+        let second = braid_engine::apply(
+            &f.objects,
+            first,
+            &[
+                Change {
+                    path: b"a/x".to_vec(),
+                    op: f.file("one"),
+                },
+                Change {
+                    path: b"c/d/e".to_vec(),
+                    op: f.file("five"),
+                },
+            ],
+        )
+        .unwrap();
+        let (deltas, saved, reads) = f.scan(second);
+        assert_eq!(show(&deltas), ["a/x f>f", "c/d/e f>f"]);
+        // The root, a, c and c/d: not b.
+        assert_eq!((saved, reads), (true, 4));
+        assert_eq!(deltas[0].old, Some(blob("one")));
+        assert_eq!(deltas[0].new, Some(blob("1")));
+    }
+
+    #[test]
+    fn gitlinks_are_there_or_not() {
+        let f = Fixture::new();
+        let gitlink = ChangeOp::Gitlink {
+            commit: braid_format::GitId::Sha1([7; 20]),
+        };
+        let base = braid_engine::apply(
+            &f.objects,
+            EMPTY_TREE,
+            &[
+                Change {
+                    path: b"vendor/lib".to_vec(),
+                    op: gitlink.clone(),
+                },
+                Change {
+                    path: b"vendor/README".to_vec(),
+                    op: f.file("r"),
+                },
+            ],
+        )
+        .unwrap();
+        fs::create_dir_all(f.at("vendor/lib")).unwrap();
+        fs::write(f.at("vendor/lib/inside"), "not ours").unwrap();
+        fs::write(f.at("vendor/README"), "r").unwrap();
+        for _ in 0..2 {
+            let (deltas, _, _) = f.scan(base);
+            assert!(deltas.is_empty(), "{:?}", show(&deltas));
+        }
+        fs::remove_dir_all(f.at("vendor/lib")).unwrap();
+        let (deltas, _, _) = f.scan(base);
+        assert_eq!(show(&deltas), ["vendor/lib g>-"]);
+        fs::write(f.at("vendor/lib"), "a file").unwrap();
+        let (deltas, _, _) = f.scan(base);
+        assert_eq!(show(&deltas), ["vendor/lib g>f"]);
+    }
+
+    #[test]
+    fn directories_reopened_from_the_root_read_the_same() {
+        let f = Fixture::new();
+        let base = f.base(&[("a/b/c/d", "1"), ("a/b/e", "2"), ("f/g", "3"), ("h", "4")]);
+        fs::write(f.at("a/b/c/d"), "edited").unwrap();
+        fs::write(f.at("f/new"), "new").unwrap();
+        fs::remove_file(f.at("h")).unwrap();
+        let (held, _, _) = f.scan_in(base, HELD_HANDLES);
+        let (reopened, _, _) = f.scan_in(base, 0);
+        assert_eq!(show(&held), ["a/b/c/d f>f", "f/new ->f", "h f>-"]);
+        assert_eq!(held, reopened);
+    }
+
+    #[test]
+    fn quick_test_for_reserved_names() {
+        for name in [
+            ".git",
+            ".braid",
+            ".GIT",
+            "Git~1",
+            "braid~2",
+            ".git.",
+            ".git::$INDEX_ALLOCATION",
+        ] {
+            assert!(may_be_reserved(name.as_bytes()), "{name}");
+            assert!(skipped(name.as_bytes()), "{name}");
+        }
+        for name in ["f00.txt", "src", "main.rs", ".github", "README.md"] {
+            assert!(!skipped(name.as_bytes()), "{name}");
+        }
+        assert!(skipped(".g\u{200c}it".as_bytes()));
+        assert!(skipped(b".braid-tmp-0123"));
     }
 }

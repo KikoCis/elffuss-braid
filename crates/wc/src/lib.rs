@@ -23,7 +23,8 @@
 //!
 //! - [`Workspace::create`] writes a tree into a new directory.
 //! - [`Workspace::status`] compares the working copy with the base, using
-//!   the stat cache so that unchanged files are not read again.
+//!   the stat cache so that unchanged files are not read again, and
+//!   directories that still match the base are not compared with it again.
 //! - [`Workspace::commit`] records the working copy as a changeset on the
 //!   base. There is no staging area.
 //! - [`Workspace::land`] puts the workspace's changesets on its branch in

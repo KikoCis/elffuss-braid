@@ -10,14 +10,18 @@
 //! directory cannot be brought back by a later `!` rule, since the walk does
 //! not go into ignored directories. Tracked files are never ignored: the
 //! walk checks them whatever the rules say.
+//!
+//! The walk reads a directory's entries once, and opens an ignore file only
+//! where the listing has one.
 
 use std::io::Read;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cap_std::fs::Dir;
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+use crate::fsprobe::FileSystem;
 use crate::paths::os_name;
 use crate::safe::open_file;
 
@@ -31,19 +35,50 @@ pub(crate) struct Rules {
     dir: Vec<u8>,
     /// Its matchers, highest precedence first.
     matchers: Vec<Gitignore>,
-    parent: Option<Rc<Rules>>,
+    parent: Option<Arc<Rules>>,
 }
 
 /// The rules in force in a directory.
-pub(crate) type Chain = Option<Rc<Rules>>;
+pub(crate) type Chain = Option<Arc<Rules>>;
 
-/// The rules in force inside `dir`, whose path is `path`: those of its own
-/// ignore files, if it has any, on top of `parent`. Ignore files that are
-/// symlinks, unreadable, or not UTF-8 lines are skipped.
-pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain) -> Chain {
+/// A directory's ignore files, as named in its listing, in the order of
+/// [`FILES`].
+pub(crate) type IgnoreFiles<'n> = [Option<&'n [u8]>; 2];
+
+/// The ignore files among `names`, the entries of one directory: each
+/// entry that `fs` takes for `.braidignore` or `.gitignore`, as it would
+/// find it by that name.
+pub(crate) fn ignore_files<'n>(
+    fs: FileSystem,
+    names: impl Iterator<Item = &'n [u8]>,
+) -> IgnoreFiles<'n> {
+    let mut found: IgnoreFiles<'n> = [None; 2];
+    for name in names {
+        // Folding maps ASCII letters to ASCII letters and changes no length
+        // here, so only a dot name of the same length can be one of them.
+        for (slot, wanted) in found.iter_mut().zip(FILES) {
+            if slot.is_none()
+                && name.len() == wanted.len()
+                && name.first() == Some(&b'.')
+                && fs.fold(name) == fs.fold(wanted.as_bytes())
+            {
+                *slot = Some(name);
+            }
+        }
+    }
+    found
+}
+
+/// The rules in force inside `dir`, whose path is `path`: those of its
+/// ignore files `files` (see [`ignore_files`]) on top of `parent`. Ignore
+/// files that are symlinks, unreadable, or not UTF-8 lines are skipped.
+pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain, files: &IgnoreFiles<'_>) -> Chain {
     let mut matchers = Vec::new();
-    for name in FILES {
-        let Ok(mut file) = open_file(dir, name.as_ref()) else {
+    for name in files {
+        let Some(os) = name.and_then(os_name) else {
+            continue;
+        };
+        let Ok(mut file) = open_file(dir, os) else {
             continue;
         };
         let mut text = Vec::new();
@@ -66,7 +101,7 @@ pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain) -> Chain {
     if matchers.is_empty() {
         return parent.clone();
     }
-    Some(Rc::new(Rules {
+    Some(Arc::new(Rules {
         dir: path.to_vec(),
         matchers,
         parent: parent.clone(),
@@ -104,6 +139,9 @@ mod tests {
         Dir::open_ambient_dir(path, cap_std::ambient_authority()).unwrap()
     }
 
+    const BOTH: IgnoreFiles<'static> = [Some(b".braidignore"), Some(b".gitignore")];
+    const GIT: IgnoreFiles<'static> = [None, Some(b".gitignore")];
+
     #[test]
     fn rules_nest_and_negate() {
         let temp = tempfile::tempdir().unwrap();
@@ -112,7 +150,7 @@ mod tests {
         std::fs::write(temp.path().join("sub/.gitignore"), "!keep.log\n").unwrap();
         std::fs::write(temp.path().join("sub/.braidignore"), "secret\n").unwrap();
 
-        let root = enter(&dir(temp.path()), b"", &None);
+        let root = enter(&dir(temp.path()), b"", &None, &GIT);
         assert!(is_ignored(&root, b"a.log", false));
         assert!(is_ignored(&root, b"build", true));
         assert!(!is_ignored(&root, b"build", false));
@@ -120,14 +158,34 @@ mod tests {
         assert!(!is_ignored(&root, b"sub/top.txt", false));
         assert!(!is_ignored(&root, b"a.txt", false));
 
-        let sub = enter(&dir(&temp.path().join("sub")), b"sub", &root);
+        let sub = enter(&dir(&temp.path().join("sub")), b"sub", &root, &BOTH);
         assert!(is_ignored(&sub, b"sub/x.log", false));
         assert!(!is_ignored(&sub, b"sub/keep.log", false));
         assert!(is_ignored(&sub, b"sub/secret", false));
         // Directories without ignore files share their parent's rules.
         std::fs::create_dir(temp.path().join("plain")).unwrap();
-        let plain = enter(&dir(&temp.path().join("plain")), b"plain", &root);
-        assert!(Rc::ptr_eq(plain.as_ref().unwrap(), root.as_ref().unwrap()));
+        let plain = enter(
+            &dir(&temp.path().join("plain")),
+            b"plain",
+            &root,
+            &[None, None],
+        );
+        assert!(Arc::ptr_eq(plain.as_ref().unwrap(), root.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn ignore_files_are_found_in_the_listing() {
+        let exact = FileSystem::default();
+        let names: [&[u8]; 4] = [b".gitignore", b"a.txt", b".braidignore", b".GITIGNORE"];
+        assert_eq!(ignore_files(exact, names.into_iter()), BOTH);
+        let only: [&[u8]; 2] = [b"x", b".GitIgnore"];
+        assert_eq!(ignore_files(exact, only.into_iter()), [None, None]);
+        // Where case is ignored, the file is found under any case, as an
+        // open by its name would find it.
+        assert_eq!(
+            ignore_files(FileSystem::FORGIVING, only.into_iter()),
+            [None, Some(&b".GitIgnore"[..])]
+        );
     }
 
     #[cfg(unix)]
@@ -138,7 +196,7 @@ mod tests {
         std::fs::write(outside.path().join("rules"), "*\n").unwrap();
         std::os::unix::fs::symlink(outside.path().join("rules"), temp.path().join(".gitignore"))
             .unwrap();
-        let root = enter(&dir(temp.path()), b"", &None);
+        let root = enter(&dir(temp.path()), b"", &None, &GIT);
         assert!(!is_ignored(&root, b"anything", false));
     }
 }
