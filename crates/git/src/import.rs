@@ -5,9 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use braid_format::name::forbidden_as_symlink;
-use braid_format::tree::validate_entry;
 use braid_format::{
     ChangesetParts, Directory, Entry, EntryKind, GitId, Kind, ObjectId, Objects, Signature,
     build_directory, validate_name,
@@ -16,7 +16,7 @@ use braid_format::{
 use crate::diff;
 use crate::error::Error;
 use crate::export::Exporter;
-use crate::fetch;
+use crate::fetch::{self, TreeCache};
 use crate::map::{GitMap, TagEntry};
 use crate::oid::{GitKind, GitOid};
 use crate::raw::{self, EntryType};
@@ -111,6 +111,7 @@ pub fn import<O: Objects>(
         empty_tree: build_directory(Vec::new())
             .expect("the empty directory is valid")
             .root(),
+        trees: TreeCache::default(),
     };
 
     // What the refs point to: commits to walk from, trees and blobs that tags
@@ -186,6 +187,8 @@ struct Importer<'r, 'o, 'm, O: Objects> {
     roots: HashMap<ObjectId, (ObjectId, Option<ObjectId>)>,
     /// The braid id of the empty directory.
     empty_tree: ObjectId,
+    /// Directories read back from `objects`.
+    trees: TreeCache,
 }
 
 /// A git tree being converted, waiting for its subtrees.
@@ -212,7 +215,7 @@ struct Frame {
 struct Similar {
     tree: Option<ObjectId>,
     /// Its entries, read on first use.
-    entries: Option<Vec<Entry>>,
+    entries: Option<Arc<[Entry]>>,
 }
 
 impl Similar {
@@ -224,35 +227,50 @@ impl Similar {
     }
 
     /// The entry named `name`, reading the directory the first time.
-    fn entry<O: Objects>(&mut self, objects: &O, name: &[u8]) -> Result<Option<EntryKind>, Error> {
-        let entries = self.entries(objects)?;
+    fn entry<O: Objects>(
+        &mut self,
+        objects: &O,
+        trees: &TreeCache,
+        name: &[u8],
+    ) -> Result<Option<EntryKind>, Error> {
+        let entries = self.entries(objects, trees)?;
         Ok(entries
             .binary_search_by(|entry| entry.name.as_slice().cmp(name))
             .ok()
             .map(|at| entries[at].kind.clone()))
     }
 
-    fn entries<O: Objects>(&mut self, objects: &O) -> Result<&[Entry], Error> {
+    fn entries<O: Objects>(&mut self, objects: &O, trees: &TreeCache) -> Result<&[Entry], Error> {
         if self.entries.is_none() {
             self.entries = Some(match self.tree {
-                Some(tree) => fetch::tree_entries(objects, tree)?,
-                None => Vec::new(),
+                Some(tree) => trees.entries(objects, tree)?,
+                None => Vec::new().into(),
             });
         }
         Ok(self.entries.as_deref().unwrap_or_default())
     }
 
     /// The tree at `name` below this one.
-    fn subtree<O: Objects>(&mut self, objects: &O, name: &[u8]) -> Result<Similar, Error> {
-        Ok(Similar::new(match self.entry(objects, name)? {
+    fn subtree<O: Objects>(
+        &mut self,
+        objects: &O,
+        trees: &TreeCache,
+        name: &[u8],
+    ) -> Result<Similar, Error> {
+        Ok(Similar::new(match self.entry(objects, trees, name)? {
             Some(EntryKind::Tree { tree }) => Some(tree),
             _ => None,
         }))
     }
 
     /// The blob of the file, executable or symlink at `name`.
-    fn blob<O: Objects>(&mut self, objects: &O, name: &[u8]) -> Result<Option<ObjectId>, Error> {
-        Ok(match self.entry(objects, name)? {
+    fn blob<O: Objects>(
+        &mut self,
+        objects: &O,
+        trees: &TreeCache,
+        name: &[u8],
+    ) -> Result<Option<ObjectId>, Error> {
+        Ok(match self.entry(objects, trees, name)? {
             Some(
                 EntryKind::File { blob, .. }
                 | EntryKind::Executable { blob, .. }
@@ -269,6 +287,7 @@ impl Similar {
     fn nodes<O: Objects>(
         &mut self,
         objects: &O,
+        trees: &TreeCache,
         directory: &Directory,
     ) -> Result<Vec<Option<ObjectId>>, Error> {
         let count = directory.nodes.len();
@@ -277,7 +296,7 @@ impl Similar {
             return Ok(similar);
         };
         if count > 1
-            && let Ok(old) = build_directory(self.entries(objects)?.to_vec())
+            && let Ok(old) = build_directory(self.entries(objects, trees)?.to_vec())
             && old.nodes.len() == count
         {
             return Ok(old.nodes.iter().map(|(id, _)| Some(*id)).collect());
@@ -392,7 +411,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
         // what the store may keep new trees, blobs and bytes as deltas
         // against.
         let root = self.convert_tree(fields.tree, oid, base)?;
-        let changes = diff::changes(self.objects, base, root)?;
+        let changes = diff::changes(self.objects, &self.trees, base, root)?;
         let origin = fetch::put_hinted(self.objects, Kind::Blob, &bytes, base_origin.as_ref())?;
         let unknown = || Signature {
             name: Vec::new(),
@@ -428,7 +447,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             kind: GitKind::Commit,
             detail,
         };
-        let mut exporter = Exporter::new(self.objects, &*self.map);
+        let mut exporter = Exporter::with_cache(self.objects, &*self.map, &self.trees);
         let (exported, _) = exporter
             .commit(&changeset)
             .map_err(|err| verification(err.to_string()))?;
@@ -489,7 +508,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                         }
                         None => {
                             let path = join(&top.path, &name);
-                            let similar = top.similar.subtree(self.objects, &name)?;
+                            let similar = top.similar.subtree(self.objects, &self.trees, &name)?;
                             let child = self.open_tree(oid, path, commit, similar)?;
                             stack.push(child);
                             continue;
@@ -502,7 +521,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                         let (blob, size) = match self.map.blob(&oid) {
                             Some(found) => found,
                             None => {
-                                let similar = top.similar.blob(self.objects, &name)?;
+                                let similar = top.similar.blob(self.objects, &self.trees, &name)?;
                                 self.import_blob(oid, similar)?
                             }
                         };
@@ -606,6 +625,11 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
         // Braid names are unique: of duplicate entries, the last one written
         // stays, which is the one git puts in the index and checks out. The
         // raw bytes keep the others.
+        //
+        // Every entry passed `validate_entry`'s checks already: `open_tree`
+        // checked each name, and each name of kind symlink, of the git tree
+        // these entries come from, and kinds carry over (only a git symlink
+        // becomes a braid symlink).
         let written = done.len();
         let mut names = HashSet::with_capacity(written);
         let entries: Vec<Entry> = done
@@ -614,23 +638,16 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             .filter(|entry| names.insert(entry.name.clone()))
             .collect();
         let unique = entries.len() == written;
-        for entry in &entries {
-            validate_entry(entry).map_err(|err| Error::RefusedPath {
-                commit,
-                path: join(&path, &entry.name),
-                reason: err.to_string(),
-            })?;
-        }
         let directory = build_directory(entries).map_err(|err| Error::RefusedPath {
             commit,
             path: path.clone(),
             reason: err.to_string(),
         })?;
-        let hints = similar.nodes(self.objects, &directory)?;
+        let hints = similar.nodes(self.objects, &self.trees, &directory)?;
         for ((id, bytes), hint) in directory.nodes.iter().zip(hints) {
             // A node that did not change is its own old version: no hint.
             let hint = hint.filter(|hint| hint != id);
-            fetch::put_hinted(self.objects, Kind::Tree, bytes, hint.as_ref())?;
+            fetch::put_known(self.objects, Kind::Tree, bytes, hint.as_ref(), *id)?;
         }
         let tree = directory.root();
 
@@ -641,7 +658,10 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
         let canonical = canonical_subtrees
             && unique
             && !dropped_empty
-            && Exporter::new(self.objects, &*self.map).tree(&tree)?.1 == raw;
+            && Exporter::with_cache(self.objects, &*self.map, &self.trees)
+                .tree(&tree)?
+                .1
+                == raw;
         let raw_blob = if canonical {
             None
         } else {
