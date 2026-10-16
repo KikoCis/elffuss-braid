@@ -20,6 +20,10 @@ use crate::oid::{GitKind, GitOid};
 /// Memory for the cache of decoded pack deltas, per open repository.
 const PACK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+/// The same, for each extra handle that a thread of a parallel import reads
+/// through.
+const WORKER_PACK_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Whether `name` can be the name of a git branch: `refs/heads/<name>`
 /// follows git's rules for ref names (no `..`, no `:`, `?`, `*`, `[`, `\`,
 /// `^`, `~`, space or control character, no component that starts with `.`
@@ -60,6 +64,20 @@ impl GitRepo {
             ))
         });
         Ok(Self { repo })
+    }
+
+    /// Another handle on the same repository, for another thread: it reads
+    /// the same objects the same way (replacements ignored), with a smaller
+    /// cache of its own.
+    pub(crate) fn worker_handle(&self) -> Self {
+        let mut repo = self.repo.clone();
+        repo.objects.ignore_replacements = true;
+        repo.objects.set_pack_cache(|| {
+            Box::new(gix::odb::pack::cache::lru::MemoryCappedHashmap::new(
+                WORKER_PACK_CACHE_BYTES,
+            ))
+        });
+        Self { repo }
     }
 
     /// Creates an empty bare repository at `path` and opens it.

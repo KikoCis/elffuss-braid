@@ -271,7 +271,18 @@ impl<'a, O: Objects> Exporter<'a, O> {
     /// The canonical git tree of a braid tree: its id and its bytes.
     pub fn tree(&mut self, tree: &ObjectId) -> Result<(GitOid, Vec<u8>), Error> {
         let entries = self.entries(*tree)?;
-        let bytes = self.encode_entries(tree, &entries)?;
+        self.tree_of(tree, &entries)
+    }
+
+    /// [`tree`](Self::tree) for the braid tree `tree` whose entries the caller
+    /// has already: those it was just built from, which is what reading it
+    /// back from the store gives.
+    pub(crate) fn tree_of(
+        &mut self,
+        tree: &ObjectId,
+        entries: &[Entry],
+    ) -> Result<(GitOid, Vec<u8>), Error> {
+        let bytes = self.encode_entries(tree, entries)?;
         let oid = GitOid::for_object(GitKind::Tree, &bytes)?;
         match self.known_tree(tree) {
             Some(known) if known != oid => Err(Error::BadBraidObject {

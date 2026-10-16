@@ -43,7 +43,7 @@ pub use export::{
     Exporter, RefTarget, RefUpdate, WriteReport, export_blob, export_commit, export_object,
     export_tree, write_to_repo, write_to_repo_recording,
 };
-pub use import::{ImportOptions, ImportReport, ImportedRef, import};
+pub use import::{ImportOptions, ImportReport, ImportedRef, import, import_parallel};
 pub use map::{GitMap, MapCounts, Pairings, TagEntry};
 pub use oid::{GitKind, GitOid, ParseGitOidError};
 pub use repo::is_branch_name;

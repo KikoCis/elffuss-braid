@@ -12,6 +12,7 @@
 //! importing the same repository again, and exporting the same changesets
 //! again, rebuilds it.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
 use braid_format::codec::{Reader, put_bytes, put_id, put_uv};
@@ -28,6 +29,42 @@ pub struct TagEntry {
     pub target: GitOid,
     /// The kind of that object.
     pub target_kind: GitKind,
+}
+
+/// What one insert added to a map, with what it replaced: enough to take it
+/// back with [`GitMap::take_back`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Added {
+    Commit {
+        commit: GitOid,
+        changeset: ObjectId,
+        /// The commit the changeset mapped back to before, if any.
+        replaced: Option<GitOid>,
+    },
+    Tree {
+        tree: GitOid,
+        braid: ObjectId,
+        /// Whether the tree became the canonical tree of its braid tree.
+        canonical: bool,
+    },
+    Blob {
+        blob: GitOid,
+        braid: ObjectId,
+        /// The git blob the braid blob mapped back to before, if any.
+        replaced: Option<GitOid>,
+    },
+}
+
+/// Puts back the value `key` had before an insert replaced it, or removes it.
+fn restore<K: core::hash::Hash + Eq, V>(map: &mut HashMap<K, V>, key: K, before: Option<V>) {
+    match before {
+        Some(value) => {
+            map.insert(key, value);
+        }
+        None => {
+            map.remove(&key);
+        }
+    }
 }
 
 /// How many objects of each kind a map holds, or an operation added to it.
@@ -294,28 +331,92 @@ impl GitMap {
         true
     }
 
-    pub(crate) fn insert_commit(&mut self, commit: GitOid, changeset: ObjectId) {
-        self.commits.insert(commit, changeset);
-        self.changesets.insert(changeset, commit);
+    /// Records a commit that the map does not hold yet.
+    pub(crate) fn insert_commit(&mut self, commit: GitOid, changeset: ObjectId) -> Added {
+        let replaced = self.changesets.insert(changeset, commit);
+        let previous = self.commits.insert(commit, changeset);
+        debug_assert!(previous.is_none(), "commit {commit} is mapped already");
+        Added::Commit {
+            commit,
+            changeset,
+            replaced,
+        }
     }
 
-    /// Records a git tree. `raw` is the blob with its bytes when it is not
-    /// canonical.
-    pub(crate) fn insert_tree(&mut self, tree: GitOid, braid: ObjectId, raw: Option<ObjectId>) {
-        self.trees.insert(tree, braid);
+    /// Records a git tree that the map does not hold yet. `raw` is the blob
+    /// with its bytes when it is not canonical.
+    pub(crate) fn insert_tree(
+        &mut self,
+        tree: GitOid,
+        braid: ObjectId,
+        raw: Option<ObjectId>,
+    ) -> Added {
+        let previous = self.trees.insert(tree, braid);
+        debug_assert!(previous.is_none(), "tree {tree} is mapped already");
+        let mut canonical = false;
         match raw {
             Some(blob) => {
                 self.raw_trees.insert(tree, blob);
             }
             None => {
-                self.canonical_trees.entry(braid).or_insert(tree);
+                if let Entry::Vacant(vacant) = self.canonical_trees.entry(braid) {
+                    vacant.insert(tree);
+                    canonical = true;
+                }
             }
+        }
+        Added::Tree {
+            tree,
+            braid,
+            canonical,
         }
     }
 
-    pub(crate) fn insert_blob(&mut self, blob: GitOid, braid: ObjectId, size: u64) {
-        self.blobs.insert(blob, (braid, size));
-        self.git_blobs.insert(braid, blob);
+    /// Records a blob that the map does not hold yet.
+    pub(crate) fn insert_blob(&mut self, blob: GitOid, braid: ObjectId, size: u64) -> Added {
+        let previous = self.blobs.insert(blob, (braid, size));
+        debug_assert!(previous.is_none(), "blob {blob} is mapped already");
+        let replaced = self.git_blobs.insert(braid, blob);
+        Added::Blob {
+            blob,
+            braid,
+            replaced,
+        }
+    }
+
+    /// Takes back what one insert added, given what it returned. Taking back
+    /// the inserts since some point, the last one first, gives back the map
+    /// as it was at that point.
+    pub(crate) fn take_back(&mut self, added: &Added) {
+        match *added {
+            Added::Commit {
+                commit,
+                changeset,
+                replaced,
+            } => {
+                self.commits.remove(&commit);
+                restore(&mut self.changesets, changeset, replaced);
+            }
+            Added::Tree {
+                tree,
+                braid,
+                canonical,
+            } => {
+                self.trees.remove(&tree);
+                self.raw_trees.remove(&tree);
+                if canonical {
+                    self.canonical_trees.remove(&braid);
+                }
+            }
+            Added::Blob {
+                blob,
+                braid,
+                replaced,
+            } => {
+                self.blobs.remove(&blob);
+                restore(&mut self.git_blobs, braid, replaced);
+            }
+        }
     }
 
     pub(crate) fn insert_tag(&mut self, tag: GitOid, entry: TagEntry) {
