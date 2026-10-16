@@ -4,7 +4,7 @@
 //! Helpers for the unit tests: an in-memory repository with short ways to
 //! write files, trees and changesets, and to read them back.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
@@ -40,6 +40,35 @@ impl Objects for Hinted {
         let id = self.objects.put(kind, payload)?;
         self.hints.borrow_mut().push((id, *similar));
         Ok(id)
+    }
+}
+
+/// Objects in memory that count the objects read and written.
+#[derive(Default)]
+pub(crate) struct Counted {
+    pub(crate) objects: MemoryObjects,
+    pub(crate) reads: Cell<usize>,
+    pub(crate) writes: Cell<usize>,
+}
+
+impl Counted {
+    /// The reads and writes since the last call, and starts counting again.
+    pub(crate) fn take(&self) -> (usize, usize) {
+        (self.reads.replace(0), self.writes.replace(0))
+    }
+}
+
+impl Objects for Counted {
+    type Error = Infallible;
+
+    fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Self::Error> {
+        self.reads.set(self.reads.get() + 1);
+        self.objects.get(id)
+    }
+
+    fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Self::Error> {
+        self.writes.set(self.writes.get() + 1);
+        self.objects.put(kind, payload)
     }
 }
 

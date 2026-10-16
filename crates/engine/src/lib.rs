@@ -44,9 +44,13 @@
 //! [`apply`], [`diff`], [`admit`], [`land`] and [`merge`] read only the
 //! directories on the changed paths, so their cost follows the size of the
 //! change times the depth of the tree, plus the size of each directory they
-//! touch. The free ancestry functions walk history and are proportional to
-//! the distance they cover; [`History`] reads derived data instead, so its
-//! queries cost what they visit once that data exists.
+//! touch. A large directory is split into nodes, and [`apply`], [`admit`],
+//! [`entry_at`] and the lookups of [`land`] and [`merge`] read and write
+//! only the nodes on the way to the names they need, so its size counts
+//! only through its depth; [`diff`] reads both versions of each directory
+//! that differs whole. The free ancestry functions walk history and are
+//! proportional to the distance they cover; [`History`] reads derived data
+//! instead, so its queries cost what they visit once that data exists.
 //!
 //! [`Objects`]: braid_format::Objects
 

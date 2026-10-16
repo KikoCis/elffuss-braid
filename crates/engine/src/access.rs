@@ -9,8 +9,9 @@ use std::rc::Rc;
 
 use braid_format::changeset::{MAX_INLINE_CHANGES_BYTES, decode_change_list};
 use braid_format::{
-    Change, Changes, Changeset, Entry, EntryKind, Kind, Node, ObjectId, Objects, TreeError,
-    build_directory, read_directory,
+    Change, Changes, Changeset, Entry, EntryEdit, EntryKind, Kind, Node, NodeCache, ObjectId,
+    Objects, TreeError, Updated, build_directory, check_edits, find_entry, read_directory,
+    update_directory,
 };
 
 use crate::error::{Error, store_error};
@@ -70,32 +71,52 @@ pub fn read_tree<O: Objects>(objects: &O, id: ObjectId) -> Result<Vec<Entry>, Er
     if id == EMPTY_TREE {
         return Ok(Vec::new());
     }
-    // `read_directory` sees a node it cannot fetch as missing; remember why.
     let mut failure = None;
-    let read = read_directory(id, |node| match objects.get(node) {
-        Ok(Some((Kind::Tree, bytes))) => Some(bytes),
-        Ok(Some((found, _))) => {
-            failure.get_or_insert(Error::WrongKind {
-                id: *node,
-                expected: Kind::Tree,
-                found,
-            });
-            None
+    read_directory(id, fetch_node(objects, &mut failure))
+        .map_err(|error| tree_error(id, failure, error))
+}
+
+/// Fetches the nodes of trees for the readers of the format crate, which
+/// see a node they cannot fetch as missing: `failure` keeps why. The empty
+/// tree is known without reading it.
+fn fetch_node<'a, O: Objects>(
+    objects: &'a O,
+    failure: &'a mut Option<Error>,
+) -> impl FnMut(&ObjectId) -> Option<Vec<u8>> + 'a {
+    move |node| {
+        if *node == EMPTY_TREE {
+            return Some(empty_tree_node());
         }
-        Ok(None) => None,
-        Err(error) => {
-            failure.get_or_insert(store_error(error));
-            None
+        match objects.get(node) {
+            Ok(Some((Kind::Tree, bytes))) => Some(bytes),
+            Ok(Some((found, _))) => {
+                failure.get_or_insert(Error::WrongKind {
+                    id: *node,
+                    expected: Kind::Tree,
+                    found,
+                });
+                None
+            }
+            Ok(None) => None,
+            Err(error) => {
+                failure.get_or_insert(store_error(error));
+                None
+            }
         }
-    });
-    read.map_err(|error| match (failure, error) {
+    }
+}
+
+/// The error for the directory `id`, which a reader of the format crate
+/// failed on: why a node could not be fetched, if that was it.
+fn tree_error(id: ObjectId, failure: Option<Error>, error: TreeError) -> Error {
+    match (failure, error) {
         (Some(failure), _) => failure,
         (None, TreeError::MissingNode(node)) => Error::Missing {
             id: node,
             kind: Kind::Tree,
         },
         (None, error) => Error::Tree { id, error },
-    })
+    }
 }
 
 /// Stores a directory: builds its canonical nodes from `entries`, in any
@@ -196,11 +217,14 @@ pub(crate) fn lookup<'e>(entries: &'e [Entry], name: &[u8]) -> Option<&'e EntryK
         .map(|index| &entries[index].kind)
 }
 
-/// Directories read during one operation, by id, so that each one is fetched
-/// and checked once.
+/// Directories read during one operation, so that each one, or each node of
+/// a split one, is fetched and checked once.
 pub(crate) struct Trees<'o, O> {
     objects: &'o O,
+    /// Directories read whole, by id.
     directories: HashMap<ObjectId, Rc<[Entry]>>,
+    /// Nodes read one path at a time.
+    nodes: NodeCache,
 }
 
 impl<'o, O: Objects> Trees<'o, O> {
@@ -208,6 +232,7 @@ impl<'o, O: Objects> Trees<'o, O> {
         Trees {
             objects,
             directories: HashMap::new(),
+            nodes: NodeCache::new(),
         }
     }
 
@@ -233,6 +258,41 @@ impl<'o, O: Objects> Trees<'o, O> {
         }
     }
 
+    /// The entry named `name` in the directory `dir`. Only the nodes on the
+    /// way to the name are read, unless the directory was read whole already.
+    pub(crate) fn entry(&mut self, dir: ObjectId, name: &[u8]) -> Result<Option<EntryKind>, Error> {
+        if let Some(entries) = self.directories.get(&dir) {
+            return Ok(lookup(entries, name).cloned());
+        }
+        let mut failure = None;
+        find_entry(
+            &mut self.nodes,
+            dir,
+            name,
+            fetch_node(self.objects, &mut failure),
+        )
+        .map_err(|error| tree_error(dir, failure, error))
+    }
+
+    /// The directory `base` after `edits`, sorted by name: its new root,
+    /// how many entries it has, and the nodes to store. Only the nodes on
+    /// the way to the edited names, and their neighbours where boundaries
+    /// move, are read.
+    pub(crate) fn update(&mut self, base: ObjectId, edits: &[EntryEdit]) -> Result<Updated, Error> {
+        let mut failure = None;
+        update_directory(
+            &mut self.nodes,
+            base,
+            edits,
+            fetch_node(self.objects, &mut failure),
+        )
+        .map_err(|error| match check_edits(edits) {
+            // The edits are checked before any node is read.
+            Err(invalid) => Error::Entries(invalid),
+            Ok(()) => tree_error(base, failure, error),
+        })
+    }
+
     /// What is at `path` in the tree `root`.
     pub(crate) fn find(&mut self, root: ObjectId, path: &[u8]) -> Result<Found, Error> {
         let mut dir = root;
@@ -240,12 +300,11 @@ impl<'o, O: Objects> Trees<'o, O> {
         loop {
             let slash = path[start..].iter().position(|byte| *byte == b'/');
             let end = slash.map_or(path.len(), |slash| start + slash);
-            let entries = self.read(dir)?;
-            match (lookup(&entries, &path[start..end]), slash) {
+            match (self.entry(dir, &path[start..end])?, slash) {
                 (None, _) => return Ok(Found::Absent),
-                (Some(kind), None) => return Ok(Found::Entry(kind.clone())),
+                (Some(kind), None) => return Ok(Found::Entry(kind)),
                 (Some(EntryKind::Tree { tree }), Some(_)) => {
-                    dir = *tree;
+                    dir = tree;
                     start = end + 1;
                 }
                 (Some(_), Some(_)) => return Ok(Found::Blocked(end)),
@@ -265,10 +324,9 @@ impl<'o, O: Objects> Trees<'o, O> {
         let mut start = 0;
         while let Some(slash) = path[start..].iter().position(|byte| *byte == b'/') {
             let end = start + slash;
-            let entries = self.read(dir)?;
-            match lookup(&entries, &path[start..end]) {
+            match self.entry(dir, &path[start..end])? {
                 Some(EntryKind::Tree { tree }) => {
-                    dir = *tree;
+                    dir = tree;
                     deepest = end;
                     start = end + 1;
                 }
@@ -290,10 +348,9 @@ impl<'o, O: Objects> Trees<'o, O> {
         let mut start = 0;
         while let Some(slash) = path[start..].iter().position(|byte| *byte == b'/') {
             let end = start + slash;
-            let entries = self.read(dir)?;
-            match lookup(&entries, &path[start..end]) {
+            match self.entry(dir, &path[start..end])? {
                 Some(EntryKind::Tree { tree }) => {
-                    dir = *tree;
+                    dir = tree;
                     start = end + 1;
                 }
                 Some(_) => return Ok(None),

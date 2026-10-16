@@ -2,15 +2,15 @@
 // Copyright (c) 2026 UtopiaIA
 
 //! Applying a change list to a tree by path copying: only the directories on
-//! changed paths are read and rebuilt; every other subtree is shared with the
-//! base tree.
+//! changed paths are rebuilt; every other subtree is shared with the base
+//! tree. In a large directory, split into nodes, only the nodes on the way to
+//! the changed names are read and rewritten.
 
 use std::collections::{BTreeMap, btree_map};
-use std::rc::Rc;
 
 use braid_format::name::forbidden_as_symlink;
 use braid_format::{
-    Change, ChangeOp, Entry, EntryKind, Kind, ObjectId, Objects, build_directory, validate_path,
+    Change, ChangeOp, EntryEdit, EntryKind, Kind, NewNode, ObjectId, Objects, validate_path,
 };
 
 use crate::access::{EMPTY_TREE, Trees, empty_tree_node, read_object};
@@ -47,18 +47,10 @@ pub fn apply<O: Objects>(
 pub(crate) struct Applied {
     /// The new root tree.
     pub(crate) root: ObjectId,
-    /// Every node of every directory rebuilt, children before parents.
+    /// Every node the rebuilt directories did not have before, children
+    /// before parents, each with the node of the same directory it most
+    /// likely replaces: a hint for the store, which may keep it as a delta.
     pub(crate) nodes: Vec<NewNode>,
-}
-
-/// A tree node rebuilt by applying changes.
-#[derive(Debug)]
-pub(crate) struct NewNode {
-    pub(crate) id: ObjectId,
-    pub(crate) bytes: Vec<u8>,
-    /// The node it most likely replaces, of the same directory before the
-    /// change: a hint for the store, which may keep it as a delta.
-    pub(crate) similar: Option<ObjectId>,
 }
 
 /// A structural problem found while applying, at `path`.
@@ -183,28 +175,6 @@ pub(crate) fn check_nodes<O: Objects>(objects: &O, nodes: &[NewNode]) -> Result<
     Ok(())
 }
 
-/// For each of the `count` nodes of a rebuilt directory, children before
-/// parents, the node of the directory before the change, `base` with
-/// `entries`, that it most likely replaces. A split directory with as many
-/// nodes as before pairs them in order, since boundaries depend only on
-/// names; otherwise only the root is paired, with the old root.
-fn similar_nodes(base: Option<ObjectId>, entries: &[Entry], count: usize) -> Vec<Option<ObjectId>> {
-    let mut similar = vec![None; count];
-    let Some(base) = base.filter(|base| *base != EMPTY_TREE) else {
-        return similar;
-    };
-    if count > 1
-        && let Ok(old) = build_directory(entries.to_vec())
-        && old.nodes.len() == count
-    {
-        return old.nodes.iter().map(|(id, _)| Some(*id)).collect();
-    }
-    if let Some(root) = similar.last_mut() {
-        *root = Some(base);
-    }
-    similar
-}
-
 /// One change, seen from the directory being rebuilt.
 #[derive(Clone, Copy)]
 struct Item<'a> {
@@ -268,18 +238,15 @@ fn rebuild<O: Objects>(
     base_root: ObjectId,
     items: Vec<Item<'_>>,
 ) -> Result<Option<ObjectId>, Error> {
-    let mut stack = vec![Frame::open(ctx.trees, Some(base_root), items)?];
+    let mut stack = vec![Frame::open(Some(base_root), items)];
     // What the frame closed last became, for the frame below it.
     let mut closed = None;
     while let Some(frame) = stack.last_mut() {
         if let Some(directory) = closed.take() {
             frame.settle(ctx, directory);
         }
-        match frame.advance(ctx) {
-            Some((below, nested)) => {
-                let child = Frame::open(ctx.trees, below, nested)?;
-                stack.push(child);
-            }
+        match frame.advance(ctx)? {
+            Some((below, nested)) => stack.push(Frame::open(below, nested)),
             None => {
                 if let Some(frame) = stack.pop() {
                     closed = Some(frame.close(ctx)?);
@@ -296,17 +263,17 @@ struct Frame<'a> {
     dir: &'a [u8],
     /// Its tree before the change, if it existed.
     base: Option<ObjectId>,
-    /// Its entries before the change, in name order.
-    existing: Rc<[Entry]>,
-    /// How many of `existing` are copied or replaced already.
-    next: usize,
     /// The changes under each name not resolved yet, in name order.
     groups: btree_map::IntoIter<&'a [u8], Group<'a>>,
-    /// Its entries after the change, so far.
-    entries: Vec<Entry>,
+    /// The names resolved so far whose entry changes, in name order.
+    edits: Vec<EntryEdit>,
     /// The name whose directory the frame above is rebuilding.
     waiting: Option<Waiting<'a>>,
 }
+
+/// A directory to rebuild before the one above it: its tree before the
+/// change, if it existed, and the changes below it.
+type Below<'a> = (Option<ObjectId>, Vec<Item<'a>>);
 
 /// A name that must be, or become, a directory, waiting for it to be rebuilt.
 struct Waiting<'a> {
@@ -331,11 +298,8 @@ enum Step<'a> {
 impl<'a> Frame<'a> {
     /// Opens the directory whose tree is `base` (`None` if it does not
     /// exist), to rebuild it with `items`, of which there is at least one.
-    fn open<O: Objects>(
-        trees: &mut Trees<'_, O>,
-        base: Option<ObjectId>,
-        items: Vec<Item<'a>>,
-    ) -> Result<Self, Error> {
+    /// Nothing is read until a name is resolved.
+    fn open(base: Option<ObjectId>, items: Vec<Item<'a>>) -> Self {
         let dir = items.first().map_or(&b""[..], Item::dir);
         let mut groups: BTreeMap<&'a [u8], Group<'a>> = BTreeMap::new();
         for item in items {
@@ -351,39 +315,39 @@ impl<'a> Frame<'a> {
                     }),
             }
         }
-        let existing = trees.read_or_empty(base)?;
-        Ok(Frame {
+        Frame {
             dir,
             base,
-            entries: Vec::with_capacity(existing.len() + groups.len()),
-            existing,
-            next: 0,
             groups: groups.into_iter(),
+            edits: Vec::new(),
             waiting: None,
-        })
+        }
     }
 
     /// Resolves names in order until one must be a directory rebuilt first,
     /// and returns what to rebuild it from.
-    fn advance<O>(
+    fn advance<O: Objects>(
         &mut self,
         ctx: &mut Ctx<'_, '_, O>,
-    ) -> Option<(Option<ObjectId>, Vec<Item<'a>>)> {
+    ) -> Result<Option<Below<'a>>, Error> {
         while let Some((name, group)) = self.groups.next() {
-            let current = self.take(name);
-            match plan(ctx, self.dir, name, current, group) {
-                Step::Done(kind) => self.push(name, kind),
+            let current = match self.base {
+                Some(base) => ctx.trees.entry(base, name)?,
+                None => None,
+            };
+            match plan(ctx, self.dir, name, current.clone(), group) {
+                Step::Done(kind) => self.record(name, current, kind),
                 Step::Descend {
                     below,
                     nested,
                     waiting,
                 } => {
                     self.waiting = Some(waiting);
-                    return Some((below, nested));
+                    return Ok(Some((below, nested)));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// The frame above rebuilt the directory this one waits for, as
@@ -395,33 +359,16 @@ impl<'a> Frame<'a> {
             direct,
         }) = self.waiting.take()
         {
-            let kind = settle(ctx, self.dir, name, current, direct, directory);
-            self.push(name, kind);
+            let kind = settle(ctx, self.dir, name, current.clone(), direct, directory);
+            self.record(name, current, kind);
         }
     }
 
-    /// Copies the entries named before `name`, and takes the one named
-    /// `name`, if there is one.
-    fn take(&mut self, name: &[u8]) -> Option<EntryKind> {
-        while let Some(entry) = self
-            .existing
-            .get(self.next)
-            .filter(|entry| entry.name.as_slice() < name)
-        {
-            self.entries.push(entry.clone());
-            self.next += 1;
-        }
-        let entry = self
-            .existing
-            .get(self.next)
-            .filter(|entry| entry.name == name)?;
-        self.next += 1;
-        Some(entry.kind.clone())
-    }
-
-    fn push(&mut self, name: &[u8], kind: Option<EntryKind>) {
-        if let Some(kind) = kind {
-            self.entries.push(Entry {
+    /// Records the entry the name `name` gets, `kind`, if it is not the one
+    /// it has, `current`.
+    fn record(&mut self, name: &[u8], current: Option<EntryKind>, kind: Option<EntryKind>) {
+        if kind != current {
+            self.edits.push(EntryEdit {
                 name: name.to_vec(),
                 kind,
             });
@@ -429,29 +376,22 @@ impl<'a> Frame<'a> {
     }
 
     /// Finishes the directory, and returns its new tree, or `None` if it has
-    /// no entries left.
-    fn close<O>(mut self, ctx: &mut Ctx<'_, '_, O>) -> Result<Option<ObjectId>, Error> {
-        self.entries
-            .extend(self.existing[self.next..].iter().cloned());
-        if self.entries.is_empty() {
+    /// no entries left. Only the nodes on the way to the names that changed
+    /// are read and rewritten.
+    fn close<O: Objects>(self, ctx: &mut Ctx<'_, '_, O>) -> Result<Option<ObjectId>, Error> {
+        if self.edits.is_empty() {
+            // Nothing changed: the directory stays as it was, unless it was
+            // empty, as no braid tree holds an empty directory.
+            return Ok(self.base.filter(|base| *base != EMPTY_TREE));
+        }
+        let updated = ctx
+            .trees
+            .update(self.base.unwrap_or(EMPTY_TREE), &self.edits)?;
+        if updated.entries == 0 {
             return Ok(None);
         }
-        let directory = build_directory(self.entries).map_err(Error::Entries)?;
-        let id = directory.root();
-        let similar = similar_nodes(self.base, &self.existing, directory.nodes.len());
-        // A node that did not change is its own old version: no hint.
-        ctx.nodes.extend(
-            directory
-                .nodes
-                .into_iter()
-                .zip(similar)
-                .map(|((id, bytes), similar)| NewNode {
-                    id,
-                    bytes,
-                    similar: similar.filter(|similar| *similar != id),
-                }),
-        );
-        Ok(Some(id))
+        ctx.nodes.extend(updated.nodes);
+        Ok(Some(updated.root))
     }
 }
 
@@ -545,7 +485,8 @@ mod tests {
     use crate::access::{entry_at, read_tree};
     use crate::diff::diff;
     use crate::path::MAX_PATH_DEPTH;
-    use crate::testing::{Hinted, Repo, deep_path, delete, gitlink, text_map};
+    use crate::testing::{Counted, Hinted, Repo, deep_path, delete, gitlink, text_map};
+    use braid_format::{Entry, MemoryObjects, build_directory};
 
     fn problem(result: Result<ObjectId, Error>) -> (String, ApplyProblem) {
         match result {
@@ -820,7 +761,7 @@ mod tests {
         ));
     }
 
-    fn file(objects: &Hinted, path: &str, content: &str) -> Change {
+    fn file<O: Objects>(objects: &O, path: &str, content: &str) -> Change {
         Change {
             path: path.as_bytes().to_vec(),
             op: ChangeOp::File {
@@ -897,6 +838,61 @@ mod tests {
             assert_ne!(id, similar);
             assert!(old_nodes.contains(similar), "{similar} is not an old node");
         }
+    }
+
+    /// Adding, changing or removing one file of a wide directory reads and
+    /// writes a few nodes, whatever the number of files: the nodes on the
+    /// way to it, and a neighbour where a boundary moves.
+    #[test]
+    fn one_file_of_a_wide_directory_costs_a_few_nodes() {
+        const MOST_READ: usize = 6;
+        const MOST_WRITTEN: usize = 5;
+        let path = |i: usize| format!("wide/f{i:05}.txt");
+        let mut costs = Vec::new();
+        for count in [2_000usize, 20_000] {
+            let objects = Counted::default();
+            let files: Vec<Change> = (0..count)
+                .map(|i| file(&objects, &path(i), &i.to_string()))
+                .collect();
+            let base = apply(&objects, EMPTY_TREE, &files).unwrap();
+            let edits = [
+                // A new file at the end, as the benchmark adds them.
+                file(&objects, &path(count), "new"),
+                file(&objects, &path(count / 2), "changed"),
+                delete(&path(count / 3)),
+                file(&objects, "wide/0-first", "new"),
+            ];
+            for edit in edits {
+                objects.take();
+                let new = apply(&objects, base, std::slice::from_ref(&edit)).unwrap();
+                let (reads, writes) = objects.take();
+                costs.push((count, reads, writes));
+
+                // The same tree as building it from scratch.
+                let scratch = MemoryObjects::new();
+                let mut all: Vec<Change> = files
+                    .iter()
+                    .filter(|change| change.path != edit.path)
+                    .cloned()
+                    .collect();
+                if edit.op != ChangeOp::Delete {
+                    all.push(edit.clone());
+                }
+                assert_eq!(new, apply(&scratch, EMPTY_TREE, &all).unwrap());
+            }
+        }
+        let most = |count| {
+            costs
+                .iter()
+                .filter(|(c, ..)| *c == count)
+                .fold((0, 0), |(r, w), (_, reads, writes)| {
+                    (r.max(*reads), w.max(*writes))
+                })
+        };
+        let (small, large) = (most(2_000), most(20_000));
+        assert!(large.0 <= MOST_READ && large.1 <= MOST_WRITTEN, "{costs:?}");
+        assert!(large.0 <= small.0 + 1, "{costs:?}");
+        println!("files, objects read, objects written: {costs:?}");
     }
 
     #[test]
