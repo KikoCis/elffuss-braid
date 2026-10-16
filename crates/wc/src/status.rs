@@ -6,8 +6,8 @@
 use braid_format::ChangeOp;
 
 use crate::paths::{is_within, split_last};
-use crate::scan::Scan;
-use crate::tree::{Flat, same_class};
+use crate::scan::Delta;
+use crate::tree::same_class;
 
 /// New files larger than this are not committed until `braid track` marks
 /// them: 1 MiB.
@@ -78,58 +78,44 @@ pub fn is_guarded(path: &[u8], size: u64) -> bool {
         || name.starts_with(b"id_")
 }
 
-/// Compares a scan with the base. A new file that the guard holds back is
-/// listed in `needs_track` instead, unless one of `marks` (paths given to
-/// `braid track`) is it or a directory above it.
-pub(crate) fn compare(base: &Flat, scan: &Scan, marks: &[Vec<u8>]) -> Status {
+/// The status of a scan's deltas (see [`Delta`]). A new file that the
+/// guard holds back is listed in `needs_track` instead, unless one of
+/// `marks` (paths given to `braid track`) is it or a directory above it.
+pub(crate) fn compare(deltas: &[Delta], marks: &[Vec<u8>]) -> Status {
     let mut status = Status::default();
-    let mut olds = base.files.iter().peekable();
-    let mut news = scan.files.iter().peekable();
-    loop {
-        let order = match (olds.peek(), news.peek()) {
-            (None, None) => break,
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (Some((a, _)), Some((b, _))) => a.cmp(b),
-        };
-        match order {
-            std::cmp::Ordering::Less => {
-                let (path, _) = olds.next().expect("peeked");
-                status.changes.push(PathChange {
-                    path: path.clone(),
-                    kind: ChangeKind::Deleted,
-                    op: ChangeOp::Delete,
-                });
-            }
-            std::cmp::Ordering::Greater => {
-                let (path, op) = news.next().expect("peeked");
-                if is_guarded(path, size_of(op)) && !marks.iter().any(|mark| is_within(path, mark))
+    for delta in deltas {
+        let path = &delta.path;
+        match (&delta.old, &delta.new) {
+            (Some(_), None) => status.changes.push(PathChange {
+                path: path.clone(),
+                kind: ChangeKind::Deleted,
+                op: ChangeOp::Delete,
+            }),
+            (None, Some(new)) => {
+                if is_guarded(path, size_of(new)) && !marks.iter().any(|mark| is_within(path, mark))
                 {
                     status.needs_track.push(path.clone());
                 } else {
                     status.changes.push(PathChange {
                         path: path.clone(),
                         kind: ChangeKind::Added,
-                        op: op.clone(),
-                    });
-                }
-            }
-            std::cmp::Ordering::Equal => {
-                let (path, old) = olds.next().expect("peeked");
-                let (_, new) = news.next().expect("peeked");
-                if old != new {
-                    let kind = if same_class(old, new) {
-                        ChangeKind::Modified
-                    } else {
-                        ChangeKind::TypeChanged
-                    };
-                    status.changes.push(PathChange {
-                        path: path.clone(),
-                        kind,
                         op: new.clone(),
                     });
                 }
             }
+            (Some(old), Some(new)) if old != new => {
+                let kind = if same_class(old, new) {
+                    ChangeKind::Modified
+                } else {
+                    ChangeKind::TypeChanged
+                };
+                status.changes.push(PathChange {
+                    path: path.clone(),
+                    kind,
+                    op: new.clone(),
+                });
+            }
+            _ => {}
         }
     }
     status
@@ -177,27 +163,28 @@ mod tests {
 
     #[test]
     fn comparing() {
-        let mut base = Flat::default();
-        base.files.insert(b"same".to_vec(), file("1"));
-        base.files.insert(b"edited".to_vec(), file("1"));
-        base.files.insert(b"gone".to_vec(), file("1"));
-        base.files.insert(b"link".to_vec(), file("1"));
-        let mut scan = Scan::default();
-        scan.files.insert(b"same".to_vec(), file("1"));
-        scan.files.insert(b"edited".to_vec(), file("2"));
+        let delta = |path: &str, old: Option<ChangeOp>, new: Option<ChangeOp>| Delta {
+            path: path.as_bytes().to_vec(),
+            old,
+            new,
+        };
         let target = ObjectId::hash(Kind::Blob, b"t");
-        scan.files.insert(
-            b"link".to_vec(),
-            ChangeOp::Symlink {
-                blob: target,
-                size: 1,
-            },
-        );
-        scan.files.insert(b"new".to_vec(), file("3"));
-        scan.files.insert(b"secrets/.env".to_vec(), file("k=v"));
-        scan.files.insert(b"keys/id_rsa".to_vec(), file("k"));
+        let link = ChangeOp::Symlink {
+            blob: target,
+            size: 1,
+        };
+        // Sorted by path, as a scan gives them.
+        let deltas = [
+            delta("edited", Some(file("1")), Some(file("2"))),
+            delta("gone", Some(file("1")), None),
+            delta("keys/id_rsa", None, Some(file("k"))),
+            delta("link", Some(file("1")), Some(link)),
+            delta("new", None, Some(file("3"))),
+            delta("same", Some(file("1")), Some(file("1"))),
+            delta("secrets/.env", None, Some(file("k=v"))),
+        ];
 
-        let status = compare(&base, &scan, &[b"keys".to_vec()]);
+        let status = compare(&deltas, &[b"keys".to_vec()]);
         let kinds: Vec<(&[u8], ChangeKind)> = status
             .changes
             .iter()
@@ -213,6 +200,7 @@ mod tests {
                 (b"new", ChangeKind::Added),
             ]
         );
+        assert_eq!(status.changes[1].op, ChangeOp::Delete);
         assert_eq!(status.needs_track, [b"secrets/.env".to_vec()]);
         assert!(!status.is_clean());
     }

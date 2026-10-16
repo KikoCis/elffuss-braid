@@ -9,7 +9,10 @@
 //! path that is ever resolved as a whole is the workspace root itself. A
 //! symlink in the working copy, whoever made it, is therefore a leaf: braid
 //! reads its target as data, replaces or removes it, and never goes through
-//! it.
+//! it. On Unix, a directory's listing, its own metadata and its entries'
+//! metadata are read through the same handles with plain system calls: the
+//! listing through a second handle opened as `.`, and an entry's metadata by
+//! its single name, without following a symlink.
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -84,6 +87,76 @@ impl Stat {
                 mtime,
                 ino: 0,
             }
+        }
+    }
+}
+
+/// What a directory's own metadata says of its entries: when they last
+/// changed, by its modification and status change times, and which
+/// directory it is. Adding, removing or renaming an entry changes both
+/// times; only the first can be set back by hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirStamp {
+    pub mtime: (i64, u32),
+    pub ctime: (i64, u32),
+    pub ino: u64,
+}
+
+impl DirStamp {
+    /// Whether both times are strictly older than `time`.
+    pub(crate) fn older_than(&self, time: (i64, u32)) -> bool {
+        self.mtime < time && self.ctime < time
+    }
+}
+
+/// The stamp of an open directory, where the system gives one.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+pub(crate) fn dir_stamp(dir: &Dir) -> Option<DirStamp> {
+    let stat = rustix::fs::fstat(dir).ok()?;
+    Some(DirStamp {
+        mtime: (
+            i64::try_from(stat.st_mtime).ok()?,
+            u32::try_from(stat.st_mtime_nsec).ok()?,
+        ),
+        ctime: (
+            i64::try_from(stat.st_ctime).ok()?,
+            u32::try_from(stat.st_ctime_nsec).ok()?,
+        ),
+        ino: u64::try_from(stat.st_ino).ok()?,
+    })
+}
+
+/// The stamp of an open directory, where the system gives one: not here,
+/// where there is no status change time.
+#[cfg(not(unix))]
+pub(crate) fn dir_stamp(_dir: &Dir) -> Option<DirStamp> {
+    None
+}
+
+impl Stat {
+    /// The metadata in a `stat` structure, as [`Stat::of`] reads it from
+    /// [`Metadata`]. Its fields' types differ between systems.
+    #[cfg(unix)]
+    #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+    pub(crate) fn of_raw(stat: &rustix::fs::Stat) -> Stat {
+        use rustix::fs::{FileType, RawMode};
+        let mode = stat.st_mode as RawMode;
+        let kind = match FileType::from_raw_mode(mode) {
+            FileType::Symlink => StatKind::Symlink,
+            FileType::Directory => StatKind::Dir,
+            FileType::RegularFile => StatKind::File,
+            _ => StatKind::Other,
+        };
+        Stat {
+            kind,
+            executable: mode & 0o100 != 0,
+            size: u64::try_from(stat.st_size).unwrap_or(0),
+            mtime: (
+                i64::try_from(stat.st_mtime).unwrap_or(0),
+                u32::try_from(stat.st_mtime_nsec).unwrap_or(0),
+            ),
+            ino: u64::try_from(stat.st_ino).unwrap_or(0),
         }
     }
 }
@@ -225,6 +298,71 @@ fn unrepresentable(path: &[u8]) -> Error {
     Error::Unsafe {
         path: path.to_vec(),
         reason: "this platform cannot represent the name".to_owned(),
+    }
+}
+
+/// The names in `dir`, less `.` and `..`, in no order, each with whether
+/// the listing says it is a directory. Read through a handle of its own on
+/// the same directory, opened as `.`, so that `dir` stays usable meanwhile
+/// and its position in the listing is never shared.
+#[cfg(unix)]
+pub(crate) fn list(dir: &Dir) -> io::Result<Vec<(Vec<u8>, bool)>> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let mut stream = rustix::fs::Dir::new(rustix::fs::openat(dir, ".", flags, Mode::empty())?)?;
+    let mut names = Vec::new();
+    while let Some(entry) = stream.read() {
+        let entry = entry?;
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            let is_dir = entry.file_type() == rustix::fs::FileType::Directory;
+            names.push((name.to_vec(), is_dir));
+        }
+    }
+    Ok(names)
+}
+
+/// The names in `dir`, less `.` and `..`, in no order, each with whether
+/// the listing says it is a directory.
+#[cfg(not(unix))]
+pub(crate) fn list(dir: &Dir) -> io::Result<Vec<(Vec<u8>, bool)>> {
+    let mut names = Vec::new();
+    for entry in dir.entries()? {
+        let entry = entry?;
+        // A name that is not UTF-8 has no repository bytes here.
+        if let Ok(name) = entry.file_name().into_string() {
+            names.push((
+                name.into_bytes(),
+                entry.file_type().is_ok_and(|kind| kind.is_dir()),
+            ));
+        }
+    }
+    Ok(names)
+}
+
+/// The metadata of the entry `name` of `dir`, without following a symlink.
+#[cfg(unix)]
+pub(crate) fn stat_entry(dir: &Dir, name: &OsStr) -> io::Result<Stat> {
+    let stat = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    Ok(Stat::of_raw(&stat))
+}
+
+/// The metadata of the entry `name` of `dir`, without following a symlink.
+#[cfg(not(unix))]
+pub(crate) fn stat_entry(dir: &Dir, name: &OsStr) -> io::Result<Stat> {
+    Ok(Stat::of(&dir.symlink_metadata(name)?))
+}
+
+/// Opens the directory `name` of `dir` without following a symlink: `None`
+/// when nothing is there, or something that is not a directory.
+pub(crate) fn open_child_dir(dir: &Dir, name: &OsStr) -> io::Result<Option<Dir>> {
+    match dir.open_dir_nofollow(name) {
+        Ok(child) => Ok(Some(child)),
+        Err(err) => match dir.symlink_metadata(name) {
+            Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(None),
+            Ok(meta) if !meta.is_dir() => Ok(None),
+            _ => Err(err),
+        },
     }
 }
 

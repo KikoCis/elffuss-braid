@@ -10,14 +10,22 @@
 //! directory cannot be brought back by a later `!` rule, since the walk does
 //! not go into ignored directories. Tracked files are never ignored: the
 //! walk checks them whatever the rules say.
+//!
+//! The walk reads a directory's entries once, and opens an ignore file only
+//! where the listing has one. The rules in force in a directory have a
+//! digest, of the ignore files read for it and above it, so that a scan can
+//! tell whether they are the ones an earlier scan had.
 
 use std::io::Read;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cap_std::fs::Dir;
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+use braid_format::{IdHasher, Kind};
+
+use crate::fsprobe::FileSystem;
 use crate::paths::os_name;
 use crate::safe::open_file;
 
@@ -31,25 +39,81 @@ pub(crate) struct Rules {
     dir: Vec<u8>,
     /// Its matchers, highest precedence first.
     matchers: Vec<Gitignore>,
-    parent: Option<Rc<Rules>>,
+    parent: Option<Arc<Rules>>,
+    /// The digest of the ignore files these rules come from, and of their
+    /// parent's.
+    digest: u64,
 }
 
 /// The rules in force in a directory.
-pub(crate) type Chain = Option<Rc<Rules>>;
+pub(crate) type Chain = Option<Arc<Rules>>;
 
-/// The rules in force inside `dir`, whose path is `path`: those of its own
-/// ignore files, if it has any, on top of `parent`. Ignore files that are
-/// symlinks, unreadable, or not UTF-8 lines are skipped.
-pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain) -> Chain {
+/// The digest of the rules in force: 0 for none.
+pub(crate) fn digest(chain: &Chain) -> u64 {
+    chain.as_ref().map_or(0, |rules| rules.digest)
+}
+
+/// A directory's ignore files, as named in its listing, in the order of
+/// [`FILES`].
+pub(crate) type IgnoreFiles<'n> = [Option<&'n [u8]>; 2];
+
+/// The ignore files among `names`, the entries of one directory: each
+/// entry that `fs` takes for `.braidignore` or `.gitignore`, as it would
+/// find it by that name.
+pub(crate) fn ignore_files<'n>(
+    fs: FileSystem,
+    names: impl Iterator<Item = &'n [u8]>,
+) -> IgnoreFiles<'n> {
+    let mut found: IgnoreFiles<'n> = [None; 2];
+    for name in names {
+        // Folding maps ASCII letters to ASCII letters and changes no length
+        // here, so only a dot name of the same length can be one of them.
+        for (slot, wanted) in found.iter_mut().zip(FILES) {
+            if slot.is_none()
+                && name.len() == wanted.len()
+                && name.first() == Some(&b'.')
+                && fs.fold(name) == fs.fold(wanted.as_bytes())
+            {
+                *slot = Some(name);
+            }
+        }
+    }
+    found
+}
+
+/// Which ignore files there are, one bit each, in the order of [`FILES`].
+pub(crate) fn bits(files: &IgnoreFiles<'_>) -> u8 {
+    u8::from(files[0].is_some()) | u8::from(files[1].is_some()) << 1
+}
+
+/// The ignore files that [`bits`] says there are, by their own names: the
+/// file system finds each by that name as it found it before.
+pub(crate) fn from_bits(bits: u8) -> IgnoreFiles<'static> {
+    let named = |index: usize| (bits >> index & 1 != 0).then_some(FILES[index].as_bytes());
+    [named(0), named(1)]
+}
+
+/// The rules in force inside `dir`, whose path is `path`: those of its
+/// ignore files `files` (see [`ignore_files`]) on top of `parent`. Ignore
+/// files that are symlinks, unreadable, or not UTF-8 lines are skipped.
+pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain, files: &IgnoreFiles<'_>) -> Chain {
     let mut matchers = Vec::new();
-    for name in FILES {
-        let Ok(mut file) = open_file(dir, name.as_ref()) else {
+    let mut hasher = IdHasher::new(Kind::Derived);
+    hasher.update(&digest(parent).to_le_bytes());
+    for (index, name) in files.iter().enumerate() {
+        let Some(os) = name.and_then(os_name) else {
+            continue;
+        };
+        let Ok(mut file) = open_file(dir, os) else {
             continue;
         };
         let mut text = Vec::new();
         if file.read_to_end(&mut text).is_err() {
             continue;
         }
+        hasher.update(&[index as u8]);
+        hasher.update(&(text.len() as u64).to_le_bytes());
+        hasher.update(&text);
         let mut builder = GitignoreBuilder::new(".");
         for line in text.split(|byte| *byte == b'\n') {
             if let Ok(line) = std::str::from_utf8(line) {
@@ -66,10 +130,14 @@ pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain) -> Chain {
     if matchers.is_empty() {
         return parent.clone();
     }
-    Some(Rc::new(Rules {
+    let id = hasher.finalize();
+    let mut digest = [0u8; 8];
+    digest.copy_from_slice(&id.as_bytes()[..8]);
+    Some(Arc::new(Rules {
         dir: path.to_vec(),
         matchers,
         parent: parent.clone(),
+        digest: u64::from_le_bytes(digest),
     }))
 }
 
@@ -104,6 +172,9 @@ mod tests {
         Dir::open_ambient_dir(path, cap_std::ambient_authority()).unwrap()
     }
 
+    const BOTH: IgnoreFiles<'static> = [Some(b".braidignore"), Some(b".gitignore")];
+    const GIT: IgnoreFiles<'static> = [None, Some(b".gitignore")];
+
     #[test]
     fn rules_nest_and_negate() {
         let temp = tempfile::tempdir().unwrap();
@@ -112,7 +183,7 @@ mod tests {
         std::fs::write(temp.path().join("sub/.gitignore"), "!keep.log\n").unwrap();
         std::fs::write(temp.path().join("sub/.braidignore"), "secret\n").unwrap();
 
-        let root = enter(&dir(temp.path()), b"", &None);
+        let root = enter(&dir(temp.path()), b"", &None, &GIT);
         assert!(is_ignored(&root, b"a.log", false));
         assert!(is_ignored(&root, b"build", true));
         assert!(!is_ignored(&root, b"build", false));
@@ -120,14 +191,48 @@ mod tests {
         assert!(!is_ignored(&root, b"sub/top.txt", false));
         assert!(!is_ignored(&root, b"a.txt", false));
 
-        let sub = enter(&dir(&temp.path().join("sub")), b"sub", &root);
+        let sub = enter(&dir(&temp.path().join("sub")), b"sub", &root, &BOTH);
         assert!(is_ignored(&sub, b"sub/x.log", false));
         assert!(!is_ignored(&sub, b"sub/keep.log", false));
         assert!(is_ignored(&sub, b"sub/secret", false));
         // Directories without ignore files share their parent's rules.
         std::fs::create_dir(temp.path().join("plain")).unwrap();
-        let plain = enter(&dir(&temp.path().join("plain")), b"plain", &root);
-        assert!(Rc::ptr_eq(plain.as_ref().unwrap(), root.as_ref().unwrap()));
+        let plain = enter(
+            &dir(&temp.path().join("plain")),
+            b"plain",
+            &root,
+            &[None, None],
+        );
+        assert!(Arc::ptr_eq(plain.as_ref().unwrap(), root.as_ref().unwrap()));
+
+        // The digest follows the files' content, and the rules above.
+        assert_eq!(digest(&None), 0);
+        assert_ne!(digest(&root), digest(&sub));
+        let again = enter(&dir(temp.path()), b"", &None, &GIT);
+        assert_eq!(digest(&again), digest(&root));
+        std::fs::write(temp.path().join(".gitignore"), "*.log\n").unwrap();
+        let edited = enter(&dir(temp.path()), b"", &None, &GIT);
+        assert_ne!(digest(&edited), digest(&root));
+        let below = enter(&dir(&temp.path().join("sub")), b"sub", &edited, &BOTH);
+        assert_ne!(digest(&below), digest(&sub));
+    }
+
+    #[test]
+    fn ignore_files_are_found_in_the_listing() {
+        let exact = FileSystem::default();
+        let names: [&[u8]; 4] = [b".gitignore", b"a.txt", b".braidignore", b".GITIGNORE"];
+        assert_eq!(ignore_files(exact, names.into_iter()), BOTH);
+        let only: [&[u8]; 2] = [b"x", b".GitIgnore"];
+        assert_eq!(ignore_files(exact, only.into_iter()), [None, None]);
+        // Where case is ignored, the file is found under any case, as an
+        // open by its name would find it.
+        assert_eq!(
+            ignore_files(FileSystem::FORGIVING, only.into_iter()),
+            [None, Some(&b".GitIgnore"[..])]
+        );
+        for files in [BOTH, GIT, [None, None], [Some(&b".braidignore"[..]), None]] {
+            assert_eq!(from_bits(bits(&files)), files);
+        }
     }
 
     #[cfg(unix)]
@@ -138,7 +243,7 @@ mod tests {
         std::fs::write(outside.path().join("rules"), "*\n").unwrap();
         std::os::unix::fs::symlink(outside.path().join("rules"), temp.path().join(".gitignore"))
             .unwrap();
-        let root = enter(&dir(temp.path()), b"", &None);
+        let root = enter(&dir(temp.path()), b"", &None, &GIT);
         assert!(!is_ignored(&root, b"anything", false));
     }
 }
