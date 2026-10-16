@@ -1,7 +1,8 @@
 /* Elffuss Braid · braid.elffuss.com
    The language toggle, the copy buttons, the faded edge of code blocks that
-   scroll, and the markers of the ratio table. No dependencies, no requests.
-   Without this file the page is English and complete, and the toggle and
+   scroll (only those take keyboard focus), and the markers of the ratio
+   table. No dependencies, no requests. Without this file the page is
+   English and complete, every code block takes focus, and the toggle and
    the copy buttons stay hidden. */
 (function () {
   'use strict';
@@ -44,6 +45,12 @@
     for (var i = 0; i < list.length; i++) fn(list[i]);
   }
 
+  // Boxes whose text keeps its lines and may scroll sideways. In the HTML
+  // each is a labelled region that takes keyboard focus; edges() keeps that
+  // only for the ones that do scroll at the current width.
+  var SCROLLERS = '.code pre, .term-cols pre, .table-wrap';
+  var scrollers = [];
+
   function apply(value) {
     lang = value;
     root.setAttribute('lang', value);
@@ -52,8 +59,10 @@
       button.setAttribute('aria-pressed', String(button.getAttribute('data-set-lang') === value));
     });
     each('[data-aria-' + value + ']', function (el) {
+      if (el.matches(SCROLLERS) && el.getAttribute('role') !== 'region') return;
       el.setAttribute('aria-label', el.getAttribute('data-aria-' + value));
     });
+    allEdges(); // the other language has other widths
   }
 
   function keepQuery(value) {
@@ -155,23 +164,37 @@
     if (legend) legend.hidden = false;
   }
 
-  // A copyable block keeps its lines and scrolls in its own box. When it is
-  // wider than the box, the side that has more is marked, and site.css
-  // fades the text there.
-  function edges(pre) {
-    var max = pre.scrollWidth - pre.clientWidth;
-    pre.classList.toggle('more-right', max > 1 && pre.scrollLeft < max - 1);
-    pre.classList.toggle('more-left', max > 1 && pre.scrollLeft > 1);
+  // A box that is wider than its text scrolls in it. Only then is it a
+  // region to tab to, named in the page's language; otherwise it is plain
+  // text, and keyboards and screen readers pass over it. The side that has
+  // more is marked, and site.css fades the text there.
+  function edges(el) {
+    var max = el.scrollWidth - el.clientWidth;
+    var scrolls = max > 1;
+    if (scrolls) {
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('role', 'region');
+      var label = el.getAttribute('data-aria-' + lang);
+      if (label) el.setAttribute('aria-label', label);
+    } else if (el !== document.activeElement) {
+      el.removeAttribute('tabindex');
+      el.removeAttribute('role');
+      el.removeAttribute('aria-label');
+    }
+    el.classList.toggle('more-right', scrolls && el.scrollLeft < max - 1);
+    el.classList.toggle('more-left', scrolls && el.scrollLeft > 1);
+  }
+  function allEdges() {
+    for (var i = 0; i < scrollers.length; i++) edges(scrollers[i]);
   }
   function watchEdges() {
-    var list = document.querySelectorAll('.code pre');
-    function all() { for (var i = 0; i < list.length; i++) edges(list[i]); }
-    for (var i = 0; i < list.length; i++) {
-      list[i].addEventListener('scroll', function () { edges(this); }, { passive: true });
+    scrollers = document.querySelectorAll(SCROLLERS);
+    for (var i = 0; i < scrollers.length; i++) {
+      scrollers[i].addEventListener('scroll', function () { edges(this); }, { passive: true });
     }
-    window.addEventListener('resize', all);
-    document.addEventListener('toggle', all, true); // a <details> opened
-    all();
+    window.addEventListener('resize', allEdges);
+    document.addEventListener('toggle', allEdges, true); // a <details> opened
+    allEdges();
   }
 
   function start() {

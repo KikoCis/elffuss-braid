@@ -12,6 +12,10 @@
   --text: #eae8f2;
   --text-dim: #b3afce;
   --muted: #7f7ca0;
+  /* --muted is for strokes, dots and dashed borders; text that should look
+     quieter than --text-dim uses this, which keeps 4.5:1 even where the
+     aurora lightens the ground */
+  --muted-text: #8e8bb0;
   /* strand colours: text and graphics are the same in the dark */
   --brass: #c8a06a;
   --teal: #54dcc6;
@@ -57,6 +61,7 @@
     --text: #15141f;
     --text-dim: #3f3c57;
     --muted: #5f5b7d;
+    --muted-text: #5f5b7d;
     --brass: #7d5a1f;
     --teal: #0b6f61;
     --indigo: #4b3bd1;
@@ -213,6 +218,15 @@ main:focus { outline: none; }
   font-size: .9rem;
 }
 .nav a:hover { color: var(--text); background: var(--surface-soft); }
+/* on a phone the section links keep to two rows in both languages: GitHub
+   is already a button in the hero and a link in the footer */
+@media (max-width: 539px) {
+  .nav li:last-child { display: none; }
+}
+@media (max-width: 479px) {
+  .nav ul { margin-inline: -6px; }
+  .nav a { padding-inline: 6px; }
+}
 .lang {
   display: inline-flex;
   gap: 2px;
@@ -409,26 +423,29 @@ h1 {
   vertical-align: 1px;
 }
 .story .term pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* blame and the op log are columns: they keep their lines, like the
+   copyable blocks below */
+.story .term-cols pre { white-space: pre; overflow-wrap: normal; }
 
-/* copyable blocks keep their exact text and scroll in their own box;
-   site.js marks one that is wider than its box, and the text fades at the
-   edge that has more, so a phone shows that it scrolls */
-.code pre.more-right {
+/* copyable blocks and column transcripts keep their exact text and scroll
+   in their own box; site.js marks one that is wider than its box, and the
+   text fades at the edge that has more, so a phone shows that it scrolls */
+.code pre.more-right, .term-cols pre.more-right {
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent);
   mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent);
 }
-.code pre.more-left {
+.code pre.more-left, .term-cols pre.more-left {
   -webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
   mask-image: linear-gradient(to right, transparent, #000 40px);
 }
-.code pre.more-left.more-right {
+.code pre.more-left.more-right, .term-cols pre.more-left.more-right {
   -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 56px), transparent);
   mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 56px), transparent);
 }
-.code pre:focus-visible { outline-offset: -2px; border-radius: 0 0 11px 11px; }
+.code pre:focus-visible, .term-cols pre:focus-visible { outline-offset: -2px; border-radius: 0 0 11px 11px; }
 @supports selector(:has(*)) {
-  .code:has(> pre:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
-  .code > pre:focus-visible { outline: none; }
+  .code:has(> pre:focus-visible), .term-cols:has(> pre:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .code > pre:focus-visible, .term-cols > pre:focus-visible { outline: none; }
 }
 .code {
   margin-block: 14px 22px;
@@ -555,15 +572,16 @@ h3 {
 .loop-row { display: grid; gap: 12px; align-items: center; margin-top: 14px; }
 .loop-row p + p { margin-top: 0; }
 .loop-fig { max-width: 420px; justify-self: center; width: 100%; }
+/* equal halves, so the figure keeps room for its labels next to the text */
 @media (min-width: 1000px) {
-  .loop-row { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; }
+  .loop-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
 }
 .gitloop { display: block; width: 100%; height: auto; }
 .gitloop .gl-path { fill: none; stroke: var(--text-dim); stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; opacity: .8; }
 .gitloop .gl-dot { fill: var(--text-dim); }
 .gitloop .gl-dot-x { fill: var(--g-magenta); }
-.gitloop .gl-t { fill: var(--text-dim); font: 15px var(--mono); }
-.gitloop .gl-x { fill: var(--magenta); font: 600 15px var(--mono); }
+.gitloop .gl-t { fill: var(--text-dim); font: 17px var(--mono); }
+.gitloop .gl-x { fill: var(--magenta); font: 600 17px var(--mono); }
 .gitloop .gl-ar { fill: var(--text-dim); }
 details.run {
   margin-top: 24px;
@@ -626,7 +644,7 @@ details.run .code { margin: 12px; }
 .dgm .mono { font-family: var(--mono); }
 .dgm .hi { fill: var(--text); }
 .dgm .dim { fill: var(--text-dim); }
-.dgm .muted { fill: var(--muted); }
+.dgm .muted { fill: var(--muted-text); }
 .dgm .strong { font-weight: 600; }
 .dgm .t-a { fill: var(--brass); }
 .dgm .t-b { fill: var(--teal); }
@@ -765,7 +783,7 @@ tbody tr:hover { background: var(--surface-soft); }
   html[lang="es"] .ratios td:nth-child(3)::before { content: "Para repetirlo: "; }
   html:not([lang="es"]) .checks td:last-child::before { content: "How it is checked: "; }
   html[lang="es"] .checks td:last-child::before { content: "Cómo se comprueba: "; }
-  .ratios td:nth-child(3)::before, .checks td:last-child::before { color: var(--muted); font-size: .86rem; }
+  .ratios td:nth-child(3)::before, .checks td:last-child::before { color: var(--muted-text); font-size: .86rem; }
 }
 
 /* ------------------------------------------------------------- honest */
