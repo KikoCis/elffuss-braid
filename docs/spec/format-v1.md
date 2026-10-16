@@ -507,7 +507,31 @@ uv n | n × (bytes ref name | [32] id), names strictly ascending
 [32] BLAKE3 hash of everything before it
 ```
 
-**Planned, not implemented yet:** a binary fuse filter in indexes for fast
-misses, merged indexes, per-repository dictionaries (codec 2), and garbage
-collection (`braid gc`), which must keep every base and chunk that something
-still needs.
+**Where the room goes.** Imported, the histories of four public repositories
+take 2.5 to 3.0 times what `git gc --aggressive` packs them into, and 6.1 to
+8.3 times without deltas. As a ratio to git's packed size:
+
+| Part | Share |
+|---|---|
+| Blobs: file contents, and the raw bytes of imported commits | 1.46 to 1.74 |
+| Record headers, checksums and padding | 0.21 to 0.35 |
+| Journal and index entries | 0.18 to 0.33 |
+| Changesets | 0.14 to 0.35 |
+| Trees | 0.25 to 0.31 |
+| The git map | 0.13 to 0.22 |
+
+**Planned, not implemented yet:**
+
+- *Storage version 3, compact records and indexes.* A record header that
+  leaves out the id its index entry already holds and writes lengths as `uv`,
+  and index entries of about half their size. The overhead per object, headers
+  and entries together, is 0.4 to 0.7 of git's size above.
+- *Skip-deltas.* Deltas one level deep hold every change since their base, so
+  blobs take several times what git's delta chains do. A delta could be made
+  against a recent version, with a bounded number of deltas to apply on any
+  read (logarithmic in the number of versions) rather than exactly one.
+- *Per-repository dictionaries (codec 2)*, for the small objects deltas do not
+  help: trees, changesets and raw commits.
+- A binary fuse filter in indexes for fast misses, and merged indexes.
+- Garbage collection (`braid gc`), which must keep every base and chunk that
+  something still needs.
