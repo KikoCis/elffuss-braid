@@ -248,11 +248,13 @@ impl Repo {
     }
 
     /// Imports every branch and tag of the git repository at `git_repo`,
-    /// incrementally, and points the matching braid refs at them.
+    /// incrementally, on one thread per core, and points the matching braid
+    /// refs at them.
     pub fn git_import(&self, git_repo: &Path, agent: &str) -> Result<GitImport, Error> {
         let previous = self.store.refs()?.get(MAP_REF);
         let mut map = self.git_map_at(previous)?;
-        let report = braid_git::import(git_repo, &self.store, &mut map, &ImportOptions::default())?;
+        let options = ImportOptions::default();
+        let report = braid_git::import_parallel(git_repo, &self.store, &mut map, &options, 0)?;
         let map_id = self.put_map(&map, previous)?;
         self.store.sync()?;
 
