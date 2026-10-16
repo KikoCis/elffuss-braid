@@ -248,8 +248,8 @@ impl Repo {
     }
 
     /// Imports every branch and tag of the git repository at `git_repo`,
-    /// incrementally, on one thread per core, and points the matching braid
-    /// refs at them.
+    /// incrementally, on one thread per core (up to eight), and points the
+    /// matching braid refs at them.
     pub fn git_import(&self, git_repo: &Path, agent: &str) -> Result<GitImport, Error> {
         let previous = self.store.refs()?.get(MAP_REF);
         let mut map = self.git_map_at(previous)?;

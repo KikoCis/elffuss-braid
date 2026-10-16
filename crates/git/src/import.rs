@@ -33,6 +33,12 @@ use crate::repo::GitRepo;
 /// Commits per batch of a parallel import.
 const BATCH_COMMITS: usize = 64;
 
+/// Threads of a parallel import that leaves the choice to it: one per core,
+/// up to this many. Past that, the one thread that converts commits in order
+/// sets the pace, and more threads only contend for the store and spin while
+/// they wait.
+const DEFAULT_THREADS: usize = 8;
+
 /// How many bytes of blob content the reading ahead of one batch keeps until
 /// the blobs are stored. Past that, a blob read ahead keeps only its id and
 /// size, and is read again when it is stored.
@@ -129,7 +135,7 @@ pub fn import<O: Objects>(
     importer.finish(refs)
 }
 
-/// [`import`], on `threads` threads, or one per core when `threads` is 0.
+/// [`import`], on `threads` threads; 0 means one per core, up to eight.
 ///
 /// The result is the same as [`import`]'s: the same objects, the same map,
 /// the same report, and the same hints to the store, each given while the
@@ -165,6 +171,12 @@ pub fn import_parallel<O: Objects + Sync>(
     options: &ImportOptions,
     threads: usize,
 ) -> Result<ImportReport, Error> {
+    let threads = match threads {
+        0 => std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(DEFAULT_THREADS),
+        threads => threads,
+    };
     let Ok(pool) = rayon::ThreadPoolBuilder::new().num_threads(threads).build() else {
         return import(git_repo, objects, map, options);
     };
