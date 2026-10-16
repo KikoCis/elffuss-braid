@@ -7,9 +7,9 @@
 **Version control for repositories where many agents land changes at the same time.**
 
 A from-scratch version control system in Rust. Creating a change costs what the
-change touches, not what the repository weighs. Landing on `main` is one short
-step per branch, with no repository-wide lock. Git stays at the edges, so GitHub
-keeps working.
+change touches, not what the repository weighs. Agents commit in parallel, and
+landing on `main` is one short step they take in turn. Git stays at the edges,
+so GitHub keeps working.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
@@ -46,7 +46,7 @@ Braid starts from the opposite assumptions:
 | | git | braid |
 |---|---|---|
 | Unit of change | a commit: a full tree snapshot | a changeset: the files that changed against the first parent, plus the root tree id |
-| Landing on `main` | the client pushes and is rejected if behind | `land` rebases in one short serial step per branch, at a cost that follows the change |
+| Landing on `main` | the client pushes and is rejected if behind | `land` rebases in one short step that landings take in turn, at a cost that follows the change |
 | Many writers | one index per working tree | one workspace per agent over a shared append-only store; creating a change takes no repository lock |
 | Fetching | negotiated packs, unique per client | immutable objects by id, so any cache (local daemon, nginx, CDN) can serve them |
 | Large directories | rewritten whole on every change | split into content-defined nodes; an edit rewrites only its path |
@@ -66,7 +66,7 @@ flowchart LR
         A3["agent N · workspace"] --> ST
         ST[("shared store<br/>immutable objects + op log")]
     end
-    ST -- "land: one short step per branch" --> MAIN(["main"])
+    ST -- "land: one short step, taken in turn" --> MAIN(["main"])
     ST <-- "objects by id" --> SRV["braid server (optional)"]
     ST <-- "import / export" --> GIT["git bridge"]
     GIT <--> GH["GitHub · Gitea"]
@@ -77,10 +77,10 @@ flowchart LR
 2. **A changeset records what changed against its first parent,** plus the
    root tree it produces. History, blame and rebase read the short list; the
    root id commits to the whole repository.
-3. **Landing is one short serial step per branch.** If the change was built on
-   the current head it fast-forwards. If not, braid rebases it path by path and
-   merges only the files both sides touched. Conflicts come back as data that
-   an agent can act on.
+3. **Agents commit in parallel; landing is one short step they take in turn.**
+   If the change was built on the current head it fast-forwards. If not,
+   braid rebases it path by path and merges only the files both sides
+   touched. Conflicts come back as data that an agent can act on.
 4. **Many processes share one store without a daemon.** Segments are leased
    with locks the kernel releases if a process dies, objects are published
    before anything refers to them, and an append-only op log records every
@@ -92,20 +92,21 @@ flowchart LR
 ## Quick start
 
 Braid stores history, moves it in and out of git bit for bit, and gives each
-agent a workspace that lands on `main` without waiting for the others.
+agent a workspace of its own that lands on `main` in one short step.
 
 ```bash
 git clone https://github.com/KikoCis/elffuss-braid
 cd elffuss-braid
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
+SRC="$PWD"                       # any git repository will do; this one is at hand
 
 braid init /tmp/demo
 cd /tmp/demo
-braid git import /path/to/any/git/repository   # every branch and tag
+braid git import "$SRC"          # every branch and tag
 braid log main -n 5
-braid log main -- src/lib.rs     # only the changes to a path
-braid blame main src/lib.rs      # who last changed each line
+braid log main -- README.md      # only the changes to a path
+braid blame main README.md       # who last changed each line
 braid show main --json
 braid fsck
 braid stats        # objects by kind, and how they are stored: whole, deltas, chunks
@@ -206,17 +207,18 @@ Repositories come in with their whole history and keep a git mirror.
   again and compared with the original, so the round trip is bit for bit.
 - `braid git sync` keeps a branch of GitHub, Gitea or any git remote in step
   with a braid branch: it fetches and imports the remote branch, then
-  fast-forwards braid, or pushes braid's branch as a fast-forward with a
-  lease, merging first when both moved. Conflicts move nothing and exit with
-  status 2. Braid never force-pushes.
+  fast-forwards braid, or pushes braid's branch, merging first when both
+  moved. The push carries a lease on what the sync just fetched, so the
+  remote only ever fast-forwards and its history is never rewritten.
+  Conflicts move nothing and exit with status 2.
 
   ```bash
   braid git sync https://github.com/you/project.git --branch main
   braid git sync https://github.com/you/project.git --dry-run --json
   ```
 - Braid contains no code from git itself, which is GPLv2. It reads and writes
-  git data with gitoxide (MIT or Apache-2.0) and runs the `git` binary only as
-  a subprocess to push.
+  git data with gitoxide (MIT or Apache-2.0); `git sync` also runs the `git`
+  binary as a subprocess, to set up its mirror, fetch and push.
 
 ## Design
 
@@ -234,7 +236,7 @@ Repositories come in with their whole history and keep a git mirror.
 | 2 | Local store and op log: many processes, crash-safe, `fsck`, `undo` | ✅ done |
 | 3 | History and the git bridge: import, export, `log`, `show` | ✅ done |
 | 4 | Many agents on one machine: workspaces, `land`, conflicts, `git sync` | ✅ done |
-| 5 | Performance: deltas, chunking, derived indexes, `blame`, benchmarks against git | next |
+| 5 | Performance: deltas, chunking, derived indexes, `blame`, benchmarks against git | in progress |
 | 6 | Server: lazy sparse clones, tokens, caching tiers | planned |
 | 7 | Daemon, virtual file system, WebAssembly core | planned |
 
@@ -290,32 +292,38 @@ yours will differ: run the script before relying on any of them.
 | 16 agents, the same | 0.2 | `python3 bench/run.py --only agents` |
 | Newest 1,000 changesets of tmux: `braid log -n 1000` vs `git log --first-parent -n 1000 --format=%H` after `git gc --aggressive` | 1.7 | `python3 bench/run.py --only history` |
 
-`braid log -- <path>` and `braid blame` are not measured: braid does not
-have them yet, and the script measures them as soon as it does.
+`braid log -- <path>` and `braid blame` came after this run, so it does not
+measure them; the script does now.
 
-Braid is slower than git at most of this, and this is why:
+At commit `5330054`, braid was slower than git at most of this, for the
+reasons below. Much of it has been worked on since: braid now stores deltas
+and cuts large files into chunks, walks the working copy in parallel through
+directory handles, edits a large directory in place, and looks objects up
+through the store's indexes instead of mapping the whole store first. The
+ratios above show none of that; it takes a new run of the script to say how
+much it changed.
 
-- **Importing and storing history.** Braid keeps every version of a file
+- **Importing and storing history.** Braid kept every version of a file
   whole, compressed on its own, where git stores most versions as a delta
-  against another; storing deltas is the next milestone. The import converts
-  and checks every object on one thread, and much of that time goes to
-  checking every entry name against the aliases of `.git`, with Unicode
-  normalisation and case folding, each time a tree is read or built.
-- **Status and commit on a large tree.** `braid status` walks the working
+  against another. The import converted and checked every object on one
+  thread, and much of that time went to checking every entry name against
+  the aliases of `.git`, with Unicode normalisation and case folding, each
+  time a tree was read or built.
+- **Status and commit on a large tree.** `braid status` walked the working
   copy one directory at a time on one core, opening each directory from the
   root one name at a time, so that it never follows a symlink, and looking
-  for `.gitignore` and `.braidignore` in each; it also reads the whole base
-  tree and rewrites the whole stat cache every time. It uses less CPU time
+  for `.gitignore` and `.braidignore` in each; it also read the whole base
+  tree and rewrote the whole stat cache every time. It used less CPU time
   than `git status`, which spreads its checks over several cores and, with
   the untracked cache, skips the directories that did not change.
-  `braid commit` has no staging area, so it runs a whole status first.
-- **A new file in a wide directory.** Braid writes only the few nodes of a
-  large directory that change, but it reads and rebuilds the whole directory
+  `braid commit` has no staging area, so it ran a whole status first.
+- **A new file in a wide directory.** Braid wrote only the few nodes of a
+  large directory that change, but it read and rebuilt the whole directory
   in memory to find them, checking every name again. From 2,500 to 20,000
   files, the cost of one commit grew 5.2 times for `braid commit`, 3.6 times
   for `braid change create` and 3.5 times for git.
-- **Opening the store.** Every command first builds a map of where each
-  object of the store is, which on a history the size of tmux's is a large
+- **Opening the store.** Every command first built a map of where each
+  object of the store is, which on a history the size of tmux's was a large
   part of `braid log -n 1000`; git looks each object up in its pack index
   when it needs it.
 
@@ -368,7 +376,8 @@ Braid es un sistema de control de versiones escrito de cero en Rust, para
 repositorios en los que muchos agentes aterrizan cambios a la vez.
 
 - Crear un cambio cuesta lo que toca el cambio, no lo que pesa el repositorio.
-- Aterrizar en `main` es un paso corto por rama, sin cerrojo global.
+- Los agentes hacen commit en paralelo, y aterrizar en `main` es un paso
+  corto que dan por turnos.
 - Git se queda en los bordes, así que GitHub y Gitea siguen funcionando.
 
 Parte de las ideas que Anthropic contó en público sobre Scion, su sistema interno.
@@ -376,6 +385,6 @@ Es una implementación independiente, sin código de Anthropic y sin relación c
 la empresa.
 
 Hoy está en pre-alfa: guarda historia, la mete y saca de git bit a bit, y cada
-agente tiene su espacio de trabajo y aterriza en `main` sin esperar a los demás.
+agente tiene su propio espacio de trabajo y aterriza en `main` en un paso corto.
 Las [fases](#status-and-roadmap) dicen qué llega después y qué pruebas tiene que
 pasar cada una.
