@@ -78,7 +78,7 @@ pub use ancestry::{
     GraphNode, first_parent_chain_contains, is_ancestor, merge_base, merge_bases, skip_height,
 };
 pub use apply::apply;
-pub use blame::Blame;
+pub use blame::{Blame, LineChange, line_diff};
 pub use commit::{admit, commit};
 pub use derived::{DerivedIndex, DerivedKey, MemoryIndex};
 pub use diff::diff;
