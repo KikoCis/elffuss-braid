@@ -22,7 +22,7 @@ keeps working.
 
 ---
 
-**In this repository:** [why braid](#why-braid) · [how it works](#how-it-works) · [quick start](#quick-start) · [working with git](#working-with-git) · [design](#design) · [status](#status-and-roadmap) · [what is honest about this](#what-is-honest-about-this) · [credits](#prior-art-and-credits)
+**In this repository:** [why braid](#why-braid) · [how it works](#how-it-works) · [quick start](#quick-start) · [working with git](#working-with-git) · [design](#design) · [status](#status-and-roadmap) · [what is honest about this](#what-is-honest-about-this) · [measured against git](#measured-against-git) · [credits](#prior-art-and-credits)
 
 ---
 
@@ -240,9 +240,11 @@ landing.
   repositories, and runs workspaces for many agents on one machine. Keep your
   git repository as the source of truth, and do not keep anything only in
   braid.
-- **No performance claims yet.** When benchmarks land they will be ratios
-  against git on the same machine, with the script that reproduces them, never
-  numbers nobody can check.
+- **Slower than git at most things today.** [Measured against
+  git](#measured-against-git) gives every result as a ratio against git on
+  the same machine, with the script that reproduces it, never numbers nobody
+  can check. Braid is faster when many agents land at once, and slower at
+  importing and storing history, and at status and commit on large trees.
 - **The hashed format is frozen** and every golden vector is recomputed by a
   second implementation written from the specification alone. Storage and
   protocols can still change.
@@ -251,6 +253,70 @@ landing.
   implementation, contains no code from Anthropic, and is not affiliated with
   or endorsed by Anthropic.
 - **Platforms.** CI tests Linux and other Unix-like systems. Windows is not tested yet.
+
+## Measured against git
+
+Each number is braid's time, or the size of its store, divided by git's for
+the same work on the same machine: below 1 braid is faster or smaller, above
+1 it is slower or larger. They are medians from one run of
+[`bench/run.py`](bench/README.md), which describes every scenario, measuring
+braid at commit `5330054`; the run held rounds back while other work kept
+the machine busy (`--max-load`). The numbers come from that one machine, and
+yours will differ: run the script before relying on any of them.
+
+| What was compared | braid / git | Reproduce |
+|---|---|---|
+| Import [tmux](https://github.com/tmux/tmux) 3.5a, 10,287 commits: `braid init` + `braid git import` vs `git clone --no-local --bare` | 17.6 | `python3 bench/run.py --only import` |
+| Import it and check it out: `braid init` + `braid git import` + `braid workspace add` vs `git clone --no-local` | 17.1 | `python3 bench/run.py --only import` |
+| Size after that import: `du` of `.braid/store` vs the bare clone after `git gc --aggressive` | 25.1 | `python3 bench/run.py --only store` |
+| Status of a tree of 100,000 files, clean: `braid status` vs `git status`, no untracked cache, no fsmonitor | 2.6 | `python3 bench/run.py --only status` |
+| Status of that tree, clean: `braid status` vs `git status` with `core.untrackedCache=true`, no fsmonitor | 5.8 | `python3 bench/run.py --only status` |
+| Status of that tree, 10 files modified: `braid status` vs `git status`, no untracked cache, no fsmonitor | 3.0 | `python3 bench/run.py --only status` |
+| Status of that tree, 10 files modified: `braid status` vs `git status` with `core.untrackedCache=true`, no fsmonitor | 5.7 | `python3 bench/run.py --only status` |
+| Commit one changed file of that tree: `braid commit` vs `git add` + `git commit` | 5.0 | `python3 bench/run.py --only commit` |
+| Commit one new file in a directory of 20,000 files, 200 times: `braid commit` vs `git add` + `git commit` | 1.8 | `python3 bench/run.py --only wide` |
+| Commit one new file in that directory without a working copy, 200 times: `braid change create --land` vs `git add` + `git commit` | 0.9 | `python3 bench/run.py --only wide` |
+| 4 agents land 10 commits each, at once: `braid commit` + `braid land`, a workspace each, vs `git commit` + `git push`, a clone each, with `git pull --rebase` and a new push when rejected | 0.4 | `python3 bench/run.py --only agents` |
+| 8 agents, the same | 0.3 | `python3 bench/run.py --only agents` |
+| 16 agents, the same | 0.2 | `python3 bench/run.py --only agents` |
+| Newest 1,000 changesets of tmux: `braid log -n 1000` vs `git log --first-parent -n 1000 --format=%H` after `git gc --aggressive` | 1.7 | `python3 bench/run.py --only history` |
+
+`braid log -- <path>` and `braid blame` are not measured: braid does not
+have them yet, and the script measures them as soon as it does.
+
+Braid is slower than git at most of this, and this is why:
+
+- **Importing and storing history.** Braid keeps every version of a file
+  whole, compressed on its own, where git stores most versions as a delta
+  against another; storing deltas is the next milestone. The import converts
+  and checks every object on one thread, and much of that time goes to
+  checking every entry name against the aliases of `.git`, with Unicode
+  normalisation and case folding, each time a tree is read or built.
+- **Status and commit on a large tree.** `braid status` walks the working
+  copy one directory at a time on one core, opening each directory from the
+  root one name at a time, so that it never follows a symlink, and looking
+  for `.gitignore` and `.braidignore` in each; it also reads the whole base
+  tree and rewrites the whole stat cache every time. It uses less CPU time
+  than `git status`, which spreads its checks over several cores and, with
+  the untracked cache, skips the directories that did not change.
+  `braid commit` has no staging area, so it runs a whole status first.
+- **A new file in a wide directory.** Braid writes only the few nodes of a
+  large directory that change, but it reads and rebuilds the whole directory
+  in memory to find them, checking every name again. From 2,500 to 20,000
+  files, the cost of one commit grew 5.2 times for `braid commit`, 3.6 times
+  for `braid change create` and 3.5 times for git.
+- **Opening the store.** Every command first builds a map of where each
+  object of the store is, which on a history the size of tmux's is a large
+  part of `braid log -n 1000`; git looks each object up in its pack index
+  when it needs it.
+
+Braid is faster where it was designed to be: many agents landing at once. A
+push to git goes in only from a clone that has the latest commit, so each
+agent that loses the race fetches, rebases and pushes again: on average 1.1
+times per push with 4 agents, 2.5 times with 8 and 5.2 times with 16.
+`braid land` rebases onto whatever landed first, in one short step that
+landings take in turn, so no agent retried, and nearly every landing was
+such a rebase.
 
 ## Part of Elffuss
 
