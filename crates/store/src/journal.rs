@@ -97,13 +97,19 @@ impl Entry {
 
     /// The 64 bytes of a journal entry.
     pub fn encode(&self) -> [u8; ENTRY_LEN as usize] {
+        self.encode_in(0)
+    }
+
+    /// The 64 bytes of an entry of a version 2 index: a journal entry whose
+    /// reserved field holds the number of its segment in the index.
+    pub fn encode_in(&self, segment: u16) -> [u8; ENTRY_LEN as usize] {
         let mut out = [0u8; ENTRY_LEN as usize];
         out[0..32].copy_from_slice(self.id.as_bytes());
         out[32..40].copy_from_slice(&self.offset.to_le_bytes());
         out[40..44].copy_from_slice(&self.stored_len.to_le_bytes());
         out[44] = self.kind.code();
         out[45] = self.codec;
-        // out[46..48] stays zero.
+        out[46..48].copy_from_slice(&segment.to_le_bytes());
         out[48..56].copy_from_slice(&self.raw_len.to_le_bytes());
         out[56..60].copy_from_slice(&self.crc.to_le_bytes());
         let entry_crc = crc32c::crc32c(&out[..60]);
@@ -113,13 +119,27 @@ impl Entry {
 
     /// Decodes a journal entry.
     pub fn decode(bytes: &[u8]) -> Result<Self, Unusable> {
-        if bytes.len() != ENTRY_LEN as usize {
-            return Err(Unusable::Invalid);
-        }
-        if crc32c::crc32c(&bytes[..60]) != u32::from_le_bytes(array(&bytes[60..64])) {
-            return Err(Unusable::Invalid);
-        }
+        Self::check_crc(bytes)?;
         Self::from_fields(&bytes[0..32], &bytes[32..60])
+    }
+
+    /// Decodes an entry of a version 2 index, and the number of its
+    /// segment in the index.
+    pub fn decode_in(bytes: &[u8]) -> Result<(Self, u16), Unusable> {
+        Self::check_crc(bytes)?;
+        let segment = u16::from_le_bytes(array(&bytes[46..48]));
+        let mut fields: [u8; 28] = array(&bytes[32..60]);
+        fields[14..16].fill(0);
+        Ok((Self::from_fields(&bytes[0..32], &fields)?, segment))
+    }
+
+    fn check_crc(bytes: &[u8]) -> Result<(), Unusable> {
+        if bytes.len() != ENTRY_LEN as usize
+            || crc32c::crc32c(&bytes[..60]) != u32::from_le_bytes(array(&bytes[60..64]))
+        {
+            return Err(Unusable::Invalid);
+        }
+        Ok(())
     }
 
     /// Builds an entry from an id and the 28 bytes that follow it in a journal
@@ -290,6 +310,20 @@ mod tests {
         assert_eq!(&bytes[48..56], &30u64.to_le_bytes());
         assert_eq!(&bytes[56..60], &entry.crc.to_le_bytes());
         assert_eq!(&bytes[60..64], &crc32c::crc32c(&bytes[..60]).to_le_bytes());
+    }
+
+    #[test]
+    fn index_entries_carry_their_segment() {
+        let entry = entry(4);
+        let bytes = entry.encode_in(0x0102);
+        assert_eq!(&bytes[46..48], &[0x02, 0x01]);
+        assert_eq!(Entry::decode_in(&bytes), Ok((entry, 0x0102)));
+        // In a journal the field is reserved.
+        assert_eq!(Entry::decode(&bytes), Err(Unusable::Newer));
+        assert_eq!(Entry::decode_in(&entry.encode()), Ok((entry, 0)));
+        let mut damaged = bytes;
+        damaged[47] ^= 1;
+        assert_eq!(Entry::decode_in(&damaged), Err(Unusable::Invalid));
     }
 
     #[test]

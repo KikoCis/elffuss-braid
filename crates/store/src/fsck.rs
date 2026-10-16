@@ -28,11 +28,11 @@ use crate::chunks;
 use crate::delta;
 use crate::error::Error;
 use crate::fsutil::{count_temps, read_range};
-use crate::index::IndexError;
+use crate::index::{Header as IndexHeader, IndexError};
 use crate::journal::{self, Entry};
 use crate::oplog::{Bad, decode_checkpoint, next_record, not_in_transaction, parse_record};
 use crate::record::{self, CODEC_CHUNKED, CODEC_DELTA, Header};
-use crate::segments::{BaseCache, Files, list, segment_path};
+use crate::segments::{BaseCache, Files, Listing, list, segment_path};
 use crate::{Store, format_file, index, scan};
 
 /// What fsck found.
@@ -118,11 +118,21 @@ pub enum Problem {
         /// What failed.
         detail: String,
     },
-    /// An index that fails its checksum or its structure checks. Lookups work
-    /// around it by scanning the segment.
+    /// An index that fails its checksum or its structure checks, or a
+    /// sealed segment that no index covers. Lookups work around it by
+    /// scanning the segment.
     BadIndex {
         /// The segment's name.
         segment: String,
+        /// What failed.
+        detail: String,
+    },
+    /// A merged index that fails its checksums or its structure checks, or
+    /// names a segment that is missing. Lookups work around it by scanning
+    /// the segments it covers.
+    BadMergedIndex {
+        /// The merged index's name.
+        name: String,
         /// What failed.
         detail: String,
     },
@@ -182,6 +192,9 @@ impl fmt::Display for Problem {
             ),
             Problem::BadIndex { segment, detail } => {
                 write!(f, "segment {segment}, index: {detail}")
+            }
+            Problem::BadMergedIndex { name, detail } => {
+                write!(f, "merged index {name}: {detail}")
             }
             Problem::BadOperation { offset, detail } => {
                 write!(f, "op log, record at byte {offset}: {detail}")
@@ -424,8 +437,8 @@ impl Store {
         Ok(refs)
     }
 
-    /// Checks every segment. Returns the objects that an entry leads to and
-    /// whose content checks out.
+    /// Checks every segment and index. Returns the objects that an entry
+    /// leads to and whose content checks out.
     fn check_segments(&self, report: &mut FsckReport) -> HashSet<ObjectId> {
         let dir = self.root.join("seg");
         let mut collected = Collected::default();
@@ -439,41 +452,119 @@ impl Store {
                 return collected.objects;
             }
         };
-        for (name, files) in listing {
+        let mut merged = check_merged(&dir, &listing, report);
+        for (name, files) in &listing.segments {
+            let covered = merged.remove(name.as_str()).unwrap_or_default();
             if !files.seg {
-                if files.idx {
+                if files.idx || !covered.is_empty() {
                     report.problems.push(Problem::BadIndex {
-                        segment: name,
+                        segment: name.clone(),
                         detail: "the segment file is missing".to_owned(),
                     });
                 }
                 continue;
             }
             report.segments += 1;
-            check_segment(&dir, &name, files, report, &mut collected);
+            check_segment(&dir, name, *files, covered, report, &mut collected);
+        }
+        for (segment, sets) in merged {
+            for set in sets {
+                report.problems.push(Problem::BadMergedIndex {
+                    name: set.merged.unwrap_or_default(),
+                    detail: format!("it covers segment {segment}, whose file is missing"),
+                });
+            }
         }
         collected.check_later(report);
         collected.objects
     }
 }
 
+/// Reads and checks every merged index whole, and returns what each says
+/// of the segments it covers, by segment.
+fn check_merged(
+    dir: &Path,
+    listing: &Listing,
+    report: &mut FsckReport,
+) -> HashMap<String, Vec<Entries>> {
+    let mut out: HashMap<String, Vec<Entries>> = HashMap::new();
+    for name in &listing.merged {
+        let shown = format!("seg/{name}.midx");
+        let bytes = match fs::read(segment_path(dir, name, "midx")) {
+            Ok(bytes) => bytes,
+            // Merged into another one since the listing.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                report.problems.push(unreadable(&shown, &err));
+                continue;
+            }
+        };
+        match index::decode(&bytes, None) {
+            Ok(decoded) => {
+                let mut sets: Vec<Entries> = decoded
+                    .covered
+                    .iter()
+                    .map(|segment| Entries {
+                        entries: Vec::new(),
+                        rebuild: false,
+                        sealed_len: Some(segment.len),
+                        merged: Some(name.clone()),
+                    })
+                    .collect();
+                for (entry, segment) in decoded.entries {
+                    sets[usize::from(segment)].entries.push(entry);
+                }
+                for (segment, set) in decoded.covered.into_iter().zip(sets) {
+                    out.entry(segment.name).or_default().push(set);
+                }
+            }
+            Err(IndexError::Newer(detail)) => report.problems.push(Problem::Newer {
+                path: shown,
+                detail: format!("it holds {detail}"),
+            }),
+            Err(IndexError::Damaged(detail)) => {
+                report.problems.push(Problem::BadMergedIndex {
+                    name: name.clone(),
+                    detail: detail.to_owned(),
+                });
+                // Its segments are checked from their records, as lookups
+                // read them, if its head still says which they are.
+                let head = match index::header(&bytes) {
+                    Ok(IndexHeader::V2 { segments, .. }) => bytes
+                        .get(..IndexHeader::head_len(segments))
+                        .and_then(|head| index::head(head).ok()),
+                    _ => None,
+                };
+                for segment in head.map(|head| head.covered).unwrap_or_default() {
+                    out.entry(segment.name).or_default().push(Entries {
+                        entries: Vec::new(),
+                        rebuild: true,
+                        sealed_len: None,
+                        merged: Some(name.clone()),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 fn check_segment(
     dir: &Path,
     name: &str,
     files: Files,
+    merged: Vec<Entries>,
     report: &mut FsckReport,
     collected: &mut Collected,
 ) {
     // Entries before records: an entry is written after its record, so every
     // record an entry read now points at is already in the segment.
-    let Some(Entries {
-        entries,
-        rebuild,
-        sealed_len,
-    }) = segment_entries(dir, name, files, report)
-    else {
+    let mut sets = merged;
+    let own = segment_entries(dir, name, files, !sets.is_empty(), report);
+    let Some(own) = own else {
         return;
     };
+    sets.extend(own);
 
     let seg_path = segment_path(dir, name, "seg");
     let seg_name = format!("seg/{name}.seg");
@@ -491,12 +582,35 @@ fn check_segment(
             return;
         }
     };
-    if let Some(sealed_len) = sealed_len
-        && sealed_len != len
-    {
+    for set in &sets {
+        if let Some(sealed_len) = set.sealed_len
+            && sealed_len != len
+        {
+            let detail = format!("the segment was {sealed_len} bytes when sealed and is {len} now");
+            report.problems.push(match &set.merged {
+                Some(merged) => Problem::BadMergedIndex {
+                    name: merged.clone(),
+                    detail: format!("segment {name}: {detail}"),
+                },
+                None => Problem::BadIndex {
+                    segment: name.to_owned(),
+                    detail,
+                },
+            });
+        }
+    }
+    // A sealed segment that no index covers: its records are read by
+    // scanning, as lookups do.
+    if sets.is_empty() && len > 0 {
         report.problems.push(Problem::BadIndex {
             segment: name.to_owned(),
-            detail: format!("the segment was {sealed_len} bytes when sealed and is {len} now"),
+            detail: "no index or journal covers this segment".to_owned(),
+        });
+        sets.push(Entries {
+            entries: Vec::new(),
+            rebuild: true,
+            sealed_len: None,
+            merged: None,
         });
     }
     let mut records = BTreeMap::new();
@@ -549,14 +663,18 @@ fn check_segment(
     collected.segments.push(seg_path);
 
     // A damaged index is worked around by scanning, as lookups do.
-    let entries = if rebuild {
-        records
-            .iter()
-            .map(|(offset, found)| Entry::new(*offset, &found.header, found.crc))
-            .collect()
-    } else {
-        entries
-    };
+    let mut entries = Vec::new();
+    for set in sets {
+        if set.rebuild {
+            entries.extend(
+                records
+                    .iter()
+                    .map(|(offset, found)| Entry::new(*offset, &found.header, found.crc)),
+            );
+        } else {
+            entries.extend(set.entries);
+        }
+    }
     let mut referenced = HashSet::new();
     for entry in &entries {
         let bad_entry = |detail: &str| Problem::BadEntry {
@@ -753,24 +871,33 @@ impl Reader<'_> {
     }
 }
 
-/// What a segment's index or journal says.
+/// What an index or a journal says of one segment.
+#[derive(Default)]
 struct Entries {
     entries: Vec<Entry>,
     /// The index is damaged: rebuild the entries from the records, as lookups do.
     rebuild: bool,
     /// The segment's length when it was sealed.
     sealed_len: Option<u64>,
+    /// The merged index it comes from, if it does.
+    merged: Option<String>,
 }
 
-/// The entries of a segment: from its index if it is sealed, else from its
-/// journal. `None` if they cannot be read.
+/// The entries of a segment from its own index, if it has one, else from
+/// its journal, unless `merged` says a merged index covers it: none for a
+/// segment that has neither. `None` if they cannot be read, and the segment
+/// is not checked.
 fn segment_entries(
     dir: &Path,
     name: &str,
     files: Files,
+    merged: bool,
     report: &mut FsckReport,
-) -> Option<Entries> {
-    if !files.idx && files.jrn {
+) -> Option<Vec<Entries>> {
+    if merged {
+        report.sealed_segments += 1;
+    }
+    if !files.idx && files.jrn && !merged {
         let path = segment_path(dir, name, "jrn");
         let shown = format!("seg/{name}.jrn");
         match File::open(&path) {
@@ -778,11 +905,10 @@ fn segment_entries(
                 return match journal::read(&file, 0, &path) {
                     Ok(read) => {
                         report.torn_journal_entries += read.invalid;
-                        Some(Entries {
+                        Some(vec![Entries {
                             entries: read.entries,
-                            rebuild: false,
-                            sealed_len: None,
-                        })
+                            ..Entries::default()
+                        }])
                     }
                     Err(Error::NewerStore { detail, .. }) => {
                         report.problems.push(Problem::Newer {
@@ -811,13 +937,15 @@ fn segment_entries(
     let path = segment_path(dir, name, "idx");
     match fs::read(&path) {
         Ok(bytes) => {
-            report.sealed_segments += 1;
-            match index::decode(&bytes) {
-                Ok(index) => Some(Entries {
-                    entries: index.entries,
-                    rebuild: false,
-                    sealed_len: Some(index.segment_len),
-                }),
+            if !merged {
+                report.sealed_segments += 1;
+            }
+            match index::decode(&bytes, Some(name)) {
+                Ok(index) => Some(vec![Entries {
+                    entries: index.entries.into_iter().map(|(entry, _)| entry).collect(),
+                    sealed_len: index.covered.first().map(|segment| segment.len),
+                    ..Entries::default()
+                }]),
                 Err(IndexError::Newer(detail)) => {
                     report.problems.push(Problem::Newer {
                         path: format!("seg/{name}.idx"),
@@ -830,20 +958,22 @@ fn segment_entries(
                         segment: name.to_owned(),
                         detail: detail.to_owned(),
                     });
-                    Some(Entries {
-                        entries: Vec::new(),
+                    Some(vec![Entries {
                         rebuild: true,
-                        sealed_len: None,
-                    })
+                        ..Entries::default()
+                    }])
                 }
             }
         }
-        // Neither an index nor a journal: nothing in it is visible yet.
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Some(Entries {
-            entries: Vec::new(),
-            rebuild: false,
-            sealed_len: None,
-        }),
+        // Merged since the listing: its records are read by scanning.
+        Err(err) if err.kind() == io::ErrorKind::NotFound && (files.idx || files.jrn) => {
+            Some(vec![Entries {
+                rebuild: true,
+                ..Entries::default()
+            }])
+        }
+        // No index of its own: merged, or never written to.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Some(Vec::new()),
         Err(err) => {
             report
                 .problems

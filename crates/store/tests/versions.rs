@@ -13,6 +13,7 @@ use braid_store::{Error, Kind, ObjectId, Objects, Options, Problem, STORAGE_VERS
 
 const VERSION_1: &str = "object-format=blake3-dk-v1\n";
 const VERSION_2: &str = "object-format=blake3-dk-v1\nstorage=2\n";
+const VERSION_3: &str = "object-format=blake3-dk-v1\nstorage=3\n";
 
 fn new_store(options: Options) -> (tempfile::TempDir, PathBuf, Store) {
     let dir = tempfile::tempdir().unwrap();
@@ -25,12 +26,14 @@ fn format_of(root: &Path) -> String {
     fs::read_to_string(root.join("format")).unwrap()
 }
 
-/// Every file of the segments, with its bytes.
+/// Every file of the segments and their indexes, with its bytes.
 fn segment_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files: Vec<(PathBuf, Vec<u8>)> = fs::read_dir(root.join("seg"))
         .unwrap()
-        .map(|entry| {
-            let path = entry.unwrap().path();
+        .map(|entry| entry.unwrap().path())
+        // The lock merges take holds nothing.
+        .filter(|path| !path.ends_with("merge.lock"))
+        .map(|path| {
             let bytes = fs::read(&path).unwrap();
             (path, bytes)
         })
@@ -78,21 +81,21 @@ fn crc32c(bytes: &[u8]) -> u32 {
 #[test]
 fn new_stores_are_at_the_current_version() {
     let (_dir, root, store) = new_store(Options::default());
-    assert_eq!(STORAGE_VERSION, 2);
-    assert_eq!(format_of(&root), VERSION_2);
+    assert_eq!(STORAGE_VERSION, 3);
+    assert_eq!(format_of(&root), VERSION_3);
     drop(store);
     // init does not touch an existing store's format file.
     Store::init(&root, Options::default()).unwrap();
-    assert_eq!(format_of(&root), VERSION_2);
+    assert_eq!(format_of(&root), VERSION_3);
 }
 
 #[test]
 fn a_newer_storage_version_is_refused() {
     let (_dir, root, store) = new_store(Options::default());
-    store.put(Kind::Blob, b"written at version 2").unwrap();
+    store.put(Kind::Blob, b"written at version 3").unwrap();
     store.sync().unwrap();
     drop(store);
-    let newer = "object-format=blake3-dk-v1\nstorage=3\n";
+    let newer = "object-format=blake3-dk-v1\nstorage=4\n";
     fs::write(root.join("format"), newer).unwrap();
     let before = segment_files(&root);
 
@@ -104,7 +107,7 @@ fn a_newer_storage_version_is_refused() {
         assert!(matches!(err, Error::NewerStore { .. }), "{err}");
         let text = err.to_string();
         assert!(text.contains("needs a newer version of braid"), "{text}");
-        assert!(text.contains("storage version 3"), "{text}");
+        assert!(text.contains("storage version 4"), "{text}");
     }
     assert_eq!(format_of(&root), newer);
     assert_eq!(segment_files(&root), before);
@@ -228,26 +231,141 @@ fn journal_entries_of_a_newer_version_are_refused_not_overwritten() {
 fn an_index_of_a_newer_version_is_refused_not_scanned() {
     let options = Options {
         segment_size: 1024,
+        merge_threshold: 0,
         ..Options::default()
     };
     let (_dir, root, store) = new_store(options.clone());
-    for n in 0..40u8 {
-        store.put(Kind::Blob, &[n; 300]).unwrap();
-    }
+    let ids: Vec<ObjectId> = (0..40u8)
+        .map(|n| store.put(Kind::Blob, &[n; 300]).unwrap())
+        .collect();
     store.sync().unwrap();
     drop(store);
-    // An index whose hash holds, of an index version this one does not know.
+    // An index whose header checks out, of an index version this one does
+    // not know.
     let index = file_with_extension(&root, "idx");
     let mut bytes = fs::read(&index).unwrap();
-    bytes[8] = 2;
-    let body = bytes.len() - 32;
-    let hash = *blake3::hash(&bytes[..body]).as_bytes();
-    bytes[body..].copy_from_slice(&hash);
+    bytes[8] = 3;
+    let crc = crc32c(&bytes[..28]);
+    bytes[28..32].copy_from_slice(&crc.to_le_bytes());
     fs::write(&index, &bytes).unwrap();
     let before = segment_files(&root);
 
-    let err = Store::open(&root, options).unwrap_err();
-    assert!(matches!(err, Error::NewerStore { .. }), "{err}");
-    assert!(err.to_string().contains(".idx"), "{err}");
+    // Indexes are read as lookups need them: a lookup that reads this one
+    // fails, rather than scanning the segment or missing what it holds.
+    let store = Store::open(&root, options).unwrap();
+    let mut refused = 0;
+    for (n, id) in (0..40u8).zip(&ids) {
+        match store.get(id) {
+            Ok(found) => assert_eq!(found, Some((Kind::Blob, vec![n; 300]))),
+            Err(err) => {
+                assert!(matches!(err, Error::NewerStore { .. }), "{err}");
+                assert!(err.to_string().contains(".idx"), "{err}");
+                refused += 1;
+            }
+        }
+    }
+    assert!(refused > 0);
+    // Merging needs every index whole: it refuses too, and changes nothing.
+    assert!(matches!(
+        store.merge_indexes(),
+        Err(Error::NewerStore { .. })
+    ));
+    let report = store.fsck().unwrap();
+    assert!(
+        report.problems.iter().any(
+            |problem| matches!(problem, Problem::Newer { path, .. } if path.ends_with(".idx"))
+        ),
+        "{:#?}",
+        report.problems
+    );
+    drop(store);
     assert_eq!(segment_files(&root), before);
+}
+
+/// Rewrites an index of version 2 that covers one segment as version 1, as
+/// storage version 2 wrote them.
+fn as_version_1(bytes: &[u8]) -> Vec<u8> {
+    let count = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+    assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 1);
+    let segment_len = &bytes[48..56];
+    let fanout = &bytes[56..56 + 1024];
+    let entries = &bytes[56 + 1024 + 4..];
+    assert_eq!(entries.len(), count * 64);
+    let mut out = b"braididx".to_vec();
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(count as u64).to_le_bytes());
+    out.extend_from_slice(segment_len);
+    out.extend_from_slice(fanout);
+    for entry in entries.chunks_exact(64) {
+        out.extend_from_slice(&entry[..32]);
+    }
+    for entry in entries.chunks_exact(64) {
+        out.extend_from_slice(&entry[32..60]);
+        out.extend_from_slice(&0u32.to_le_bytes());
+    }
+    let hash = *blake3::hash(&out).as_bytes();
+    out.extend_from_slice(&hash);
+    out
+}
+
+#[test]
+fn a_store_of_version_2_is_read_and_raised_when_it_writes_an_index() {
+    let options = Options {
+        segment_records: 10,
+        merge_threshold: 0,
+        ..Options::default()
+    };
+    let (_dir, root, store) = new_store(options.clone());
+    let (first, second) = versions();
+    let mut objects: Vec<(Kind, Vec<u8>)> =
+        vec![(Kind::Blob, first.clone()), (Kind::Blob, second.clone())];
+    let first_id = store.put(Kind::Blob, &first).unwrap();
+    store.put_similar(Kind::Blob, &second, &first_id).unwrap();
+    for n in 0..58u32 {
+        let payload = format!("object {n}").repeat(10).into_bytes();
+        store.put(Kind::Tree, &payload).unwrap();
+        objects.push((Kind::Tree, payload));
+    }
+    store.sync().unwrap();
+    drop(store);
+    // As storage version 2 left it: indexes of version 1.
+    let indexes: Vec<PathBuf> = segment_files(&root)
+        .into_iter()
+        .map(|(path, _)| path)
+        .filter(|path| path.extension().is_some_and(|ext| ext == "idx"))
+        .collect();
+    assert_eq!(indexes.len(), 6);
+    for index in &indexes {
+        let bytes = fs::read(index).unwrap();
+        fs::write(index, as_version_1(&bytes)).unwrap();
+    }
+    fs::write(root.join("format"), VERSION_2).unwrap();
+
+    // Read as they are, and not raised by reading.
+    let store = Store::open(&root, options.clone()).unwrap();
+    for (kind, payload) in &objects {
+        let id = ObjectId::hash(*kind, payload);
+        assert_eq!(store.get(&id).unwrap(), Some((*kind, payload.clone())));
+    }
+    let report = store.fsck().unwrap();
+    assert!(report.is_clean(), "{:#?}", report.problems);
+    assert_eq!(report.delta_records, 1);
+    assert_eq!(format_of(&root), VERSION_2);
+
+    // The first index of version 2 raises it, before it is written.
+    for n in 0..10u32 {
+        store.put(Kind::Blob, &n.to_le_bytes()).unwrap();
+    }
+    assert_eq!(format_of(&root), VERSION_3);
+    // Merged with the others.
+    assert!(store.merge_indexes().unwrap());
+    let store = Store::open(&root, options).unwrap();
+    for (kind, payload) in &objects {
+        let id = ObjectId::hash(*kind, payload);
+        assert_eq!(store.get(&id).unwrap(), Some((*kind, payload.clone())));
+    }
+    let report = store.fsck().unwrap();
+    assert!(report.is_clean(), "{:#?}", report.problems);
+    assert_eq!(report.objects, 70);
 }

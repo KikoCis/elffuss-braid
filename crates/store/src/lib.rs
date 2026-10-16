@@ -52,12 +52,19 @@
 //!   lists. Segments are never truncated, since others may be reading them.
 //! - After each record, its writer appends a journal entry, so readers find
 //!   new objects without reading payloads.
-//! - A segment past the size threshold is sealed: flushed, given a sorted
-//!   index through a temporary file and a rename, and its journal removed. It
-//!   is never written again.
-//! - Each handle maps ids to records from the indexes and journals, and on a
-//!   miss reads the directory again once. Short ids, hex prefixes of ids,
-//!   are looked up in the same map ([`Store::ids_with_prefix`]).
+//! - A segment past the size threshold, or with as many records as a segment
+//!   may hold, is sealed: given a sorted index through a temporary file,
+//!   flushed with the segment, and a rename, and its journal removed. It is
+//!   never written again.
+//! - Once enough segment indexes pile up, a writer merges them into a
+//!   merged index, so that lookups go through few indexes.
+//! - Each handle maps ids to records only for the open segments, from their
+//!   journals, which the record limit keeps short. Sealed segments are
+//!   looked up in their indexes, which it reads as lookups need them, a
+//!   fan-out bucket at a time: opening a store costs the same whatever it
+//!   holds. On a miss a handle reads the directory again once. Short ids,
+//!   hex prefixes of ids, are looked up the same way
+//!   ([`Store::ids_with_prefix`]).
 //! - Transactions hold an exclusive lock on `oplog/lock`; readers of the op
 //!   log hold it shared, so they never see an operation before it is
 //!   durable.
@@ -74,6 +81,8 @@
 //! seg/<name>.seg     object records, append-only
 //! seg/<name>.jrn     journal of a segment that is still open
 //! seg/<name>.idx     sorted index of a sealed segment
+//! seg/<name>.midx    merged index of several sealed segments
+//! seg/merge.lock     empty; locked exclusively while indexes are merged
 //! oplog/lock         empty; locked exclusively by transactions, shared by readers
 //! oplog/log          operation records, append-only
 //! oplog/ckpt.<seq>   every ref as of operation <seq>
@@ -89,17 +98,19 @@
 //! unlocked.
 //!
 //! **Storage version.** The second line of `format` says what a reader must
-//! understand: a store without it has version 1 (records stored whole), and
-//! version 2 ([`STORAGE_VERSION`]) adds deltas and chunked blobs. A store of
-//! a later version, or with a line this version does not know, is refused
-//! with [`Error::NewerStore`] or [`Error::UnsupportedFormat`]. New stores
-//! start at the current version; an older one is raised under an exclusive
-//! lock on `format.lock`, after reading `format` again, only right before
-//! the first record that needs it is written, or when it is opened holding
-//! such records already. A journal entry or an index that holds its checksum
-//! but names a kind or a codec this version does not know, sets a reserved
-//! field, or has a later index version, was written by a newer version: the
-//! store is refused, so nothing is ever written over it.
+//! understand: a store without it has version 1 (records stored whole),
+//! version 2 adds deltas and chunked blobs, and version 3
+//! ([`STORAGE_VERSION`]) indexes of version 2 and merged indexes, which take
+//! the place of the indexes they merge. A store of a later version, or with
+//! a line this version does not know, is refused with [`Error::NewerStore`]
+//! or [`Error::UnsupportedFormat`]. New stores start at the current version;
+//! an older one is raised under an exclusive lock on `format.lock`, after
+//! reading `format` again, only right before the first record or index that
+//! needs it is written, or when a handle finds such records already there. A
+//! journal entry or an index that holds its checksum but names a kind or a
+//! codec this version does not know, sets a reserved field, or has a later
+//! index version, was written by a newer version: the store is refused, so
+//! nothing is ever written over it.
 //!
 //! **Object record**, starting at a multiple of 8 bytes:
 //!
@@ -183,7 +194,29 @@
 //! An entry is written after its record. Entries that fail their CRC are
 //! skipped, and a new lease holder writes after the last valid one.
 //!
-//! **Index**, written once when the segment is sealed:
+//! **Index**, version 2, written once when a segment is sealed
+//! (`<name>.idx`, one segment) or when indexes are merged (`<name>.midx`,
+//! several):
+//!
+//! ```text
+//! [8] "braididx" | u32 version = 2 | u32 0 | u64 count | u32 segments
+//! u32 crc32c of the 28 bytes before it
+//! segments × ([16] segment name | u64 segment length)
+//! 256 × u32 fan-out: entry b counts the ids whose first byte is at most b
+//! u32 crc32c of the segment table and the fan-out
+//! count × 64-byte entries, ids strictly ascending:
+//!     [32] id | u64 offset | u32 stored_len | u8 kind | u8 codec | u16 segment
+//!     u64 raw_len | u32 record crc | u32 crc32c of the 60 bytes before it
+//! ```
+//!
+//! An entry is a journal entry whose reserved field holds the number of its
+//! segment in the table. A segment's name is the 32 hex digits of its file
+//! name as 16 bytes, its length the size it had when it was sealed. Only
+//! entries whose record checks out go in. Of several copies of an object, a
+//! copy stored whole wins over a delta, a delta over a chunked blob, and the
+//! first of equals wins. Every part has its own checksum, so readers take
+//! in and check the head, then one fan-out bucket at a time. Stores of
+//! storage versions 1 and 2 hold indexes of version 1, read whole:
 //!
 //! ```text
 //! [8] "braididx" | u32 version = 1 | u32 0 | u64 count | u64 segment length
@@ -194,11 +227,10 @@
 //! [32] BLAKE3 hash of everything before it
 //! ```
 //!
-//! Only entries whose record checks out go in. Of several copies of an
-//! object, a copy stored whole wins over a delta, a delta over a chunked
-//! blob, and the first of equals wins. The segment length is the size of the
-//! segment when it was sealed. There is no filter for fast misses yet, and no
-//! merged indexes.
+//! A segment is open while it has a journal and no index of its own. Once
+//! merged, it has neither: merging removes its journal, if a sealer that
+//! died left one, makes that durable, and only then removes its index.
+//! There is no filter for fast misses yet.
 //!
 //! **Operation record**:
 //!
@@ -267,11 +299,11 @@ use segments::Segments;
 /// The first line of the `format` file: the object ids a store uses.
 pub const OBJECT_FORMAT: &str = "object-format=blake3-dk-v1";
 
-/// The storage version this version of braid writes: 2, where records may
-/// be deltas (codec 3) and chunked blobs (codec 4). It reads stores of every
-/// version up to this one, and refuses later ones with
-/// [`Error::NewerStore`].
-pub const STORAGE_VERSION: u32 = 2;
+/// The storage version this version of braid writes: 3, where records may
+/// be deltas (codec 3) and chunked blobs (codec 4), and indexes are of
+/// version 2 and may be merged. It reads stores of every version up to this
+/// one, and refuses later ones with [`Error::NewerStore`].
+pub const STORAGE_VERSION: u32 = 3;
 
 /// How a record stores its object's payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -325,6 +357,14 @@ pub struct Options {
     /// A segment is sealed once it holds this many bytes or more. A single
     /// object larger than this still goes into one segment.
     pub segment_size: u64,
+    /// A segment is also sealed once its journal lists this many records,
+    /// so that the journals every handle reads when it opens the store stay
+    /// short. 0 for no limit.
+    pub segment_records: u64,
+    /// Once this many segment indexes are there, a writer merges them into
+    /// a merged index at its next sync or transaction, so that lookups go
+    /// through few indexes. 0 never merges.
+    pub merge_threshold: usize,
     /// After this many operations the refs are saved in a checkpoint, so that
     /// opening the op log does not replay all of it. 0 writes none.
     pub checkpoint_interval: u64,
@@ -335,6 +375,8 @@ impl Default for Options {
         Self {
             durability: Durability::Ordered,
             segment_size: 256 << 20,
+            segment_records: 1 << 13,
+            merge_threshold: 8,
             checkpoint_interval: 1000,
         }
     }
@@ -410,14 +452,17 @@ impl Store {
         Self::open(root, options)
     }
 
-    /// Opens an existing store and reads every segment index and journal.
+    /// Opens an existing store and reads the journals of its open segments.
+    /// Indexes are read as lookups need them, so opening costs the same
+    /// whatever the store holds.
     ///
     /// A store that needs a newer version of braid is refused with
     /// [`Error::NewerStore`]: its `format` file names a later storage
-    /// version, or one of its journals or indexes holds an entry this
-    /// version does not know. A store of an earlier storage version is
-    /// raised to the current one when it already holds records that need
-    /// it, and otherwise only when this handle is about to write the first.
+    /// version, or one of its journals holds an entry this version does not
+    /// know; an index that does is refused when a lookup first reads it. A
+    /// store of an earlier storage version is raised when this handle finds
+    /// records that need a later one, and otherwise only when it is about to
+    /// write the first record or index that does.
     pub fn open(root: impl AsRef<Path>, options: Options) -> Result<Self, Error> {
         let root = root.as_ref().to_path_buf();
         let storage = format_file::read(&root)?;
@@ -444,8 +489,33 @@ impl Store {
     /// Makes everything this handle wrote durable: every segment it appended
     /// to, their journals, and the open segments of other writers whose
     /// copies it relied on instead of writing an object again.
+    ///
+    /// If this handle sealed enough segments that their indexes should be
+    /// merged, it merges them next, outside any transaction. A merge that
+    /// fails leaves the store as it was, and the sync succeeds all the same.
     pub fn sync(&self) -> Result<(), Error> {
-        self.segments.sync()
+        self.segments.sync()?;
+        self.merge_if_due();
+        Ok(())
+    }
+
+    /// Merges the indexes of sealed segments into one merged index, so that
+    /// lookups go through one index for all of them. Writers do this by
+    /// themselves once enough indexes pile up; this does it now, whatever
+    /// their number. Returns whether there was anything to merge; `false`
+    /// too while another process merges.
+    pub fn merge_indexes(&self) -> Result<bool, Error> {
+        oplog::not_in_transaction()?;
+        self.segments.merge(true)
+    }
+
+    /// Merges indexes if this handle sealed enough segments, unless a
+    /// transaction's closure is running on this thread. Best effort: a merge
+    /// only makes lookups cheaper, and the next one tries again.
+    fn merge_if_due(&self) {
+        if oplog::not_in_transaction().is_ok() {
+            let _ = self.segments.merge_if_due();
+        }
     }
 
     /// Reads what other processes wrote or sealed since this handle last
@@ -459,20 +529,19 @@ impl Store {
     ///
     /// `prefix` is lowercase hex digits, at most 64 of them; anything else
     /// matches nothing, and the empty prefix matches every object. The ids
-    /// come from the indexes and journals this handle has read, and no record
+    /// come from the journals and indexes this handle knows of, and no record
     /// is read; when none matches, the directory is read again once, as a
-    /// lookup by id does on a miss. The cost follows the number of objects
-    /// the handle knows of.
+    /// lookup by id does on a miss. Of each index, only the fan-out buckets
+    /// the prefix falls in are read: with two digits or more, one.
     pub fn ids_with_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<ObjectId>, Error> {
         let Some(prefix) = prefix::HexPrefix::parse(prefix) else {
             return Ok(Vec::new());
         };
-        let mut found = self.segments.ids_where(|id| prefix.matches(id));
+        let mut found = self.segments.ids_with_prefix(&prefix)?;
         if found.is_empty() {
             self.segments.rescan()?;
-            found = self.segments.ids_where(|id| prefix.matches(id));
+            found = self.segments.ids_with_prefix(&prefix)?;
         }
-        found.sort_unstable();
         found.truncate(limit);
         Ok(found)
     }

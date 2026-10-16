@@ -129,7 +129,9 @@ fn run(durability: Durability) {
     let root = dir.path().join("store");
     let options = Options {
         durability,
-        segment_size: 2048,
+        segment_size: 4096,
+        segment_records: 6,
+        merge_threshold: 3,
         checkpoint_interval: 4,
     };
     let model = Rc::new(RefCell::new(Model::default()));
@@ -187,12 +189,15 @@ fn run(durability: Durability) {
     drop(watching);
     let report = store.fsck().unwrap();
     assert!(report.is_clean(), "{:#?}", report.problems);
-    // The workload sealed segments, whose indexes are flushed with them.
+    // The workload went through every kind of flush.
     let names: Vec<String> = fs::read_dir(root.join("seg"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert!(names.iter().any(|name| name.ends_with(".idx")), "{names:?}");
+    assert!(
+        names.iter().any(|name| name.ends_with(".midx")),
+        "{names:?}"
+    );
 
     let model = model.borrow();
     assert!(model.crashes.len() > 50, "{}", model.crashes.len());

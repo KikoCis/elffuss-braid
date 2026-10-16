@@ -295,6 +295,7 @@ impl Store {
         drop(log);
         drop(lock);
         self.oplog.maybe_checkpoint(&state);
+        self.merge_if_due();
         Ok(op)
     }
 
@@ -357,6 +358,7 @@ impl Store {
         drop(log);
         drop(lock);
         self.oplog.maybe_checkpoint(&state);
+        self.merge_if_due();
         Ok(op)
     }
 
