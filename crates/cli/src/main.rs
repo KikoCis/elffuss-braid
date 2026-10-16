@@ -1057,6 +1057,12 @@ fn git_import(cli: &Cli, path: &Path) -> Result<ExitCode> {
             "blobs": report.blobs,
             "tags": report.tags,
             "refs": refs,
+            "kept": import.kept.iter().map(|k| json!({
+                "name": k.name,
+                "braid": k.braid.to_hex(),
+                "git": k.git.to_hex(),
+                "reason": k.reason.code(),
+            })).collect::<Vec<_>>(),
             "operation": import.operation.as_ref().map(|op| op.seq),
         }))?;
     } else {
@@ -1068,6 +1074,20 @@ fn git_import(cli: &Cli, path: &Path) -> Result<ExitCode> {
             report.tags,
             report.refs.len()
         );
+        for kept in &import.kept {
+            let why = match kept.reason {
+                braid_repo::KeptReason::Ahead => "braid has work git does not have",
+                braid_repo::KeptReason::Diverged => "braid and git have each moved on",
+                braid_repo::KeptReason::NotAChangeset => "one side is not a changeset",
+                braid_repo::KeptReason::Moved => "it moved while the import ran",
+            };
+            println!(
+                "Kept {} at {}: {why} (git is at {}).",
+                kept.name,
+                kept.braid.short(),
+                kept.git.short()
+            );
+        }
         if import.operation.is_none() {
             println!("Nothing changed.");
         }

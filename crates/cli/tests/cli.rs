@@ -471,3 +471,76 @@ fn git_import_log_show_export() {
     assert!(refs["refs"].as_object().unwrap().is_empty());
     assert_eq!(run_json(braid_in(&repo).arg("fsck"))["clean"], true);
 }
+
+#[test]
+fn importing_again_never_takes_a_braid_branch_backwards() {
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, &["init", "-q", "-b", "main"]);
+    std::fs::write(src.join("a.txt"), "a\n").unwrap();
+    git(&src, &["add", "a.txt"]);
+    git(&src, &["commit", "-q", "-m", "A"]);
+    git(&src, &["branch", "feature"]);
+
+    let repo = work.path().join("braid");
+    assert!(
+        braid()
+            .arg("init")
+            .arg(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    run_json(braid_in(&repo).args(["git", "import"]).arg(&src));
+    let imported = run_json(braid_in(&repo).arg("refs"))["refs"]["main"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // A change lands on main in braid, without a working copy.
+    let file = work.path().join("b.txt");
+    std::fs::write(&file, "b\n").unwrap();
+    let set = format!("b.txt=@{}", file.display());
+    run_json(
+        braid_in(&repo)
+            .env("BRAID_AUTHOR", "Ada <ada@example.org>")
+            .args([
+                "change", "create", "--base", "main", "--set", &set, "-m", "B", "--land", "main",
+            ]),
+    );
+    let ahead = run_json(braid_in(&repo).arg("refs"))["refs"]["main"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(ahead, imported);
+
+    // Importing again with nothing new in git keeps braid's main where it is.
+    let again = run_json(braid_in(&repo).args(["git", "import"]).arg(&src));
+    assert_eq!(again["kept"][0]["name"], "main");
+    assert_eq!(again["kept"][0]["reason"], "ahead");
+    assert_eq!(
+        run_json(braid_in(&repo).arg("refs"))["refs"]["main"],
+        ahead.as_str()
+    );
+
+    // Git moves on too: main diverges and stays in braid, feature only moved
+    // forward and follows git.
+    std::fs::write(src.join("c.txt"), "c\n").unwrap();
+    git(&src, &["add", "c.txt"]);
+    git(&src, &["commit", "-q", "-m", "C"]);
+    git(&src, &["checkout", "-q", "feature"]);
+    std::fs::write(src.join("d.txt"), "d\n").unwrap();
+    git(&src, &["add", "d.txt"]);
+    git(&src, &["commit", "-q", "-m", "D"]);
+    let third = run_json(braid_in(&repo).args(["git", "import"]).arg(&src));
+    let kept = third["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 1, "{third}");
+    assert_eq!(kept[0]["name"], "main");
+    assert_eq!(kept[0]["reason"], "diverged");
+    let refs = run_json(braid_in(&repo).arg("refs"));
+    assert_eq!(refs["refs"]["main"], ahead.as_str());
+    assert_ne!(refs["refs"]["feature"], imported.as_str());
+    assert_eq!(run_json(braid_in(&repo).arg("fsck"))["clean"], true);
+}

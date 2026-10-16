@@ -44,8 +44,8 @@ pub use braid_engine::{Conflict, ConflictHunk, ConflictKind, HunkSide};
 pub use clock::{local_now, signature_now};
 pub use config::{CONFIG_FILE, Config};
 pub use git::{
-    GIT_EXPORT_AGENT, GitImport, MAP_REF, REMOTE_PREFIX, braid_ref_for_git, git_ref_for_braid,
-    remote_ref,
+    GIT_EXPORT_AGENT, GitImport, KeptReason, KeptRef, MAP_REF, REMOTE_PREFIX, braid_ref_for_git,
+    git_ref_for_braid, remote_ref,
 };
 pub use history::{RepoHistory, StoreIndex};
 pub use link::{Location, WORKSPACES_DIR, WorkspaceLink, locate};

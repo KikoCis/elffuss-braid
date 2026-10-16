@@ -87,6 +87,47 @@ pub struct GitImport {
     pub report: ImportReport,
     /// The operation that moved the refs, or `None` when nothing changed.
     pub operation: Option<Operation>,
+    /// Braid refs the import left where they were, because moving them would
+    /// have dropped work braid has and git has not.
+    pub kept: Vec<KeptRef>,
+}
+
+/// A braid ref that an import did not move, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeptRef {
+    /// The braid ref.
+    pub name: String,
+    /// Where it stays.
+    pub braid: ObjectId,
+    /// What git's ref points to, as a braid object.
+    pub git: ObjectId,
+    /// Why it was not moved.
+    pub reason: KeptReason,
+}
+
+/// Why an import did not move a braid ref.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptReason {
+    /// Braid's ref already contains git's commit: braid is ahead.
+    Ahead,
+    /// Each side has work the other does not.
+    Diverged,
+    /// One side is not a changeset, for example a tag that moved in git.
+    NotAChangeset,
+    /// The ref moved while the import ran.
+    Moved,
+}
+
+impl KeptReason {
+    /// The name used in JSON output.
+    pub fn code(self) -> &'static str {
+        match self {
+            KeptReason::Ahead => "ahead",
+            KeptReason::Diverged => "diverged",
+            KeptReason::NotAChangeset => "not_a_changeset",
+            KeptReason::Moved => "moved",
+        }
+    }
 }
 
 fn store_error(err: TransactError<Infallible>) -> Error {
@@ -265,31 +306,89 @@ impl Repo {
             .collect();
         wanted.push((MAP_REF.to_owned(), map_id));
 
+        // Decide which refs may move before taking the op log lock: a ref that
+        // does not exist yet, or one git's commit descends from. A braid ref
+        // with work git does not have stays where it is, so an import never
+        // takes a branch backwards or sideways.
         let current = self.store.refs()?;
-        if wanted
-            .iter()
-            .all(|(name, id)| current.get(name) == Some(*id))
-        {
+        let mut moves: Vec<(String, Option<ObjectId>, ObjectId)> = Vec::new();
+        let mut kept = Vec::new();
+        for (name, id) in &wanted {
+            let now = current.get(name);
+            if now == Some(*id) {
+                continue;
+            }
+            match now {
+                Some(now) if name != MAP_REF => match self.import_may_move(now, *id)? {
+                    None => moves.push((name.clone(), Some(now), *id)),
+                    Some(reason) => kept.push(KeptRef {
+                        name: name.clone(),
+                        braid: now,
+                        git: *id,
+                        reason,
+                    }),
+                },
+                _ => moves.push((name.clone(), now, *id)),
+            }
+        }
+        if moves.is_empty() {
             return Ok(GitImport {
                 report,
                 operation: None,
+                kept,
             });
         }
-        let description = format!("git import of {} refs", wanted.len() - 1);
+        let moved = moves.iter().filter(|(name, ..)| name != MAP_REF).count();
+        let description = if kept.is_empty() {
+            format!("git import of {moved} refs")
+        } else {
+            format!("git import of {moved} refs, {} kept", kept.len())
+        };
+        let mut moved_meanwhile = Vec::new();
         let operation = self
             .store
             .transact(agent, &description, |refs| {
-                Ok(wanted
-                    .iter()
-                    .filter(|(name, id)| refs.get(name) != Some(*id))
-                    .map(|(name, id)| RefUpdate::new(name.clone(), refs.get(name), Some(*id)))
-                    .collect())
+                let mut updates = Vec::with_capacity(moves.len());
+                for (name, old, new) in &moves {
+                    let now = refs.get(name);
+                    if now == *old || name == MAP_REF {
+                        updates.push(RefUpdate::new(name.clone(), now, Some(*new)));
+                    } else if let Some(now) = now {
+                        moved_meanwhile.push(KeptRef {
+                            name: name.clone(),
+                            braid: now,
+                            git: *new,
+                            reason: KeptReason::Moved,
+                        });
+                    }
+                }
+                Ok(updates)
             })
             .map_err(store_error)?;
+        kept.extend(moved_meanwhile);
         Ok(GitImport {
             report,
             operation: Some(operation),
+            kept,
         })
+    }
+
+    /// Whether an import may move a braid ref from `braid` to `git`: `None`
+    /// when git's commit descends from braid's, otherwise why it may not.
+    fn import_may_move(&self, braid: ObjectId, git: ObjectId) -> Result<Option<KeptReason>, Error> {
+        let changeset = |id: &ObjectId| -> Result<bool, Error> {
+            Ok(matches!(self.store.stat(id)?, Some((Kind::Changeset, _))))
+        };
+        if !changeset(&braid)? || !changeset(&git)? {
+            return Ok(Some(KeptReason::NotAChangeset));
+        }
+        if braid_engine::is_ancestor(&self.store, braid, git)? {
+            return Ok(None);
+        }
+        if braid_engine::is_ancestor(&self.store, git, braid)? {
+            return Ok(Some(KeptReason::Ahead));
+        }
+        Ok(Some(KeptReason::Diverged))
     }
 
     /// Writes the given braid refs (all of them when `names` is empty) into
