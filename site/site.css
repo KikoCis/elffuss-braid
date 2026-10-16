@@ -220,6 +220,7 @@ main:focus { outline: none; }
   border: 1px solid var(--line-strong);
   border-radius: 999px;
 }
+.lang[hidden] { display: none; }
 .head-row > .lang { margin-left: auto; }
 .lang button {
   min-width: 40px;
@@ -235,8 +236,11 @@ main:focus { outline: none; }
 }
 .lang button:hover { color: var(--text); }
 .lang button[aria-pressed="true"] { background: var(--text); color: var(--ground); }
+@media (forced-colors: active) {
+  .lang button[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+}
 
-@media (min-width: 1000px) {
+@media (min-width: 1180px) {
   .nav { order: 0; width: auto; margin-left: auto; }
   .nav ul { margin: 0; }
   .head-row > .lang { margin-left: 0; }
@@ -404,11 +408,28 @@ h1 {
   white-space: nowrap;
   vertical-align: 1px;
 }
-@media (max-width: 640px) {
-  .story .term pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-}
+.story .term pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* copyable blocks keep their exact text and scroll in their own box */
+/* copyable blocks keep their exact text and scroll in their own box;
+   site.js marks one that is wider than its box, and the text fades at the
+   edge that has more, so a phone shows that it scrolls */
+.code pre.more-right {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent);
+}
+.code pre.more-left {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
+  mask-image: linear-gradient(to right, transparent, #000 40px);
+}
+.code pre.more-left.more-right {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 56px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 56px), transparent);
+}
+.code pre:focus-visible { outline-offset: -2px; border-radius: 0 0 11px 11px; }
+@supports selector(:has(*)) {
+  .code:has(> pre:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .code > pre:focus-visible { outline: none; }
+}
 .code {
   margin-block: 14px 22px;
   border: 1px solid var(--term-line);
@@ -534,7 +555,7 @@ h3 {
 .loop-row { display: grid; gap: 12px; align-items: center; margin-top: 14px; }
 .loop-row p + p { margin-top: 0; }
 .loop-fig { max-width: 420px; justify-self: center; width: 100%; }
-@media (min-width: 760px) {
+@media (min-width: 1000px) {
   .loop-row { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; }
 }
 .gitloop { display: block; width: 100%; height: auto; }
@@ -588,10 +609,13 @@ details.run .code { margin: 12px; }
   background: var(--surface-soft);
 }
 .dgm { display: block; width: 100%; height: auto; }
-.dgm-tall { display: none; max-width: 400px; margin-inline: auto; }
-@media (max-width: 719px) {
+.dgm-tall { display: none; max-width: 460px; margin-inline: auto; }
+@media (max-width: 999px) {
   .dgm-wide { display: none; }
   .dgm-tall { display: block; }
+}
+@media (max-width: 479px) {
+  .diagram { padding: 6px; }
 }
 .dgm .band { fill: var(--surface-soft); stroke: var(--line-strong); }
 .dgm .card { fill: var(--surface); stroke: var(--line-strong); }
@@ -659,7 +683,7 @@ details.run .code { margin: 12px; }
   color: var(--brass);
 }
 .contract p { font-size: .95rem; line-height: 1.55; color: var(--text-dim); }
-.contract code { color: var(--text); }
+.contract p code { color: var(--text); }
 .contract .code { margin: 12px 0 2px; }
 
 /* ------------------------------------------------------------- git */
@@ -685,7 +709,8 @@ details.run .code { margin: 12px; }
 .method { display: grid; gap: 6px; max-width: 76ch; padding-left: 1.1em; color: var(--text-dim); }
 .ratios-run { margin-top: 26px; }
 .ratios-run > p { max-width: 72ch; }
-.table-wrap { margin-block: 16px 18px; }
+.table-wrap { margin-block: 16px 18px; overflow-x: auto; }
+.table-wrap:focus-visible { outline-offset: 2px; }
 table { width: 100%; border-collapse: collapse; font-size: .92rem; line-height: 1.5; }
 th, td { padding: 11px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
 thead th {
@@ -706,17 +731,19 @@ tbody tr:hover { background: var(--surface-soft); }
   min-width: 140px;
 }
 .ratios td:nth-child(3) code { white-space: nowrap; }
+/* long commands in the first column break between tokens; flags stay whole */
+.ratios td:first-child code { white-space: normal; }
 .mk { display: block; position: relative; height: 10px; width: 120px; margin-top: 8px; }
 .mk::before { content: ""; position: absolute; left: 0; right: 0; top: 4px; height: 2px; border-radius: 2px; background: var(--line-strong); }
 .mk-one { position: absolute; top: -1px; width: 2px; height: 12px; margin-left: -1px; background: var(--text-dim); }
 .mk-bar { position: absolute; top: 3px; height: 4px; border-radius: 2px; background: var(--text-dim); opacity: .55; }
 .mk-dot { position: absolute; top: 0; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--text); }
-.mk-legend { margin-top: 4px; font-size: .88rem; color: var(--text-dim); max-width: 72ch; }
+.mk-legend { margin-top: 22px; font-size: .88rem; color: var(--text-dim); max-width: 72ch; }
 
 .checks td:first-child { width: 42%; color: var(--text); }
 .checks td:last-child { color: var(--text-dim); }
 
-@media (max-width: 640px) {
+@media (max-width: 860px) {
   table, thead, tbody, tr, th, td { display: block; }
   thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   tbody tr {
@@ -771,9 +798,10 @@ tbody tr:hover { background: var(--surface-soft); }
 .f-desc { font-size: .94rem; color: var(--text-dim); line-height: 1.5; }
 .repos-title { margin-top: 30px; font-size: 1.15rem; }
 .repos { display: grid; gap: 8px; margin-top: 12px; padding: 0; list-style: none; color: var(--text-dim); font-size: .95rem; }
-.repos a { margin-right: 6px; text-decoration: none; }
-.repos a code { color: var(--text); }
-.repos a:hover code { border-color: var(--line-strong); }
+/* underlined like every other link, so the chip alone does not have to say it */
+.repos a { margin-right: 6px; }
+.repos a code { color: var(--text); text-decoration: inherit; text-decoration-color: var(--muted); text-underline-offset: .2em; }
+.repos a:hover code { border-color: var(--line-strong); text-decoration-color: currentColor; }
 
 /* ------------------------------------------------------------- footer */
 .site-foot {
@@ -786,4 +814,11 @@ tbody tr:hover { background: var(--surface-soft); }
 .foot-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .foot-row a { color: var(--text); }
 .foot-row .dot { color: var(--muted); }
+/* the toggle is a control, not one more item: it keeps to the right, and
+   it is what wraps first */
+.foot-row .lang-foot { margin-left: auto; }
+@media (max-width: 539px) {
+  .foot-row { gap: 8px 18px; }
+  .foot-row .dot { display: none; }
+}
 .foot-note { margin-top: 14px; max-width: 76ch; font-size: .86rem; }

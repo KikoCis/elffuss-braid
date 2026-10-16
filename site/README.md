@@ -7,7 +7,7 @@ build step and no requests to anything but its own files.
 |---|---|
 | `index.html` | The page. The logo, the diagram and the git loop are inline SVG. |
 | `site.css` | Dark by default, as on elffuss.com; light under `prefers-color-scheme: light`. Terminals stay dark in both. |
-| `site.js` | The language toggle, the copy buttons and the markers of the ratio table. Without it the page is complete, in English. |
+| `site.js` | The language toggle, the copy buttons, the faded edge of a code block that scrolls, and the markers of the ratio table. Without it the page is complete, in English, and the toggle and the copy buttons stay hidden. |
 | `og.png`, `og/og.svg` | The Open Graph image, 1200 × 630, and its source. |
 | `favicon.svg`, `favicon-32.png`, `apple-touch-icon.png` | The icons: the strands around one crossing of the logo. |
 
@@ -30,6 +30,13 @@ Elements with `data-aria-en` and `data-aria-es` get the matching
 Transcripts, commands, JSON and the rows of the ratio table are not
 translated, and carry `lang="en"`.
 
+Every code block keeps its lines and scrolls in its own box, so its `<pre>`
+is a labelled region that takes keyboard focus, and a copy button, where
+there is one, names what it copies; both labels are given in the two
+languages with `data-aria-en` and `data-aria-es`. Inside inline `<code>`, a flag with its
+argument, or any name with a hyphen, sits in `<span class="nw">` (or the whole
+`<code class="nw">`), so a narrow screen never breaks a line inside it.
+
 New text goes in both languages. The Spanish is written, not translated word
 for word: land is *aterrizar*, workspace *espacio de trabajo*, store
 *almacén*, op log *registro de operaciones*; changeset, fast-forward and lease
@@ -40,14 +47,18 @@ stay in English.
 - `<!-- autosync:start -->` … `<!-- autosync:end -->` holds a placeholder for
   automatic git sync. Each marker appears once. Whoever fills it keeps the id
   `autosync` and both languages, and says nothing about it anywhere else on
-  the page, in the meta tags or in the OG image.
+  the page, in the meta tags or in the OG image. The one link to it from
+  outside is "Automatic sync with git" at the end of `#git`, which stays true
+  before and after; keep the id.
 - `<!-- ratios:start -->` … `<!-- ratios:end -->` holds everything that comes
   from one run of `bench/run.py`: the commit measured, the table, the retry
   counts and what they say. To refresh it, put the rows of the new table in
   the `<tbody>`, one `<tr>` per row with the ratio alone in the second cell,
   and rewrite the sentences in both languages. `site.js` draws a marker per
-  row from that cell, on a log scale with a line at 1, so nothing else needs
-  to change.
+  row from that cell, on a log scale with a line at 1. Keep the
+  `table-wrap` around the table, with its attributes. Outside the block, the
+  line about speed under "What is honest about this" says braid is slower
+  than git at most things today: read it again against the new numbers.
 
 ## What the page may say
 
@@ -67,7 +78,10 @@ stay in English.
 icons are `favicon.svg` rendered at 32 and 180 pixels; the 180-pixel one is
 drawn on a square without rounded corners, since iOS rounds it. Before a PNG
 is committed, strip every chunk but the image data and look through it with
-`strings` for anything that names a person or a machine.
+`strings` for anything that names a person or a machine. Check a PNG by its
+chunks (only `IHDR`, `IDAT` and `IEND`), not with a text search: compressed
+image data can match any short pattern. A text search of the page also has
+to catch units written after `&nbsp;`.
 
 Every strand on the page is the logo's own curve, from
 `docs/assets/braid.svg`: three strands of `y = 48 + 27 cos(2π (x − c) / 92)`,

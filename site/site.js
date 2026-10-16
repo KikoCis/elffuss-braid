@@ -1,7 +1,8 @@
 /* Elffuss Braid · braid.elffuss.com
-   The language toggle, the copy buttons and the markers of the ratio
-   table. No dependencies, no requests. Without this file the page is
-   English and complete. */
+   The language toggle, the copy buttons, the faded edge of code blocks that
+   scroll, and the markers of the ratio table. No dependencies, no requests.
+   Without this file the page is English and complete, and the toggle and
+   the copy buttons stay hidden. */
 (function () {
   'use strict';
 
@@ -154,9 +155,29 @@
     if (legend) legend.hidden = false;
   }
 
+  // A copyable block keeps its lines and scrolls in its own box. When it is
+  // wider than the box, the side that has more is marked, and site.css
+  // fades the text there.
+  function edges(pre) {
+    var max = pre.scrollWidth - pre.clientWidth;
+    pre.classList.toggle('more-right', max > 1 && pre.scrollLeft < max - 1);
+    pre.classList.toggle('more-left', max > 1 && pre.scrollLeft > 1);
+  }
+  function watchEdges() {
+    var list = document.querySelectorAll('.code pre');
+    function all() { for (var i = 0; i < list.length; i++) edges(list[i]); }
+    for (var i = 0; i < list.length; i++) {
+      list[i].addEventListener('scroll', function () { edges(this); }, { passive: true });
+    }
+    window.addEventListener('resize', all);
+    document.addEventListener('toggle', all, true); // a <details> opened
+    all();
+  }
+
   function start() {
     apply(lang);
-    each('button.copy', function (button) { button.hidden = false; });
+    // Without this file these do nothing, so they only show up with it.
+    each('button.copy, .lang', function (el) { el.hidden = false; });
     document.addEventListener('click', function (event) {
       var target = event.target;
       if (!target || !target.closest) return;
@@ -174,6 +195,7 @@
       if (button) copy(button);
     });
     markers();
+    watchEdges();
   }
 
   if (document.readyState === 'loading') {
