@@ -97,7 +97,7 @@ fn name(style: u8, seed: u64, i: u64) -> Vec<u8> {
     }
 }
 
-/// A directory of about `count` distinct valid names.
+/// A directory of `count` distinct valid names.
 fn directory(count: usize, style: u8, seed: u64) -> Entries {
     let mut entries = Entries::new();
     let mut i = 0u64;
@@ -437,7 +437,51 @@ fn crossing_the_flat_limit_both_ways() {
     assert_eq!(gone.entries, 0);
 }
 
-/// How many levels of nodes a directory of `entries` has: 1 when it is flat.
+/// The root of a split directory moves down a level when its subtrees but
+/// one empty, and back up when they fill again.
+#[test]
+fn the_root_moves_down_and_up_a_level() {
+    // A directory whose root is two levels above its leaves, and whose last
+    // subtree alone is too large for a flat node.
+    let (old, root, store, children) = (0..)
+        .find_map(|seed| {
+            let entries = directory(12_000, 1, seed);
+            let (root, store) = stored(&entries);
+            match Node::decode(&store[&root]).unwrap() {
+                Node::Internal { level: 2, children }
+                    if children.last()?.entry_count > MAX_FLAT_ENTRIES as u64 =>
+                {
+                    Some((entries, root, store, children))
+                }
+                _ => None,
+            }
+        })
+        .unwrap();
+    // Every entry under the last child of the root stays.
+    let kept = children.last().unwrap();
+    let first_kept = children[children.len() - 2].last_name.clone();
+    let fewer: Entries = old
+        .iter()
+        .filter(|(name, _)| **name > first_kept)
+        .map(|(name, kind)| (name.clone(), kind.clone()))
+        .collect();
+    assert_eq!(fewer.len() as u64, kept.entry_count);
+    assert!(fewer.len() > MAX_FLAT_ENTRIES, "still split");
+
+    let (down, _) = update(&store, root, &edits(&old, &fewer, &[]));
+    check_update(&store, &down, &fewer).unwrap();
+    let (down_root, down_store) = stored(&fewer);
+    assert_eq!(down.root, down_root);
+    assert_eq!(down.root, kept.node, "the last subtree's root is the root");
+    assert!(down.nodes.is_empty(), "every node it needs is there");
+    assert!(levels(&down_store, down_root) < 3, "the root moved down");
+
+    let (up, _) = update(&down_store, down_root, &edits(&fewer, &old, &[]));
+    check_update(&down_store, &up, &old).unwrap();
+    assert_eq!(up.root, root, "and back up, as it was");
+}
+
+/// How many levels of nodes the directory `root` has: 1 when it is flat.
 fn levels(store: &Store, root: ObjectId) -> usize {
     match Node::decode(&store[&root]).unwrap() {
         Node::Internal { level, .. } => usize::from(level) + 1,
