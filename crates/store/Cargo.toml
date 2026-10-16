@@ -21,6 +21,11 @@ getrandom = "0.4"
 thiserror = "2"
 zstd = { version = "0.14", default-features = false }
 
+# F_BARRIERFSYNC and F_FULLFSYNC, which std does not expose, through safe
+# wrappers: the store forbids unsafe code of its own.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["fs"] }
+
 [dev-dependencies]
 proptest = "1.12"
 tempfile = "3"

@@ -31,7 +31,7 @@ use std::path::Path;
 
 use crate::error::{Error, io_error};
 use crate::fsutil::publish_file;
-use crate::{OBJECT_FORMAT, STORAGE_VERSION};
+use crate::{Durability, OBJECT_FORMAT, STORAGE_VERSION};
 
 /// The bytes of the `format` file of a store of storage `version`.
 pub(crate) fn contents(version: u32) -> String {
@@ -94,7 +94,7 @@ pub(crate) fn read(root: &Path) -> Result<u32, Error> {
 /// Raises the storage version of the store at `root` to at least `version`,
 /// under the lock that every writer takes to change it. Fails, changing
 /// nothing, if the store needs a newer version of braid by now.
-pub(crate) fn raise(root: &Path, version: u32) -> Result<(), Error> {
+pub(crate) fn raise(root: &Path, version: u32, durability: Durability) -> Result<(), Error> {
     let lock_path = root.join("format.lock");
     let lock = OpenOptions::new()
         .write(true)
@@ -104,7 +104,13 @@ pub(crate) fn raise(root: &Path, version: u32) -> Result<(), Error> {
         .map_err(io_error("create", &lock_path))?;
     lock.lock().map_err(io_error("lock", &lock_path))?;
     if read(root)? < version {
-        publish_file(root, "format", contents(version).as_bytes())?;
+        publish_file(
+            root,
+            "format",
+            contents(version).as_bytes(),
+            durability,
+            &[],
+        )?;
     }
     Ok(())
 }
@@ -160,14 +166,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("format");
         fs::write(&path, contents(1)).unwrap();
-        raise(dir.path(), 2).unwrap();
+        raise(dir.path(), 2, Durability::Ordered).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), contents(2));
-        raise(dir.path(), 1).unwrap();
+        raise(dir.path(), 1, Durability::Full).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), contents(2));
         // A store that went past this version is left alone.
         fs::write(&path, "object-format=blake3-dk-v1\nstorage=9\n").unwrap();
         assert!(matches!(
-            raise(dir.path(), 2),
+            raise(dir.path(), 2, Durability::Ordered),
             Err(Error::NewerStore { .. })
         ));
         assert_eq!(

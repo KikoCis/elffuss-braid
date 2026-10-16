@@ -12,21 +12,20 @@
 //! - **Journals.** After each record the lease holder appends a journal
 //!   entry, so readers learn about the record without reading payloads.
 //! - **Sealing.** Once a segment passes the size threshold, its holder
-//!   flushes it, writes its sorted index through a temporary file and a
-//!   rename, flushes the directory, and removes the journal. A sealed segment
-//!   is never written again.
+//!   writes its sorted index through a temporary file, flushed with the
+//!   segment, and a rename, flushes the directory, and removes the journal. A
+//!   sealed segment is never written again.
 //! - **Lookups.** Every handle keeps a map from id to location, built from the
 //!   indexes and journals. On a miss it rescans the directory once, since
 //!   another process may have written or sealed something since. When it
 //!   knows several copies of one object, it keeps the best ranked: a copy
 //!   stored whole before a delta, a delta before a chunked blob.
 //! - **Durability.** [`Segments::put`] appends without flushing;
-//!   [`Segments::sync`] flushes everything this handle wrote, segments first,
-//!   then journals, so that a durable journal entry always points at a
-//!   durable record. A copy written by someone else stands for a new write
-//!   only together with what it needs to be read: a delta's base, a chunked
-//!   blob's chunks. Those that sit in another writer's open segment are
-//!   flushed by this handle's next sync too.
+//!   [`Segments::sync`] flushes everything this handle wrote, segments and
+//!   journals, in one batch. A copy written by someone else stands for a new
+//!   write only together with what it needs to be read: a delta's base, a
+//!   chunked blob's chunks. Those that sit in another writer's open segment
+//!   are flushed by this handle's next sync too.
 //!
 //! How objects are stored whole, as deltas or in chunks, and read back, is
 //! in the `objects` submodule.
@@ -45,8 +44,8 @@ use braid_format::{Kind, ObjectId};
 
 use crate::error::{Error, io_error};
 use crate::fsutil::{
-    is_random_name, publish_file, random_name, read_range, remove_stale_temps, sync_dir, sync_file,
-    write_all_at,
+    flush, is_random_name, open_dir, publish_file, random_name, read_range, remove_stale_temps,
+    sync_dir, write_all_at,
 };
 use crate::index::IndexError;
 use crate::journal::{self, ENTRY_LEN, Entry};
@@ -251,7 +250,7 @@ impl Segments {
         if self.storage.load(Ordering::Acquire) >= version {
             return Ok(());
         }
-        format_file::raise(&self.root, version)?;
+        format_file::raise(&self.root, version, self.durability)?;
         self.storage.fetch_max(version, Ordering::AcqRel);
         Ok(())
     }
@@ -394,7 +393,8 @@ impl Segments {
             .collect()
     }
 
-    /// Flushes everything this handle wrote: segments first, then journals.
+    /// Flushes everything this handle wrote: segments and journals, in one
+    /// batch.
     pub fn sync(&self) -> Result<(), Error> {
         let mut writer = self.lock_writer();
         self.sync_locked(&mut writer)
@@ -817,12 +817,15 @@ impl Segments {
             .truncate(false)
             .open(&jrn_path)
             .map_err(io_error("open", &jrn_path))?;
-        // Whoever created these files may have died before flushing the
-        // directory, and objects acknowledged from now on depend on them.
-        sync_dir(&self.dir)?;
         // A journal a newer version wrote to stops here: this version never
         // writes after entries it does not understand.
         let read = journal::read(&journal, 0, &jrn_path)?;
+        if read.entries.is_empty() {
+            // Whoever created these files may have died before flushing the
+            // directory, and objects acknowledged from now on depend on
+            // them. Once a journal lists a record, someone has.
+            sync_dir(&self.dir, self.durability)?;
+        }
         let seg_len = seg.metadata().map_err(io_error("read", &seg_path))?.len();
         // Never write over bytes an entry points at, even if they are gone.
         let claimed = read.entries.iter().map(Entry::end).max().unwrap_or(0);
@@ -869,7 +872,9 @@ impl Segments {
                 .truncate(false)
                 .open(&jrn_path)
                 .map_err(io_error("create", &jrn_path))?;
-            sync_dir(&self.dir)?;
+            // Before any record: others may rely on what this segment holds
+            // and flush it, but not its directory.
+            sync_dir(&self.dir, self.durability)?;
             let segment = self.apply(&name, Update::Journal(0), &[]);
             return Ok(Lease {
                 segment,
@@ -897,12 +902,11 @@ impl Segments {
         }
     }
 
-    /// Flushes a segment, writes its index, and removes its journal.
+    /// Writes a segment's index, flushing the segment with it, and removes
+    /// its journal.
     fn write_index(&self, lease: &Lease) -> Result<(), Error> {
         let seg_path = self.path(&lease.name, "seg");
         let jrn_path = self.path(&lease.name, "jrn");
-        // The index must never point at data that is not durable.
-        sync_file(&lease.seg, self.durability).map_err(io_error("sync", &seg_path))?;
         let read = journal::read(&lease.journal, 0, &jrn_path)?;
         let seg_len = lease
             .seg
@@ -932,10 +936,14 @@ impl Segments {
         entries.sort_by_key(|entry| entry.id);
         let covered = entries.iter().map(Entry::end).fold(seg_len, u64::max);
         remove_stale_temps(&self.dir);
+        // The index must never reach the disk before the records it points
+        // at: they are flushed in one batch with it, before the rename.
         publish_file(
             &self.dir,
             &format!("{}.idx", lease.name),
             &index::encode(&entries, covered),
+            self.durability,
+            &[(&seg_path, &lease.seg)],
         )?;
         // The index supersedes the journal. A journal that cannot be removed
         // now is harmless, and the next writer to look at the segment
@@ -975,12 +983,19 @@ impl Segments {
         if segments.is_empty() && journals.is_empty() {
             return Ok(());
         }
-        for (path, file) in segments.iter().chain(&journals) {
-            sync_file(file, self.durability).map_err(io_error("sync", path))?;
+        let dir = match self.durability {
+            Durability::Full => open_dir(&self.dir)?,
+            Durability::Ordered => None,
+        };
+        let mut batch: Vec<(&Path, &File)> = segments
+            .iter()
+            .chain(&journals)
+            .map(|(path, file)| (path.as_path(), file.as_ref()))
+            .collect();
+        if let Some(dir) = &dir {
+            batch.push((&self.dir, dir));
         }
-        if self.durability == Durability::Full {
-            sync_dir(&self.dir)?;
-        }
+        flush(&batch, self.durability)?;
         if let Some(lease) = &mut writer.lease {
             lease.dirty = false;
         }

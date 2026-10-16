@@ -238,6 +238,8 @@ mod fsutil;
 mod index;
 mod journal;
 mod oplog;
+#[cfg(test)]
+mod power_loss;
 mod prefix;
 mod record;
 mod scan;
@@ -288,23 +290,30 @@ pub enum Codec {
 
 /// How hard flushes push data to stable storage.
 ///
-/// In both modes [`Objects::put`] only appends, [`Store::sync`] flushes
-/// segments before their journals, and a transaction flushes the objects its
-/// updates point at, then appends its record and flushes the log before it
-/// returns. Order is what keeps the store consistent after a crash or a power
-/// loss: a journal entry is never durable before its record, and an op log
-/// record never before the objects it refers to.
+/// In both modes [`Objects::put`] only appends, [`Store::sync`] flushes the
+/// segments and journals this handle wrote in one batch, and a transaction
+/// flushes the objects its updates point at, then appends its record and
+/// flushes the log before it returns. Order is what keeps the store
+/// consistent after a crash or a power loss: an op log record is never
+/// written before the objects it refers to are flushed, an index never
+/// reaches the disk before the records it points at, and a file published
+/// through a rename never before its contents.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Durability {
-    /// The default for local work. Files are flushed with `fdatasync`: their
+    /// The default for local work: may lose the last operations on power
+    /// loss, never consistency. Files are flushed with `fdatasync`, their
     /// contents and the metadata needed to read them back, such as their
-    /// length. Directories are flushed when a file is created in them or
-    /// renamed into them.
+    /// length; on Apple systems a batch ends with a write barrier
+    /// (`F_BARRIERFSYNC`) instead, which keeps the order of writes without
+    /// waiting for the drive to write out its cache. Directories are flushed
+    /// when a file is created, renamed or removed in them and something
+    /// depends on it.
     #[default]
     Ordered,
-    /// The default for servers. Files are flushed with `fsync`, which also
-    /// writes the rest of their metadata, and every sync of segments also
-    /// flushes their directory.
+    /// The default for servers: what a transaction acknowledges is on stable
+    /// storage. Files are flushed with `fsync`, which also writes the rest of
+    /// their metadata, or on Apple systems with `F_FULLFSYNC` once per
+    /// batch, and every sync of segments also flushes their directory.
     Full,
 }
 
@@ -372,14 +381,15 @@ impl Store {
                 .open(&path)
                 .map_err(io_error("create", &path))?;
         }
-        fsutil::sync_dir(&seg)?;
-        fsutil::sync_dir(&oplog)?;
-        fsutil::sync_dir(root)?;
+        let durability = options.durability;
+        fsutil::sync_dir(&seg, durability)?;
+        fsutil::sync_dir(&oplog, durability)?;
+        fsutil::sync_dir(root, durability)?;
         if let Some(parent) = root
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            fsutil::sync_dir(parent)?;
+            fsutil::sync_dir(parent, durability)?;
         }
         let format = root.join("format");
         match fs::metadata(&format) {
@@ -391,6 +401,8 @@ impl Store {
                     root,
                     "format",
                     format_file::contents(STORAGE_VERSION).as_bytes(),
+                    durability,
+                    &[],
                 )?;
             }
             Err(err) => return Err(io_error("read", &format)(err)),
@@ -430,7 +442,7 @@ impl Store {
     }
 
     /// Makes everything this handle wrote durable: every segment it appended
-    /// to, then their journals, and the open segments of other writers whose
+    /// to, their journals, and the open segments of other writers whose
     /// copies it relied on instead of writing an object again.
     pub fn sync(&self) -> Result<(), Error> {
         self.segments.sync()

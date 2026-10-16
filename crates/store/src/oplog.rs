@@ -55,7 +55,7 @@ use braid_format::{DecodeError, ObjectId};
 
 use crate::error::{Error, TransactError, io_error};
 use crate::fsutil::{
-    publish_file, read_range, remove_stale_temps, sync_dir, sync_file, write_all_at,
+    flush_file, publish_file, read_range, remove_stale_temps, sync_dir, write_all_at,
 };
 use crate::record::array;
 use crate::{Durability, Options, Store};
@@ -470,7 +470,7 @@ impl OpLog {
             .truncate(false)
             .open(&path)
             .map_err(io_error("create", &path))?;
-        sync_dir(&self.dir)?;
+        sync_dir(&self.dir, self.durability)?;
         Ok(file)
     }
 
@@ -495,8 +495,8 @@ impl OpLog {
         if state.end < len {
             let path = self.log_path();
             log.set_len(state.end)
-                .and_then(|()| sync_file(log, self.durability))
                 .map_err(io_error("truncate", &path))?;
+            flush_file(&path, log, self.durability)?;
         }
         Ok(state)
     }
@@ -598,15 +598,16 @@ impl OpLog {
             });
         }
         let path = self.log_path();
-        let written =
-            write_all_at(log, &bytes, state.end).and_then(|()| sync_file(log, self.durability));
+        let written = write_all_at(log, &bytes, state.end)
+            .map_err(io_error("append to", &path))
+            .and_then(|()| flush_file(&path, log, self.durability));
         if let Err(err) = written {
             // Take the record back where possible, so that the failed
             // operation is not left half recorded for the next reader.
-            let _ = log
-                .set_len(state.end)
-                .and_then(|()| sync_file(log, self.durability));
-            return Err(io_error("append to", &path)(err));
+            if log.set_len(state.end).is_ok() {
+                let _ = flush_file(&path, log, self.durability);
+            }
+            return Err(err);
         }
         state.refs.apply(op);
         state.end += bytes.len() as u64;
@@ -677,7 +678,15 @@ impl OpLog {
         }
         remove_stale_temps(&self.dir);
         let name = format!("{CHECKPOINT_PREFIX}{}", state.refs.seq);
-        if publish_file(&self.dir, &name, &encode_checkpoint(state)).is_err() {
+        if publish_file(
+            &self.dir,
+            &name,
+            &encode_checkpoint(state),
+            self.durability,
+            &[],
+        )
+        .is_err()
+        {
             return;
         }
         self.note_checkpoint(state.refs.seq);
