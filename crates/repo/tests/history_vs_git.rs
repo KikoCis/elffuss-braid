@@ -29,8 +29,11 @@
 //!   chain: replaying git's own diffs (`git diff -U0`) must give git's blame
 //!   line for line; braid's blame at each version must be braid's own diff
 //!   applied to its blame at the version before, a diff that keeps only
-//!   equal lines; and that diff must never insert fewer lines than the
-//!   shortest one (`git diff --minimal -U0`), which would be a bug. Files
+//!   equal lines; and that diff must never insert fewer lines than a
+//!   shortest diff does, which would be a bug. That bound is computed here
+//!   exactly, from a longest common subsequence: `git diff --minimal` is not
+//!   one, since git treats lines that repeat very often specially even then.
+//!   Files
 //!   where the two diffs insert as many lines at every version count as
 //!   realigned, the others as heuristic divergences.
 
@@ -538,15 +541,9 @@ fn versions(repo: &Repo, at: ObjectId, path: &str) -> Vec<(ObjectId, ObjectId)> 
     }
 }
 
-/// The hunks of `git diff -U0` between two blobs, or of `git diff --minimal
-/// -U0`: for each, the lines it replaces and the lines it puts there,
-/// counted from 0.
-fn git_diff_hunks(
-    git: &Path,
-    old: &GitOid,
-    new: &GitOid,
-    minimal: bool,
-) -> Vec<(Range<usize>, Range<usize>)> {
+/// The hunks of `git diff -U0` between two blobs: for each, the lines it
+/// replaces and the lines it puts there, counted from 0.
+fn git_diff_hunks(git: &Path, old: &GitOid, new: &GitOid) -> Vec<(Range<usize>, Range<usize>)> {
     if old == new {
         return Vec::new();
     }
@@ -559,9 +556,6 @@ fn git_diff_hunks(
         "--no-ext-diff",
         "--indent-heuristic",
     ]);
-    if minimal {
-        command.arg("--minimal");
-    }
     command.args([old.to_hex(), new.to_hex()]);
     let range = |spec: &str| -> Range<usize> {
         let (start, len) = match spec.split_once(',') {
@@ -692,6 +686,38 @@ fn inserts(hunks: &[(Range<usize>, Range<usize>)]) -> usize {
     hunks.iter().map(|(_, after)| after.len()).sum()
 }
 
+/// Lines a shortest diff from `old` to `new` inserts: the new lines outside a
+/// longest common subsequence. For a given pair, insertions minus deletions
+/// is fixed, so a diff with the fewest edits also has the fewest insertions.
+/// Exact, unlike any heuristic diff: the common prefix and suffix are cut,
+/// then the middle is solved by dynamic programming.
+fn fewest_inserts(old: &[u8], new: &[u8]) -> usize {
+    let (old, new) = (split_lines(old), split_lines(new));
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let (old, new) = (&old[prefix..], &new[prefix..]);
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (old, new) = (&old[..old.len() - suffix], &new[..new.len() - suffix]);
+    let mut row = vec![0u32; new.len() + 1];
+    for a in old {
+        let mut diagonal = 0u32;
+        for (j, b) in new.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if a == b {
+                diagonal + 1
+            } else {
+                above.max(row[j])
+            };
+            diagonal = above;
+        }
+    }
+    new.len() - row[new.len()] as usize
+}
+
 /// Blame of each file at `revision`, against git, line by line.
 ///
 /// Braid's blame of every version of the file is checked against braid's
@@ -780,12 +806,12 @@ fn compare_blames(
                 .iter()
                 .map(|change| change.new.len())
                 .sum::<usize>();
-            let fewest = inserts(&git_diff_hunks(git, &old, &new, true));
+            let fewest = fewest_inserts(&checked[i - 1].0, &checked[i].0);
             assert!(
                 inserted >= fewest,
                 "{what}: braid's diff inserts {inserted} lines, the shortest diff {fewest}"
             );
-            let git_hunks = git_diff_hunks(git, &old, &new, false);
+            let git_hunks = git_diff_hunks(git, &old, &new);
             same_lengths &= inserted == inserts(&git_hunks);
             replayed = replay(&replayed, lines, &git_hunks, *changeset);
         }
