@@ -68,6 +68,25 @@ process dies, atomic rename, and ordered syncs.
   checksummed entries, so readers find new objects without scanning payloads. A
   full segment is sealed with a sorted index; compaction can merge indexes.
   Only files that can no longer change are memory-mapped.
+- **Deltas.** Writers say which object a new one is probably close to: the
+  engine names the directory node a rebuilt one replaces and, for a merged
+  file, the branch's version; a workspace commit names the file's previous
+  blob; the git import names the first parent's blob or tree at the same
+  path, and its raw commit; a new git map names the one it grew from. A blob
+  under 4 MiB, a tree or a derived object is then stored as a zstd frame
+  against that object when this takes at most a quarter of the bytes.
+  Deltas are one level deep: a base is always stored whole, so a read
+  applies at most one delta, never a chain. The price is size: each delta
+  holds every change since its base, until a version is stored whole again.
+- **Large files.** Blobs of 4 MiB or more are cut into content-defined chunks
+  (FastCDC), each a blob of its own, so versions of a large file, such as a
+  model's weights, share every chunk an edit did not touch, with no side
+  system like LFS. A blob's id is still the hash of its whole content. Large
+  blobs are written and read as streams, a chunk at a time.
+- **Garbage collection** is not there yet: nothing is ever removed from a
+  store. When it comes, it must keep every base a delta needs and every chunk
+  a chunk list names. `braid stats` shows how a store's objects are stored,
+  and `braid fsck` checks deltas and chunked blobs with everything else.
 - **Op log.** Branch heads and the history of operations live in an
   append-only log behind a short lock. Every record names the agent that wrote
   it, so `braid op log` shows who did what and `braid undo` can step back. A

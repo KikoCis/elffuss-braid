@@ -9,8 +9,8 @@ use std::path::Path;
 use braid_format::name::forbidden_as_symlink;
 use braid_format::tree::validate_entry;
 use braid_format::{
-    ChangesetParts, Entry, EntryKind, GitId, Kind, ObjectId, Objects, Signature, build_directory,
-    validate_name,
+    ChangesetParts, Directory, Entry, EntryKind, GitId, Kind, ObjectId, Objects, Signature,
+    build_directory, validate_name,
 };
 
 use crate::diff;
@@ -125,10 +125,10 @@ pub fn import<O: Objects>(
     for (oid, kind) in &plan.loose {
         match kind {
             GitKind::Tree => {
-                importer.convert_tree(*oid, *oid)?;
+                importer.convert_tree(*oid, *oid, None)?;
             }
             _ => {
-                importer.import_blob(*oid)?;
+                importer.import_blob(*oid, None)?;
             }
         }
     }
@@ -182,8 +182,8 @@ struct Importer<'r, 'o, 'm, O: Objects> {
     objects: &'o O,
     map: &'m mut GitMap,
     report: ImportReport,
-    /// Root trees of the changesets seen in this import.
-    roots: HashMap<ObjectId, ObjectId>,
+    /// Root trees and git origins of the changesets seen in this import.
+    roots: HashMap<ObjectId, (ObjectId, Option<ObjectId>)>,
     /// The braid id of the empty directory.
     empty_tree: ObjectId,
 }
@@ -203,6 +203,90 @@ struct Frame {
     canonical_subtrees: bool,
     /// Whether an empty directory was left out.
     dropped_empty: bool,
+    /// The same path in the first parent, as hints for the store.
+    similar: Similar,
+}
+
+/// The braid tree at a path in the first parent of the commit being
+/// imported: what its new trees and blobs are probably close to.
+struct Similar {
+    tree: Option<ObjectId>,
+    /// Its entries, read on first use.
+    entries: Option<Vec<Entry>>,
+}
+
+impl Similar {
+    fn new(tree: Option<ObjectId>) -> Self {
+        Self {
+            tree,
+            entries: None,
+        }
+    }
+
+    /// The entry named `name`, reading the directory the first time.
+    fn entry<O: Objects>(&mut self, objects: &O, name: &[u8]) -> Result<Option<EntryKind>, Error> {
+        let entries = self.entries(objects)?;
+        Ok(entries
+            .binary_search_by(|entry| entry.name.as_slice().cmp(name))
+            .ok()
+            .map(|at| entries[at].kind.clone()))
+    }
+
+    fn entries<O: Objects>(&mut self, objects: &O) -> Result<&[Entry], Error> {
+        if self.entries.is_none() {
+            self.entries = Some(match self.tree {
+                Some(tree) => fetch::tree_entries(objects, tree)?,
+                None => Vec::new(),
+            });
+        }
+        Ok(self.entries.as_deref().unwrap_or_default())
+    }
+
+    /// The tree at `name` below this one.
+    fn subtree<O: Objects>(&mut self, objects: &O, name: &[u8]) -> Result<Similar, Error> {
+        Ok(Similar::new(match self.entry(objects, name)? {
+            Some(EntryKind::Tree { tree }) => Some(tree),
+            _ => None,
+        }))
+    }
+
+    /// The blob of the file, executable or symlink at `name`.
+    fn blob<O: Objects>(&mut self, objects: &O, name: &[u8]) -> Result<Option<ObjectId>, Error> {
+        Ok(match self.entry(objects, name)? {
+            Some(
+                EntryKind::File { blob, .. }
+                | EntryKind::Executable { blob, .. }
+                | EntryKind::Symlink { blob, .. },
+            ) => Some(blob),
+            _ => None,
+        })
+    }
+
+    /// For each node of the new directory `directory`, the node of this one
+    /// it most likely replaces. A split directory with as many nodes as
+    /// before pairs them in order, since boundaries depend only on names;
+    /// otherwise only the root is paired, with the old root.
+    fn nodes<O: Objects>(
+        &mut self,
+        objects: &O,
+        directory: &Directory,
+    ) -> Result<Vec<Option<ObjectId>>, Error> {
+        let count = directory.nodes.len();
+        let mut similar = vec![None; count];
+        let Some(tree) = self.tree else {
+            return Ok(similar);
+        };
+        if count > 1
+            && let Ok(old) = build_directory(self.entries(objects)?.to_vec())
+            && old.nodes.len() == count
+        {
+            return Ok(old.nodes.iter().map(|(id, _)| Some(*id)).collect());
+        }
+        if let Some(root) = similar.last_mut() {
+            *root = Some(tree);
+        }
+        Ok(similar)
+    }
 }
 
 impl<O: Objects> Importer<'_, '_, '_, O> {
@@ -290,7 +374,6 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             kind: GitKind::Commit,
             reason,
         })?;
-        let root = self.convert_tree(fields.tree, oid)?;
         let mut parents = Vec::with_capacity(fields.parents.len());
         for parent in &fields.parents {
             parents.push(self.map.changeset(parent).ok_or_else(|| Error::NotMapped {
@@ -298,12 +381,19 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                 id: parent.to_hex(),
             })?);
         }
-        let base = match parents.first() {
-            Some(parent) => Some(self.root_of(parent)?),
-            None => None,
+        let (base, base_origin) = match parents.first() {
+            Some(parent) => {
+                let (root, origin) = self.root_of(parent)?;
+                (Some(root), origin)
+            }
+            None => (None, None),
         };
+        // What the first parent has at each path, and its own raw bytes, are
+        // what the store may keep new trees, blobs and bytes as deltas
+        // against.
+        let root = self.convert_tree(fields.tree, oid, base)?;
         let changes = diff::changes(self.objects, base, root)?;
-        let origin = fetch::put(self.objects, Kind::Blob, &bytes)?;
+        let origin = fetch::put_hinted(self.objects, Kind::Blob, &bytes, base_origin.as_ref())?;
         let unknown = || Signature {
             name: Vec::new(),
             email: Vec::new(),
@@ -350,28 +440,37 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             .map_err(|err| verification(format!("its tree: {err}")))?;
 
         self.map.insert_commit(oid, changeset);
-        self.roots.insert(changeset, root);
+        self.roots.insert(changeset, (root, Some(origin)));
         self.report.commits += 1;
         Ok(())
     }
 
-    fn root_of(&mut self, changeset: &ObjectId) -> Result<ObjectId, Error> {
-        if let Some(root) = self.roots.get(changeset) {
-            return Ok(*root);
+    /// The root tree and the git origin of a changeset.
+    fn root_of(&mut self, changeset: &ObjectId) -> Result<(ObjectId, Option<ObjectId>), Error> {
+        if let Some(found) = self.roots.get(changeset) {
+            return Ok(*found);
         }
-        let root = fetch::changeset(self.objects, changeset)?.root;
-        self.roots.insert(*changeset, root);
-        Ok(root)
+        let read = fetch::changeset(self.objects, changeset)?;
+        let found = (read.root, read.git_origin);
+        self.roots.insert(*changeset, found);
+        Ok(found)
     }
 
     /// Converts a git tree and everything below it, and returns its braid
     /// tree. `commit` names the commit (or the object a ref points to) in
-    /// errors. Subtrees are converted before their parents, without recursion.
-    fn convert_tree(&mut self, root: GitOid, commit: GitOid) -> Result<ObjectId, Error> {
+    /// errors, and `similar` is the braid tree of its first parent, if it
+    /// has one. Subtrees are converted before their parents, without
+    /// recursion.
+    fn convert_tree(
+        &mut self,
+        root: GitOid,
+        commit: GitOid,
+        similar: Option<ObjectId>,
+    ) -> Result<ObjectId, Error> {
         if let Some(tree) = self.map.tree(&root) {
             return Ok(tree);
         }
-        let mut stack = vec![self.open_tree(root, Vec::new(), commit)?];
+        let mut stack = vec![self.open_tree(root, Vec::new(), commit, Similar::new(similar))?];
         loop {
             let top = stack
                 .last_mut()
@@ -390,7 +489,8 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                         }
                         None => {
                             let path = join(&top.path, &name);
-                            let child = self.open_tree(oid, path, commit)?;
+                            let similar = top.similar.subtree(self.objects, &name)?;
+                            let child = self.open_tree(oid, path, commit, similar)?;
                             stack.push(child);
                             continue;
                         }
@@ -399,7 +499,13 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
                         commit: GitId::from(oid),
                     },
                     EntryType::File | EntryType::Executable | EntryType::Symlink => {
-                        let (blob, size) = self.import_blob(oid)?;
+                        let (blob, size) = match self.map.blob(&oid) {
+                            Some(found) => found,
+                            None => {
+                                let similar = top.similar.blob(self.objects, &name)?;
+                                self.import_blob(oid, similar)?
+                            }
+                        };
                         match kind {
                             EntryType::File => EntryKind::File { blob, size },
                             EntryType::Executable => EntryKind::Executable { blob, size },
@@ -439,7 +545,13 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
 
     /// Reads a git tree and checks every entry's mode and name before any of
     /// its content is read.
-    fn open_tree(&self, oid: GitOid, path: Vec<u8>, commit: GitOid) -> Result<Frame, Error> {
+    fn open_tree(
+        &self,
+        oid: GitOid,
+        path: Vec<u8>,
+        commit: GitOid,
+        similar: Similar,
+    ) -> Result<Frame, Error> {
         let raw = self.repo.read_kind(&oid, GitKind::Tree)?;
         let parsed = raw::parse_tree(&raw).map_err(|reason| Error::Malformed {
             oid,
@@ -474,6 +586,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             done: Vec::with_capacity(count),
             canonical_subtrees: true,
             dropped_empty: false,
+            similar,
         })
     }
 
@@ -487,6 +600,7 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             done,
             canonical_subtrees,
             dropped_empty,
+            mut similar,
             ..
         } = frame;
         // Braid names are unique: of duplicate entries, the last one written
@@ -512,8 +626,11 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
             path: path.clone(),
             reason: err.to_string(),
         })?;
-        for (_, bytes) in &directory.nodes {
-            fetch::put(self.objects, Kind::Tree, bytes)?;
+        let hints = similar.nodes(self.objects, &directory)?;
+        for ((id, bytes), hint) in directory.nodes.iter().zip(hints) {
+            // A node that did not change is its own old version: no hint.
+            let hint = hint.filter(|hint| hint != id);
+            fetch::put_hinted(self.objects, Kind::Tree, bytes, hint.as_ref())?;
         }
         let tree = directory.root();
 
@@ -547,12 +664,18 @@ impl<O: Objects> Importer<'_, '_, '_, O> {
         Ok(tree)
     }
 
-    fn import_blob(&mut self, oid: GitOid) -> Result<(ObjectId, u64), Error> {
+    /// Imports a blob, with the first parent's blob at the same path, if
+    /// any, as a hint for the store.
+    fn import_blob(
+        &mut self,
+        oid: GitOid,
+        similar: Option<ObjectId>,
+    ) -> Result<(ObjectId, u64), Error> {
         if let Some(found) = self.map.blob(&oid) {
             return Ok(found);
         }
         let bytes = self.repo.read_kind(&oid, GitKind::Blob)?;
-        let blob = fetch::put(self.objects, Kind::Blob, &bytes)?;
+        let blob = fetch::put_hinted(self.objects, Kind::Blob, &bytes, similar.as_ref())?;
         let size = bytes.len() as u64;
         self.map.insert_blob(oid, blob, size);
         self.report.blobs += 1;

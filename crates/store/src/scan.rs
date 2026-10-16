@@ -9,7 +9,7 @@ use std::io;
 
 use crate::fsutil::read_exact_at;
 use crate::journal::Entry;
-use crate::record::{ALIGN, HEADER_LEN, Header, check, parse_header};
+use crate::record::{ALIGN, Checked, HEADER_LEN, check, parse_header};
 
 /// Bytes read at a time when walking a file in order.
 const CHUNK: u64 = 1 << 20;
@@ -61,8 +61,8 @@ pub(crate) struct Scan {
     pub junk: u64,
 }
 
-/// Calls `visit(offset, header, crc, stored payload)` for every record of the
-/// first `len` bytes of a segment whose header and CRC are valid, in order.
+/// Calls `visit(offset, record)` for every record of the first `len` bytes
+/// of a segment whose header and CRC are valid, in order.
 ///
 /// Bytes that do not start a valid record are the remains of a write cut
 /// short by a crash, or damage. They are skipped 8 bytes at a time, looking
@@ -72,7 +72,7 @@ pub(crate) struct Scan {
 pub(crate) fn scan(
     file: &File,
     len: u64,
-    mut visit: impl FnMut(u64, &Header, u32, &[u8]),
+    mut visit: impl FnMut(u64, &Checked<'_>),
 ) -> io::Result<Scan> {
     let mut window = Window::new(file, len);
     let mut scan = Scan::default();
@@ -85,10 +85,10 @@ pub(crate) fn scan(
         let mut record_len = None;
         if let Some(header) = header
             && let Some(bytes) = window.bytes(offset, header.unpadded_len())?
-            && let Ok((header, crc, stored)) = check(bytes)
+            && let Ok(record) = check(bytes)
         {
-            visit(offset, &header, crc, stored);
-            record_len = Some(header.record_len());
+            visit(offset, &record);
+            record_len = Some(record.header.record_len());
         }
         match record_len {
             Some(record_len) => {
@@ -110,7 +110,7 @@ pub(crate) fn matches(window: &mut Window<'_>, entry: &Entry) -> io::Result<bool
     let header = entry.header();
     Ok(match window.bytes(entry.offset, header.unpadded_len())? {
         Some(bytes) => {
-            matches!(check(bytes), Ok((found, crc, _)) if found == header && crc == entry.crc)
+            matches!(check(bytes), Ok(found) if found.header == header && found.crc == entry.crc)
         }
         None => false,
     })
@@ -162,7 +162,10 @@ mod tests {
         }
 
         let mut seen = Vec::new();
-        let scan = scan(&file, offset, |at, header, _, _| seen.push((at, header.id))).unwrap();
+        let scan = scan(&file, offset, |at, record| {
+            seen.push((at, record.header.id))
+        })
+        .unwrap();
         assert_eq!(scan.records, 3);
         assert_eq!(seen.iter().map(|(at, _)| *at).collect::<Vec<_>>(), expected);
         assert_eq!(
@@ -201,8 +204,8 @@ mod tests {
             .unwrap();
         write_all_at(&file, &outer.bytes, 0).unwrap();
         let mut ids = Vec::new();
-        let scan = scan(&file, outer.bytes.len() as u64, |_, header, _, _| {
-            ids.push(header.id)
+        let scan = scan(&file, outer.bytes.len() as u64, |_, record| {
+            ids.push(record.header.id)
         })
         .unwrap();
         assert_eq!(ids, vec![outer.header.id]);

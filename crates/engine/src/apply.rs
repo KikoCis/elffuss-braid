@@ -48,7 +48,17 @@ pub(crate) struct Applied {
     /// The new root tree.
     pub(crate) root: ObjectId,
     /// Every node of every directory rebuilt, children before parents.
-    pub(crate) nodes: Vec<(ObjectId, Vec<u8>)>,
+    pub(crate) nodes: Vec<NewNode>,
+}
+
+/// A tree node rebuilt by applying changes.
+#[derive(Debug)]
+pub(crate) struct NewNode {
+    pub(crate) id: ObjectId,
+    pub(crate) bytes: Vec<u8>,
+    /// The node it most likely replaces, of the same directory before the
+    /// change: a hint for the store, which may keep it as a delta.
+    pub(crate) similar: Option<ObjectId>,
 }
 
 /// A structural problem found while applying, at `path`.
@@ -137,7 +147,11 @@ pub(crate) fn apply_sorted<O: Objects>(
     let root = match rebuild(&mut ctx, base_root, items)? {
         Some(root) => root,
         None => {
-            ctx.nodes.push((EMPTY_TREE, empty_tree_node()));
+            ctx.nodes.push(NewNode {
+                id: EMPTY_TREE,
+                bytes: empty_tree_node(),
+                similar: None,
+            });
             EMPTY_TREE
         }
     };
@@ -147,28 +161,48 @@ pub(crate) fn apply_sorted<O: Objects>(
     })
 }
 
-/// Stores rebuilt nodes.
-pub(crate) fn write_nodes<O: Objects>(
-    objects: &O,
-    nodes: &[(ObjectId, Vec<u8>)],
-) -> Result<(), Error> {
-    for (_, bytes) in nodes {
-        objects.put(Kind::Tree, bytes).map_err(store_error)?;
+/// Stores rebuilt nodes, each with the node it replaces as a hint.
+pub(crate) fn write_nodes<O: Objects>(objects: &O, nodes: &[NewNode]) -> Result<(), Error> {
+    for node in nodes {
+        match &node.similar {
+            Some(similar) => objects.put_similar(Kind::Tree, &node.bytes, similar),
+            None => objects.put(Kind::Tree, &node.bytes),
+        }
+        .map_err(store_error)?;
     }
     Ok(())
 }
 
 /// Checks that rebuilt nodes are stored, byte for byte.
-pub(crate) fn check_nodes<O: Objects>(
-    objects: &O,
-    nodes: &[(ObjectId, Vec<u8>)],
-) -> Result<(), Error> {
-    for (id, bytes) in nodes {
-        if read_object(objects, *id, Kind::Tree)? != *bytes {
-            return Err(Error::Corrupt { id: *id });
+pub(crate) fn check_nodes<O: Objects>(objects: &O, nodes: &[NewNode]) -> Result<(), Error> {
+    for node in nodes {
+        if read_object(objects, node.id, Kind::Tree)? != node.bytes {
+            return Err(Error::Corrupt { id: node.id });
         }
     }
     Ok(())
+}
+
+/// For each of the `count` nodes of a rebuilt directory, children before
+/// parents, the node of the directory before the change, `base` with
+/// `entries`, that it most likely replaces. A split directory with as many
+/// nodes as before pairs them in order, since boundaries depend only on
+/// names; otherwise only the root is paired, with the old root.
+fn similar_nodes(base: Option<ObjectId>, entries: &[Entry], count: usize) -> Vec<Option<ObjectId>> {
+    let mut similar = vec![None; count];
+    let Some(base) = base.filter(|base| *base != EMPTY_TREE) else {
+        return similar;
+    };
+    if count > 1
+        && let Ok(old) = build_directory(entries.to_vec())
+        && old.nodes.len() == count
+    {
+        return old.nodes.iter().map(|(id, _)| Some(*id)).collect();
+    }
+    if let Some(root) = similar.last_mut() {
+        *root = Some(base);
+    }
+    similar
 }
 
 /// One change, seen from the directory being rebuilt.
@@ -200,7 +234,7 @@ struct Group<'a> {
 
 struct Ctx<'t, 'o, O> {
     trees: &'t mut Trees<'o, O>,
-    nodes: Vec<(ObjectId, Vec<u8>)>,
+    nodes: Vec<NewNode>,
     problems: &'t mut Vec<Problem>,
 }
 
@@ -260,6 +294,8 @@ fn rebuild<O: Objects>(
 struct Frame<'a> {
     /// Its path; empty for the root.
     dir: &'a [u8],
+    /// Its tree before the change, if it existed.
+    base: Option<ObjectId>,
     /// Its entries before the change, in name order.
     existing: Rc<[Entry]>,
     /// How many of `existing` are copied or replaced already.
@@ -318,6 +354,7 @@ impl<'a> Frame<'a> {
         let existing = trees.read_or_empty(base)?;
         Ok(Frame {
             dir,
+            base,
             entries: Vec::with_capacity(existing.len() + groups.len()),
             existing,
             next: 0,
@@ -401,7 +438,19 @@ impl<'a> Frame<'a> {
         }
         let directory = build_directory(self.entries).map_err(Error::Entries)?;
         let id = directory.root();
-        ctx.nodes.extend(directory.nodes);
+        let similar = similar_nodes(self.base, &self.existing, directory.nodes.len());
+        // A node that did not change is its own old version: no hint.
+        ctx.nodes.extend(
+            directory
+                .nodes
+                .into_iter()
+                .zip(similar)
+                .map(|((id, bytes), similar)| NewNode {
+                    id,
+                    bytes,
+                    similar: similar.filter(|similar| *similar != id),
+                }),
+        );
         Ok(Some(id))
     }
 }
@@ -496,7 +545,7 @@ mod tests {
     use crate::access::{entry_at, read_tree};
     use crate::diff::diff;
     use crate::path::MAX_PATH_DEPTH;
-    use crate::testing::{Repo, deep_path, delete, gitlink, text_map};
+    use crate::testing::{Hinted, Repo, deep_path, delete, gitlink, text_map};
 
     fn problem(result: Result<ObjectId, Error>) -> (String, ApplyProblem) {
         match result {
@@ -769,6 +818,85 @@ mod tests {
             entry_at(&repo.objects, root, deeper.as_bytes()),
             Err(Error::TooDeep { .. })
         ));
+    }
+
+    fn file(objects: &Hinted, path: &str, content: &str) -> Change {
+        Change {
+            path: path.as_bytes().to_vec(),
+            op: ChangeOp::File {
+                blob: objects.put(Kind::Blob, content.as_bytes()).unwrap(),
+                size: content.len() as u64,
+            },
+        }
+    }
+
+    fn tree_at(objects: &Hinted, root: ObjectId, path: &str) -> ObjectId {
+        match entry_at(objects, root, path.as_bytes()).unwrap() {
+            Some(EntryKind::Tree { tree }) => tree,
+            other => panic!("{path} is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebuilt_directories_name_the_ones_they_replace() {
+        let objects = Hinted::default();
+        let base = apply(
+            &objects,
+            EMPTY_TREE,
+            &[
+                file(&objects, "a/b/c.txt", "1"),
+                file(&objects, "a/d.txt", "2"),
+                file(&objects, "z/keep.txt", "3"),
+            ],
+        )
+        .unwrap();
+        // Directories that did not exist have nothing to be like.
+        assert!(objects.hints.borrow().is_empty());
+
+        let new = apply(&objects, base, &[file(&objects, "a/b/c.txt", "changed")]).unwrap();
+        let mut hints = objects.hints.take();
+        hints.sort();
+        let mut expected: Vec<(ObjectId, ObjectId)> = ["", "a", "a/b"]
+            .iter()
+            .map(|path| match *path {
+                "" => (new, base),
+                path => (tree_at(&objects, new, path), tree_at(&objects, base, path)),
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(hints, expected);
+    }
+
+    #[test]
+    fn split_directories_pair_their_nodes() {
+        let objects = Hinted::default();
+        let files: Vec<Change> = (0..3000)
+            .map(|i| file(&objects, &format!("big/f{i:05}"), "x"))
+            .collect();
+        let base = apply(&objects, EMPTY_TREE, &files).unwrap();
+        let old_big = tree_at(&objects, base, "big");
+        let old_nodes: Vec<ObjectId> = build_directory(read_tree(&objects, old_big).unwrap())
+            .unwrap()
+            .nodes
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(old_nodes.len() > 3);
+        objects.hints.take();
+
+        let new = apply(&objects, base, &[file(&objects, "big/f01500", "edited")]).unwrap();
+        let new_big = tree_at(&objects, new, "big");
+        let hints = objects.hints.take();
+        // The root, the split directory's root, and the leaf that changed,
+        // each paired with its old version.
+        assert!(hints.contains(&(new, base)), "{hints:?}");
+        assert!(hints.contains(&(new_big, old_big)), "{hints:?}");
+        let below: Vec<&(ObjectId, ObjectId)> = hints.iter().filter(|(id, _)| *id != new).collect();
+        assert!(below.len() >= 2, "{hints:?}");
+        for (id, similar) in below {
+            assert_ne!(id, similar);
+            assert!(old_nodes.contains(similar), "{similar} is not an old node");
+        }
     }
 
     #[test]

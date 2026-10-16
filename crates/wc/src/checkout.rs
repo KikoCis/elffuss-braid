@@ -23,15 +23,20 @@
 //! [`safe`](crate::safe)), and nothing found in the repository is ever run.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io;
 
 use braid_engine::{EMPTY_TREE, diff, entry_at, read_blob, read_tree};
-use braid_format::{ChangeOp, EntryKind, ObjectId, Objects};
+use braid_format::{ChangeOp, EntryKind, Kind, ObjectId, Objects};
+use braid_store::{CHUNKED_MIN, Store};
+use cap_std::fs::Dir;
 
 use crate::error::Error;
 use crate::fsprobe::FileSystem;
 use crate::paths::{ancestors, names, os_name, platform_problem, split_last};
-use crate::safe::{Found, Root, StatKind, remove_entry, write_file, write_symlink};
+use crate::safe::{
+    Found, Root, StatKind, remove_entry, write_file, write_file_from, write_symlink,
+};
 
 /// Whether a checkout may overwrite what it finds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -336,7 +341,9 @@ fn untracked_inside(
 }
 
 /// Writes a planned checkout. Returns how many paths it wrote or removed.
-pub(crate) fn apply<O: Objects>(objects: &O, root: &Root, plan: &Plan) -> Result<usize, Error> {
+/// A file of 4 MiB or more is written as it streams out of the store, a
+/// chunk at a time, so a large file is never held in memory whole.
+pub(crate) fn apply(store: &Store, root: &Root, plan: &Plan) -> Result<usize, Error> {
     for (path, old) in &plan.removes {
         let (parent, name) = split_last(path);
         let Found::Here(dir) = root.open_dir(parent)? else {
@@ -382,13 +389,17 @@ pub(crate) fn apply<O: Objects>(objects: &O, root: &Root, plan: &Plan) -> Result
         for (path, name, op) in files {
             let os = os_name(name).ok_or_else(|| unrepresentable(path))?;
             let written = match op {
-                ChangeOp::File { blob, .. } | ChangeOp::Executable { blob, .. } => {
-                    let content = read_blob(objects, *blob)?;
+                ChangeOp::File { blob, size } | ChangeOp::Executable { blob, size } => {
                     let executable = matches!(op, ChangeOp::Executable { .. });
-                    write_file(&dir, os, &content, executable)
+                    if *size >= CHUNKED_MIN {
+                        stream_file(store, &dir, os, blob, executable)?
+                    } else {
+                        let content = read_blob(store, *blob)?;
+                        write_file(&dir, os, &content, executable)
+                    }
                 }
                 ChangeOp::Symlink { blob, .. } => {
-                    let target = read_blob(objects, *blob)?;
+                    let target = read_blob(store, *blob)?;
                     write_symlink(&dir, os, &target)
                 }
                 ChangeOp::Gitlink { .. } => match dir.symlink_metadata(os) {
@@ -408,6 +419,44 @@ pub(crate) fn apply<O: Objects>(objects: &O, root: &Root, plan: &Plan) -> Result
         }
     }
     Ok(plan.len())
+}
+
+/// Writes the blob `blob` into `name` of `dir` as it streams out of the
+/// store. A blob that is missing, is not a blob, or does not read back as
+/// its id is the error of the outer result, and `name` is left as it was;
+/// the inner result is how writing the file went.
+fn stream_file(
+    store: &Store,
+    dir: &Dir,
+    name: &OsStr,
+    blob: &ObjectId,
+    executable: bool,
+) -> Result<io::Result<()>, Error> {
+    let mut failed = None;
+    let written = write_file_from(dir, name, executable, |out| {
+        let problem = match store.read_to(blob, out) {
+            Ok(Some((Kind::Blob, _))) => return Ok(()),
+            // Writing the file failed: an error of the checkout.
+            Err(braid_store::Error::Stream { source, .. }) => return Err(source),
+            Ok(None) => Error::from(braid_engine::Error::Missing {
+                id: *blob,
+                kind: Kind::Blob,
+            }),
+            Ok(Some((found, _))) => Error::from(braid_engine::Error::WrongKind {
+                id: *blob,
+                expected: Kind::Blob,
+                found,
+            }),
+            Err(err) => Error::from(err),
+        };
+        let shown = io::Error::other(problem.to_string());
+        failed = Some(problem);
+        Err(shown)
+    });
+    match failed {
+        Some(problem) => Err(problem),
+        None => Ok(written),
+    }
 }
 
 /// One write of a directory: the full path, the name in the directory, and

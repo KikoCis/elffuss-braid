@@ -16,6 +16,7 @@ name = "braid_store"
 braid-format.workspace = true
 blake3 = "1.8"
 crc32c = "0.6.8"
+fastcdc = { version = "5.0", default-features = false }
 getrandom = "0.4"
 thiserror = "2"
 zstd = { version = "0.14", default-features = false }

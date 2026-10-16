@@ -9,7 +9,7 @@ mod common;
 
 use std::fs;
 
-use braid_format::{ChangeOp, ObjectId};
+use braid_format::{ChangeOp, Kind, ObjectId, Objects};
 use braid_wc::{
     Blocker, ChangeKind, CommitRequest, Error, Landed, RebaseProgress, Updated, Workspace,
 };
@@ -25,6 +25,122 @@ fn commit_all(ws: &Workspace<'_>, message: &str) -> braid_wc::CommitOutcome {
         force: false,
     })
     .unwrap()
+}
+
+/// Bytes that do not compress.
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+#[test]
+fn commits_keep_edits_as_deltas_and_large_files_in_chunks() {
+    let f = Fixture::new();
+    let mut state = 7u64;
+    let text: String = (0..3000)
+        .map(|i| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            format!("line {i}: {state:016x}\n")
+        })
+        .collect();
+    let first = f.commit(&[], vec![("src/lib.rs", f.file(&text))]);
+    f.set_branch("main", first);
+    let dir = f.path("ws");
+    let (ws, _) = Workspace::create(&f.repo, "ws", &dir, Some(first), "main").unwrap();
+
+    let edited = text.replacen("line 1500:", "line 1500, edited:", 1);
+    fs::write(dir.join("src/lib.rs"), &edited).unwrap();
+    // New files over 1 MiB wait for `braid track`.
+    let big = noise((6 << 20) + 123);
+    fs::write(dir.join("model.bin"), &big).unwrap();
+    ws.track(&[b"model.bin".to_vec()]).unwrap();
+    let changeset = commit_all(&ws, "edit, and add a model").changeset.unwrap();
+
+    let store = f.repo.store();
+    let report = store.fsck().unwrap();
+    assert!(report.is_clean(), "{:#?}", report.problems);
+    // The edited file is a delta against the one it replaces.
+    assert!(report.delta_records >= 1, "{report:?}");
+    assert_eq!(report.chunked_records, 1, "{report:?}");
+    let blob = ObjectId::hash(Kind::Blob, &big);
+    assert_eq!(
+        store.stat(&blob).unwrap(),
+        Some((Kind::Blob, big.len() as u64))
+    );
+
+    // Another workspace gets both back.
+    let other = f.path("other");
+    Workspace::create(&f.repo, "other", &other, Some(changeset), "main").unwrap();
+    assert!(fs::read(other.join("model.bin")).unwrap() == big);
+    assert_eq!(
+        fs::read_to_string(other.join("src/lib.rs")).unwrap(),
+        edited
+    );
+}
+
+#[test]
+fn a_large_file_that_does_not_read_back_is_never_checked_out() {
+    let f = Fixture::new();
+    let first = f.commit(&[], vec![("README", f.file("hello\n"))]);
+    f.set_branch("main", first);
+    let dir = f.path("ws");
+    let (ws, _) = Workspace::create(&f.repo, "ws", &dir, Some(first), "main").unwrap();
+
+    let big = noise((5 << 20) + 9);
+    let blob = f.repo.store().put(Kind::Blob, &big).unwrap();
+    let second = f.commit(
+        &[first],
+        vec![(
+            "model.bin",
+            ChangeOp::File {
+                blob,
+                size: big.len() as u64,
+            },
+        )],
+    );
+    f.set_branch("main", second);
+
+    // Damage one chunk: chunks of random bytes are stored raw.
+    let needle = &big[3 << 20..(3 << 20) + 64];
+    let mut damaged = false;
+    for entry in fs::read_dir(f.repo.store().root().join("seg")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut bytes = fs::read(&path).unwrap();
+        if let Some(at) = bytes.windows(64).position(|window| window == needle) {
+            bytes[at + 7] ^= 0x20;
+            fs::write(&path, bytes).unwrap();
+            damaged = true;
+        }
+    }
+    assert!(damaged);
+
+    let result = ws.update(&ada());
+    assert!(
+        matches!(
+            result,
+            Err(Error::Store(braid_store::Error::Corrupt { .. }))
+        ),
+        "{result:?}"
+    );
+    // Neither the file nor a half-written scratch copy of it is left.
+    assert!(!dir.join("model.bin").exists());
+    assert_eq!(fs::read(dir.join("README")).unwrap(), b"hello\n");
+    let leftovers: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().contains("tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
 #[test]

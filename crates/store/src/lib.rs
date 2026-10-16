@@ -69,7 +69,8 @@
 //! little-endian; `uv`, `sv` and `bytes` are the codec of section 1.
 //!
 //! ```text
-//! format             object-format=blake3-dk-v1
+//! format             object-format=blake3-dk-v1, then storage=<version>
+//! format.lock        empty; locked exclusively to raise the storage version
 //! seg/<name>.seg     object records, append-only
 //! seg/<name>.jrn     journal of a segment that is still open
 //! seg/<name>.idx     sorted index of a sealed segment
@@ -87,6 +88,19 @@
 //! they are never read, and are removed once they are a minute old and
 //! unlocked.
 //!
+//! **Storage version.** The second line of `format` says what a reader must
+//! understand: a store without it has version 1 (records stored whole), and
+//! version 2 ([`STORAGE_VERSION`]) adds deltas and chunked blobs. A store of
+//! a later version, or with a line this version does not know, is refused
+//! with [`Error::NewerStore`] or [`Error::UnsupportedFormat`]. New stores
+//! start at the current version; an older one is raised under an exclusive
+//! lock on `format.lock`, after reading `format` again, only right before
+//! the first record that needs it is written, or when it is opened holding
+//! such records already. A journal entry or an index that holds its checksum
+//! but names a kind or a codec this version does not know, sets a reserved
+//! field, or has a later index version, was written by a newer version: the
+//! store is refused, so nothing is ever written over it.
+//!
 //! **Object record**, starting at a multiple of 8 bytes:
 //!
 //! ```text
@@ -98,12 +112,66 @@
 //! zero padding to a multiple of 8 bytes
 //! ```
 //!
-//! Codec 0 is raw (`stored_len == raw_len`), 1 is one zstd frame; 2 and 3 are
-//! reserved and not decoded by this version. Payloads up to 64 bytes are
-//! stored raw, larger ones compressed at zstd level 3 when that makes them
-//! smaller. After a crash, the next writer appends at the next multiple of 8
-//! after the end of the file, so the remains of a cut append stay in place
-//! and scans step over them 8 bytes at a time.
+//! `raw_len` is always the size of the object itself, so [`Objects::stat`]
+//! answers from the header whatever the codec. After a crash, the next
+//! writer appends at the next multiple of 8 after the end of the file, so
+//! the remains of a cut append stay in place and scans step over them 8
+//! bytes at a time.
+//!
+//! | Codec | Payload | Used for |
+//! |---|---|---|
+//! | 0 raw | the object as it is (`stored_len == raw_len`) | up to 64 bytes, or when zstd does not make it smaller |
+//! | 1 zstd | one zstd frame, level 3 | anything else stored whole |
+//! | 2 | reserved: zstd with a dictionary | never written |
+//! | 3 delta | one zstd frame against the base's raw payload | blobs under 4 MiB, trees and derived objects, given a similar object |
+//! | 4 chunked | the chunk list | blobs of 4 MiB or more |
+//!
+//! **Deltas (codec 3).** [`Objects::put_similar`] names an object the new
+//! one is probably close to, such as the same path in the parent, or the
+//! previous git map. A blob under 4 MiB, a tree or a derived object is then
+//! compressed with zstd at level 3, with the raw payload of the base as a
+//! reference prefix, a window that holds the base and the object together
+//! (at most 2²⁷ bytes), and long-distance matching. The record names the
+//! base in its header. The delta is kept only when it and the base id take
+//! at most a quarter of the bytes of the object stored on its own;
+//! otherwise the object is stored whole. Changesets are never deltas: they
+//! share too little with their parents. Depth is always one: a base is
+//! stored whole, and when the similar object is a delta, the new one is made
+//! against that delta's base instead. Reading a delta reads its base and
+//! applies one delta, never a chain; each handle keeps the payloads of the
+//! bases it used last. A handle that knows several copies of one object
+//! uses the best: stored whole, then delta, then chunked.
+//!
+//! **Chunked blobs (codec 4).** A blob of 4 MiB or more is cut with FastCDC
+//! (the 2020 algorithm, normalisation level 1, the standard gear table)
+//! into chunks of 16 KiB to 256 KiB, 64 KiB on average, or of 256 KiB to
+//! 4 MiB, 1 MiB on average, for blobs of 256 MiB or more. Each chunk is a
+//! blob of its own, whose id is the hash of its bytes, so equal chunks are
+//! stored once across files and versions. A chunk is stored whole: raw when
+//! its first 64 KiB do not compress below 0.9 of their size, else
+//! compressed when that is smaller. The blob's own record holds its chunk
+//! list:
+//!
+//! ```text
+//! uv n | n × ([32] chunk id | uv chunk size)
+//! ```
+//!
+//! The sizes add up to `raw_len`. Reads fetch the chunks in order, each
+//! checked against its id, and check the whole against the blob's id, which
+//! is the hash of the full content as always. [`Store::read_to`] streams a
+//! chunked blob a chunk at a time, and [`Store::put_blob_from`] stores one
+//! from a reader, hashing and cutting it as it comes in, with the chunk
+//! sizes for the size the caller expects; how a blob is cut never changes
+//! its id. A chunk list never names a chunked blob: a chunk is written whole
+//! even when a chunked copy of the same bytes exists.
+//!
+//! **What depends on what.** A delta needs its base, and a chunked blob its
+//! chunks. A copy that a writer finds in place of writing an object again
+//! counts only together with what it needs, and the open segments of other
+//! writers that hold those are flushed by the writer's next sync, as the
+//! copy's own segment is. There is no garbage collection yet (`braid gc` is
+//! planned): nothing is ever removed. When there is, it must never drop a
+//! base while a delta needs it, nor a chunk while a chunk list names it.
 //!
 //! **Journal entry**, 64 bytes at a multiple of 64:
 //!
@@ -126,9 +194,11 @@
 //! [32] BLAKE3 hash of everything before it
 //! ```
 //!
-//! Only entries whose record checks out go in, the first copy of an object
-//! wins, and the segment length is the size of the segment when it was
-//! sealed. There is no filter for fast misses yet, and no merged indexes.
+//! Only entries whose record checks out go in. Of several copies of an
+//! object, a copy stored whole wins over a delta, a delta over a chunked
+//! blob, and the first of equals wins. The segment length is the size of the
+//! segment when it was sealed. There is no filter for fast misses yet, and no
+//! merged indexes.
 //!
 //! **Operation record**:
 //!
@@ -158,8 +228,11 @@
 
 #![forbid(unsafe_code)]
 
+mod chunks;
+mod delta;
 mod derived;
 mod error;
+mod format_file;
 mod fsck;
 mod fsutil;
 mod index;
@@ -169,25 +242,49 @@ mod prefix;
 mod record;
 mod scan;
 mod segments;
+mod stats;
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub use braid_format::{Kind, ObjectId, Objects};
 
+pub use chunks::CHUNKED_MIN;
 pub use derived::{DERIVED_DIR, DerivedIndexFile};
 pub use error::{Error, TransactError};
 pub use fsck::{FsckReport, Problem};
 pub use oplog::{Operation, RefUpdate, Refs};
+pub use stats::{CodecStats, KindStats, Stats};
 
 use error::io_error;
 use oplog::OpLog;
 use segments::Segments;
 
-/// The contents of the `format` file, without its final newline.
+/// The first line of the `format` file: the object ids a store uses.
 pub const OBJECT_FORMAT: &str = "object-format=blake3-dk-v1";
+
+/// The storage version this version of braid writes: 2, where records may
+/// be deltas (codec 3) and chunked blobs (codec 4). It reads stores of every
+/// version up to this one, and refuses later ones with
+/// [`Error::NewerStore`].
+pub const STORAGE_VERSION: u32 = 2;
+
+/// How a record stores its object's payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Codec {
+    /// As it is.
+    Raw,
+    /// One zstd frame.
+    Zstd,
+    /// Reserved: zstd with a dictionary. Never written.
+    Dictionary,
+    /// A zstd frame against the raw payload of a base object.
+    Delta,
+    /// A blob's chunk list; the chunks are blobs of their own.
+    Chunked,
+}
 
 /// How hard flushes push data to stable storage.
 ///
@@ -289,8 +386,12 @@ impl Store {
             Ok(_) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 // Several processes may get here at once; they all publish
-                // the same bytes.
-                fsutil::publish_file(root, "format", format!("{OBJECT_FORMAT}\n").as_bytes())?;
+                // the same bytes. Opening reads what won.
+                fsutil::publish_file(
+                    root,
+                    "format",
+                    format_file::contents(STORAGE_VERSION).as_bytes(),
+                )?;
             }
             Err(err) => return Err(io_error("read", &format)(err)),
         }
@@ -298,10 +399,17 @@ impl Store {
     }
 
     /// Opens an existing store and reads every segment index and journal.
+    ///
+    /// A store that needs a newer version of braid is refused with
+    /// [`Error::NewerStore`]: its `format` file names a later storage
+    /// version, or one of its journals or indexes holds an entry this
+    /// version does not know. A store of an earlier storage version is
+    /// raised to the current one when it already holds records that need
+    /// it, and otherwise only when this handle is about to write the first.
     pub fn open(root: impl AsRef<Path>, options: Options) -> Result<Self, Error> {
         let root = root.as_ref().to_path_buf();
-        check_format(&root)?;
-        let segments = Segments::open(root.join("seg"), &options)?;
+        let storage = format_file::read(&root)?;
+        let segments = Segments::open(&root, &options, storage)?;
         let oplog = OpLog::new(root.join("oplog"), &options);
         Ok(Self {
             root,
@@ -356,22 +464,68 @@ impl Store {
         found.truncate(limit);
         Ok(found)
     }
+
+    /// Stores a blob read from `reader` without holding it in memory whole,
+    /// and returns its id and size: the content is hashed and, from 4 MiB
+    /// on, cut into chunks as it streams in. `size_hint` is the size the
+    /// caller expects, such as a file's length: blobs of 256 MiB or more are
+    /// cut into larger chunks. A stream that turns out longer or shorter is
+    /// still stored exactly as read. Nothing is flushed: see [`Store::sync`].
+    pub fn put_blob_from(
+        &self,
+        mut reader: impl Read,
+        size_hint: Option<u64>,
+    ) -> Result<(ObjectId, u64), Error> {
+        self.segments.put_blob_from(&mut reader, size_hint)
+    }
+
+    /// Writes an object's payload to `out` and returns its kind and size,
+    /// or `None` if it is not in the store. A chunked blob is read a chunk at
+    /// a time, so a blob of any size never sits in memory whole.
+    ///
+    /// Every chunk is checked against its id before it is written, and the
+    /// whole blob against its id after the last one: if this fails, what
+    /// `out` received must be discarded.
+    pub fn read_to(
+        &self,
+        id: &ObjectId,
+        mut out: impl Write,
+    ) -> Result<Option<(Kind, u64)>, Error> {
+        self.segments.read_to(id, &mut out)
+    }
 }
 
 impl Objects for Store {
     type Error = Error;
 
-    /// Reads an object. The record's checksum, length and id are all checked:
+    /// Reads an object. The record's checksum, length and id are all checked,
+    /// and so are the base of a delta and the chunks of a chunked blob:
     /// damaged data is an error, never a wrong answer. A miss rescans the
     /// directory once before answering `None`.
     fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Error> {
         self.segments.get(id)
     }
 
-    /// Appends an object, unless this handle already knows a copy. Nothing
-    /// is flushed: see [`Store::sync`].
+    /// Appends an object, unless this handle already knows a copy: a blob
+    /// of 4 MiB or more in chunks, anything else whole. Nothing is flushed:
+    /// see [`Store::sync`].
     fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Error> {
         self.segments.put(kind, payload)
+    }
+
+    /// Appends an object like [`Objects::put`], as a delta against
+    /// `similar` (or against its base, if it is a delta itself) when it is a
+    /// blob under 4 MiB, a tree or a derived object and the delta takes at
+    /// most a quarter of the bytes. Changesets are never deltas. A hint
+    /// naming an object that is missing or cannot serve as a base is
+    /// ignored.
+    fn put_similar(
+        &self,
+        kind: Kind,
+        payload: &[u8],
+        similar: &ObjectId,
+    ) -> Result<ObjectId, Error> {
+        self.segments.put_similar(kind, payload, similar)
     }
 
     /// Whether an index or a journal lists the object. A miss rescans the
@@ -388,26 +542,4 @@ impl Objects for Store {
     fn stat(&self, id: &ObjectId) -> Result<Option<(Kind, u64)>, Error> {
         self.segments.stat(id)
     }
-}
-
-/// Checks that `root` holds a store in a format this version understands.
-pub(crate) fn check_format(root: &Path) -> Result<(), Error> {
-    let path = root.join("format");
-    let text = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::NotAStore {
-                path: root.to_path_buf(),
-            });
-        }
-        Err(err) => return Err(io_error("read", &path)(err)),
-    };
-    let text = String::from_utf8_lossy(&text);
-    let line = text.strip_suffix('\n').unwrap_or(&text);
-    if line != OBJECT_FORMAT {
-        return Err(Error::UnsupportedFormat {
-            found: line.to_owned(),
-        });
-    }
-    Ok(())
 }

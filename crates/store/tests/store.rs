@@ -711,7 +711,7 @@ fn many_threads_can_create_the_same_store() {
     }
     assert_eq!(
         fs::read_to_string(root.join("format")).unwrap(),
-        "object-format=blake3-dk-v1\n"
+        "object-format=blake3-dk-v1\nstorage=2\n"
     );
     assert_clean(&store);
 }

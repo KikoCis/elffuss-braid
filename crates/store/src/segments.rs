@@ -17,17 +17,28 @@
 //!   is never written again.
 //! - **Lookups.** Every handle keeps a map from id to location, built from the
 //!   indexes and journals. On a miss it rescans the directory once, since
-//!   another process may have written or sealed something since.
+//!   another process may have written or sealed something since. When it
+//!   knows several copies of one object, it keeps the best ranked: a copy
+//!   stored whole before a delta, a delta before a chunked blob.
 //! - **Durability.** [`Segments::put`] appends without flushing;
 //!   [`Segments::sync`] flushes everything this handle wrote, segments first,
 //!   then journals, so that a durable journal entry always points at a
-//!   durable record.
+//!   durable record. A copy written by someone else stands for a new write
+//!   only together with what it needs to be read: a delta's base, a chunked
+//!   blob's chunks. Those that sit in another writer's open segment are
+//!   flushed by this handle's next sync too.
+//!
+//! How objects are stored whole, as deltas or in chunks, and read back, is
+//! in the `objects` submodule.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+mod objects;
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, hash_map};
+use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use braid_format::{Kind, ObjectId};
@@ -37,10 +48,14 @@ use crate::fsutil::{
     is_random_name, publish_file, random_name, read_range, remove_stale_temps, sync_dir, sync_file,
     write_all_at,
 };
+use crate::index::IndexError;
 use crate::journal::{self, ENTRY_LEN, Entry};
-use crate::record::{self, Encoded};
+use crate::record::{self, CODEC_CHUNKED, CODEC_DELTA, CODEC_DICTIONARY, Encoded, Header};
 use crate::scan::{self, Window};
 use crate::{Durability, Options, index};
+use crate::{chunks, format_file};
+
+pub(crate) use objects::BaseCache;
 
 /// Segments a handle keeps open for reading. Past this, a read opens the
 /// segment for itself.
@@ -49,6 +64,8 @@ const MAX_CACHED_READERS: usize = 256;
 /// The object half of a store: the `seg/` directory.
 #[derive(Debug)]
 pub(crate) struct Segments {
+    /// The store's directory, where the `format` file is.
+    root: PathBuf,
     dir: PathBuf,
     segment_size: u64,
     durability: Durability,
@@ -58,6 +75,10 @@ pub(crate) struct Segments {
     writer: Mutex<Writer>,
     /// Segments with a cached reader.
     cached_readers: AtomicUsize,
+    /// Payloads of delta bases read recently.
+    bases: BaseCache,
+    /// The storage version the `format` file is known to have at least.
+    storage: AtomicU32,
 }
 
 /// What this handle knows about the segments and the objects in them.
@@ -84,10 +105,53 @@ enum SegmentState {
     Sealed,
 }
 
+/// Where a copy of an object is: its segment, and its journal or index
+/// entry.
 #[derive(Clone, Copy, Debug)]
-struct Location {
-    segment: u32,
-    entry: Entry,
+pub(crate) struct Location {
+    /// The segment's number in this handle's catalog.
+    pub segment: u32,
+    /// What the record holds and where it starts.
+    pub entry: Entry,
+}
+
+/// Which existing copies of an object can stand for a new write of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wanted {
+    /// Any copy this version can read: whole, a delta, or chunks.
+    Any,
+    /// A copy that is not chunked, as a chunk list needs.
+    NotChunked,
+}
+
+/// A record read from its segment: its checksum is valid, and it is the one
+/// its entry describes.
+#[derive(Debug)]
+pub(crate) struct Record {
+    bytes: Vec<u8>,
+    path: PathBuf,
+    offset: u64,
+    /// Its fixed fields.
+    pub header: Header,
+    /// The base it names, for a delta.
+    pub reference: Option<ObjectId>,
+}
+
+impl Record {
+    /// The payload as stored.
+    pub fn stored(&self) -> &[u8] {
+        let start = record::header_len(self.header.codec);
+        &self.bytes[start..start + self.header.stored_len as usize]
+    }
+
+    /// The error for a problem with this record.
+    pub fn corrupt(&self, detail: impl fmt::Display) -> Error {
+        Error::corrupt(
+            &self.path,
+            self.offset,
+            format!("object {}: {detail}", self.header.id),
+        )
+    }
 }
 
 /// The write side of this handle.
@@ -152,19 +216,49 @@ enum Update {
 }
 
 impl Segments {
-    /// Opens the segments in `dir` and reads every index and journal.
-    pub fn open(dir: PathBuf, options: &Options) -> Result<Self, Error> {
+    /// Opens the segments of the store at `root`, whose `format` file says
+    /// it has storage version `storage`, and reads every index and journal.
+    /// If they already hold records that need a later storage version, as a
+    /// writer that died before raising it could leave, the version is raised.
+    pub fn open(root: &Path, options: &Options, storage: u32) -> Result<Self, Error> {
         let segments = Self {
-            dir,
+            root: root.to_path_buf(),
+            dir: root.join("seg"),
             segment_size: options.segment_size,
             durability: options.durability,
             catalog: RwLock::new(Catalog::default()),
             rescanning: Mutex::new(()),
             writer: Mutex::new(Writer::default()),
             cached_readers: AtomicUsize::new(0),
+            bases: BaseCache::default(),
+            storage: AtomicU32::new(storage),
         };
         segments.rescan()?;
+        let needed = segments
+            .known_entries()
+            .iter()
+            .map(|entry| record::storage_version(entry.codec))
+            .max()
+            .unwrap_or(1);
+        segments.need_storage(needed)?;
         Ok(segments)
+    }
+
+    /// Makes sure the store's `format` file says it has at least storage
+    /// version `version`, raising it if needed, before anything that needs
+    /// that version is written.
+    fn need_storage(&self, version: u32) -> Result<(), Error> {
+        if self.storage.load(Ordering::Acquire) >= version {
+            return Ok(());
+        }
+        format_file::raise(&self.root, version)?;
+        self.storage.fetch_max(version, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// The `seg/` directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The path of one of a segment's files.
@@ -172,38 +266,82 @@ impl Segments {
         segment_path(&self.dir, name, extension)
     }
 
-    /// Stores an object and returns its id. Nothing is flushed: call
-    /// [`Segments::sync`] before anything durable refers to the object.
-    pub fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Error> {
-        let id = ObjectId::hash(kind, payload);
-        // Compress outside the writer lock, unless a copy is already known.
-        let mut encoded = if self.location(&id).is_some() {
-            None
-        } else {
-            Some(encode(kind, id, payload)?)
-        };
-        let mut writer = self.lock_writer();
-        if let Some(location) = self.location(&id)
-            && self.reuse(&mut writer, &location)?
+    /// Appends the record `make` encodes for the object `id`, unless a copy
+    /// that `wanted` accepts can stand for it. `make` runs at most once,
+    /// outside the writer lock unless a copy appeared and turned out
+    /// unusable. Nothing is flushed: call [`Segments::sync`] before anything
+    /// durable refers to the object.
+    pub fn store_record(
+        &self,
+        id: &ObjectId,
+        wanted: Wanted,
+        make: impl FnOnce() -> Result<Encoded, Error>,
+    ) -> Result<(), Error> {
+        let mut make = Some(make);
+        // Encode outside the writer lock, unless a copy is already known.
+        let mut encoded = None;
+        if self.location(id).is_none()
+            && let Some(make) = make.take()
         {
-            return Ok(id);
+            encoded = Some(make()?);
         }
-        let encoded = match encoded.take() {
-            Some(encoded) => encoded,
-            None => encode(kind, id, payload)?,
+        let mut writer = self.lock_writer();
+        if let Some(location) = self.location(id)
+            && self.reuse(&mut writer, &location, wanted)?
+        {
+            return Ok(());
+        }
+        let encoded = match (encoded, make) {
+            (Some(encoded), _) => encoded,
+            (None, Some(make)) => make()?,
+            (None, None) => unreachable!("make runs only when nothing was encoded"),
         };
-        self.append(&mut writer, encoded)?;
-        Ok(id)
+        self.append(&mut writer, encoded)
     }
 
-    /// Reads an object, checking its record and its id.
-    pub fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Error> {
-        let Some(location) = self.find(id)? else {
-            return Ok(None);
+    /// Whether a copy of `id` that `wanted` accepts can stand for a new
+    /// write of it. Like a write that finds it, this makes the next sync
+    /// flush the copy and what it needs, wherever another writer has not
+    /// flushed them yet.
+    pub fn stored(&self, id: &ObjectId, wanted: Wanted) -> Result<bool, Error> {
+        let Some(location) = self.location(id) else {
+            return Ok(false);
         };
+        let mut writer = self.lock_writer();
+        self.reuse(&mut writer, &location, wanted)
+    }
+
+    /// Reads and checks the record at `location`.
+    pub fn read_record(&self, location: &Location) -> Result<Record, Error> {
         let (file, path) = self.reader(location.segment)?;
-        let payload = read_object(&file, &path, &location.entry)?;
-        Ok(Some((location.entry.kind, payload)))
+        let entry = &location.entry;
+        let corrupt = |detail: &str| {
+            Error::corrupt(
+                &path,
+                entry.offset,
+                format!("object {}: {detail}", entry.id),
+            )
+        };
+        let header = entry.header();
+        let bytes = match read_range(&file, entry.offset, header.unpadded_len()) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(corrupt("record runs past the end of the segment"));
+            }
+            Err(err) => return Err(io_error("read", &path)(err)),
+        };
+        let checked = record::check(&bytes).map_err(corrupt)?;
+        if checked.header != header || checked.crc != entry.crc {
+            return Err(corrupt("record does not match its entry"));
+        }
+        let reference = checked.reference;
+        Ok(Record {
+            bytes,
+            path,
+            offset: entry.offset,
+            header,
+            reference,
+        })
     }
 
     /// The kind and size of an object, from its record's header alone: the
@@ -264,20 +402,21 @@ impl Segments {
 
     /// Makes sure the objects in `ids` are durable before something durable
     /// refers to them: flushes this handle's writes, and the open segments of
-    /// other writers that hold any of them. Fails if a record is damaged.
-    /// Objects this handle does not know about are skipped.
+    /// other writers that hold any of them or what they need to be read.
+    /// Fails if a record, or a base or chunk it needs, is damaged or
+    /// missing. Objects this handle does not know about are skipped.
     pub fn make_durable(&self, ids: &[ObjectId]) -> Result<(), Error> {
         let mut writer = self.lock_writer();
         for id in ids {
             let Some(location) = self.location(id) else {
                 continue;
             };
-            if !self.reuse(&mut writer, &location)? {
+            if !self.reuse(&mut writer, &location, Wanted::Any)? {
                 let (_, path) = self.reader(location.segment)?;
                 return Err(Error::corrupt(
                     &path,
                     location.entry.offset,
-                    format!("object {id}: record is damaged"),
+                    format!("object {id}: its record, or what it needs, is damaged or missing"),
                 ));
             }
         }
@@ -322,7 +461,7 @@ impl Segments {
             let path = self.path(name, "jrn");
             match File::open(&path) {
                 Ok(file) => {
-                    let read = journal::read(&file, from).map_err(io_error("read", &path))?;
+                    let read = journal::read(&file, from, &path)?;
                     self.apply(name, Update::Journal(read.end), &read.entries);
                     return Ok(());
                 }
@@ -343,19 +482,23 @@ impl Segments {
 
     /// The entries of a sealed segment. A damaged index is worked around by
     /// scanning the segment, whose records describe themselves; fsck reports
-    /// the damage.
+    /// the damage. An index a newer version of braid wrote is refused.
     fn load_index(&self, name: &str) -> Result<Vec<Entry>, Error> {
         let path = self.path(name, "idx");
         let bytes = fs::read(&path).map_err(io_error("read", &path))?;
         match index::decode(&bytes) {
             Ok(index) => Ok(index.entries),
-            Err(_) => {
+            Err(IndexError::Newer(detail)) => Err(Error::NewerStore {
+                path,
+                detail: format!("it holds {detail}"),
+            }),
+            Err(IndexError::Damaged(_)) => {
                 let path = self.path(name, "seg");
                 let file = File::open(&path).map_err(io_error("open", &path))?;
                 let len = file.metadata().map_err(io_error("read", &path))?.len();
                 let mut entries = Vec::new();
-                scan::scan(&file, len, |offset, header, crc, _| {
-                    entries.push(Entry::new(offset, header, crc));
+                scan::scan(&file, len, |offset, found| {
+                    entries.push(Entry::new(offset, &found.header, found.crc));
                 })
                 .map_err(io_error("read", &path))?;
                 Ok(entries)
@@ -376,16 +519,27 @@ impl Segments {
             (Update::Journal(_), SegmentState::Sealed) => {}
         }
         for entry in entries {
-            catalog.objects.entry(entry.id).or_insert(Location {
+            let location = Location {
                 segment,
                 entry: *entry,
-            });
+            };
+            match catalog.objects.entry(entry.id) {
+                hash_map::Entry::Vacant(slot) => {
+                    slot.insert(location);
+                }
+                // A copy stored whole beats a delta, which beats chunks.
+                hash_map::Entry::Occupied(mut slot) => {
+                    if record::rank(entry.codec) < record::rank(slot.get().entry.codec) {
+                        slot.insert(location);
+                    }
+                }
+            }
         }
         segment
     }
 
     /// Where an object is, rescanning the directory once on a miss.
-    fn find(&self, id: &ObjectId) -> Result<Option<Location>, Error> {
+    pub fn find(&self, id: &ObjectId) -> Result<Option<Location>, Error> {
         if let Some(location) = self.location(id) {
             return Ok(Some(location));
         }
@@ -393,7 +547,21 @@ impl Segments {
         Ok(self.location(id))
     }
 
-    fn location(&self, id: &ObjectId) -> Option<Location> {
+    /// The entries of every object this handle knows of, one copy each, in
+    /// no particular order. Nothing is read from disk.
+    pub fn known_entries(&self) -> Vec<Entry> {
+        self.catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .objects
+            .values()
+            .map(|location| location.entry)
+            .collect()
+    }
+
+    /// Where this handle knows a copy of an object to be, without looking
+    /// at the directory again.
+    pub fn location(&self, id: &ObjectId) -> Option<Location> {
         self.catalog
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -420,11 +588,101 @@ impl Segments {
     }
 
     /// Whether the copy at `location` can stand for a new write of the same
-    /// object. A copy in a sealed segment, or in this handle's own segment,
-    /// can. A copy in another writer's open segment can if its record is
-    /// whole; that segment is then flushed by this handle's next sync, since
-    /// its writer may not have flushed it yet.
-    fn reuse(&self, writer: &mut Writer, location: &Location) -> Result<bool, Error> {
+    /// object: `wanted` accepts it, its record is there to stay, and so is
+    /// what it needs to be read. A delta needs its base stored whole; a
+    /// chunked blob needs every chunk, stored whole or as a delta, with the
+    /// size its list gives. Depth is bounded: a base is whole, and a chunk is
+    /// never chunked itself.
+    fn reuse(
+        &self,
+        writer: &mut Writer,
+        location: &Location,
+        wanted: Wanted,
+    ) -> Result<bool, Error> {
+        let codec = location.entry.codec;
+        if codec == CODEC_DICTIONARY || (wanted == Wanted::NotChunked && codec == CODEC_CHUNKED) {
+            return Ok(false);
+        }
+        if !self.record_stays(writer, location)? {
+            return Ok(false);
+        }
+        match codec {
+            CODEC_DELTA => {
+                let Some(base) = self.reference(location)? else {
+                    return Ok(false);
+                };
+                match self.find(&base)? {
+                    Some(base) if record::is_whole(base.entry.codec) => {
+                        self.record_stays(writer, &base)
+                    }
+                    _ => Ok(false),
+                }
+            }
+            CODEC_CHUNKED => {
+                let list = match self.read_record(location) {
+                    Ok(list) => list,
+                    Err(Error::Corrupt { .. }) => return Ok(false),
+                    Err(err) => return Err(err),
+                };
+                let Ok(chunks) = chunks::decode_list(list.stored(), list.header.raw_len) else {
+                    return Ok(false);
+                };
+                for chunk in chunks {
+                    let usable = match self.find(&chunk.id)? {
+                        Some(found) => {
+                            found.entry.kind == Kind::Blob
+                                && found.entry.raw_len == chunk.size
+                                && self.reuse(writer, &found, Wanted::NotChunked)?
+                        }
+                        None => false,
+                    };
+                    if !usable {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(true),
+        }
+    }
+
+    /// The base that `location`, a delta, names in its header. `None` if
+    /// the header cannot be read or is not the one the entry describes.
+    fn reference(&self, location: &Location) -> Result<Option<ObjectId>, Error> {
+        let (file, path) = self.reader(location.segment)?;
+        let len = record::header_len(location.entry.codec);
+        let bytes = match read_range(&file, location.entry.offset, len as u64) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(err) => return Err(io_error("read", &path)(err)),
+        };
+        match record::parse_header(&bytes) {
+            Ok(header) if header == location.entry.header() && len > record::HEADER_LEN => {
+                Ok(Some(ObjectId::from_bytes(record::array(
+                    &bytes[record::HEADER_LEN..len],
+                ))))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether the base at `location` can be relied on by a new delta: it
+    /// is stored whole and there to stay. If it sits in another writer's
+    /// open segment, this handle's next sync flushes that segment.
+    pub fn rely_on_base(&self, location: &Location) -> Result<bool, Error> {
+        if !record::is_whole(location.entry.codec) {
+            return Ok(false);
+        }
+        let mut writer = self.lock_writer();
+        self.record_stays(&mut writer, location)
+    }
+
+    /// Whether the record at `location` is there to stay. A record in a
+    /// sealed segment, or in this handle's own segment, is. A record in
+    /// another writer's open segment is if it is whole; that segment is then
+    /// flushed by this handle's next sync, since its writer may not have
+    /// flushed it yet.
+    fn record_stays(&self, writer: &mut Writer, location: &Location) -> Result<bool, Error> {
         let state = {
             let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
             catalog.segments[location.segment as usize].state
@@ -441,7 +699,7 @@ impl Segments {
         let whole = match read_range(&file, location.entry.offset, header.unpadded_len()) {
             Ok(bytes) => matches!(
                 record::check(&bytes),
-                Ok((found, crc, _)) if found == header && crc == location.entry.crc
+                Ok(found) if found.header == header && found.crc == location.entry.crc
             ),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => false,
             Err(err) => return Err(io_error("read", &path)(err)),
@@ -453,8 +711,12 @@ impl Segments {
     }
 
     /// Appends a record to the leased segment, taking a lease first if
-    /// needed, and seals the segment if it is now full.
+    /// needed, and seals the segment if it is now full. A record that needs
+    /// a later storage version than the store has raises it first, so that
+    /// no version of braid that does not know the record ever reads the
+    /// store.
     fn append(&self, writer: &mut Writer, encoded: Encoded) -> Result<(), Error> {
+        self.need_storage(record::storage_version(encoded.header.codec))?;
         if writer.lease.is_none() {
             let lease = self.acquire(writer)?;
             writer.lease = Some(lease);
@@ -558,7 +820,9 @@ impl Segments {
         // Whoever created these files may have died before flushing the
         // directory, and objects acknowledged from now on depend on them.
         sync_dir(&self.dir)?;
-        let read = journal::read(&journal, 0).map_err(io_error("read", &jrn_path))?;
+        // A journal a newer version wrote to stops here: this version never
+        // writes after entries it does not understand.
+        let read = journal::read(&journal, 0, &jrn_path)?;
         let seg_len = seg.metadata().map_err(io_error("read", &seg_path))?.len();
         // Never write over bytes an entry points at, even if they are gone.
         let claimed = read.entries.iter().map(Entry::end).max().unwrap_or(0);
@@ -639,23 +903,30 @@ impl Segments {
         let jrn_path = self.path(&lease.name, "jrn");
         // The index must never point at data that is not durable.
         sync_file(&lease.seg, self.durability).map_err(io_error("sync", &seg_path))?;
-        let read = journal::read(&lease.journal, 0).map_err(io_error("read", &jrn_path))?;
+        let read = journal::read(&lease.journal, 0, &jrn_path)?;
         let seg_len = lease
             .seg
             .metadata()
             .map_err(io_error("read", &seg_path))?
             .len();
-        // Only entries whose record is whole go in, and the first copy of an
-        // object wins.
+        // Only entries whose record is whole go in. Of several copies of an
+        // object, the best ranked wins, and the first of those.
         let mut window = Window::new(&lease.seg, seg_len);
-        let mut seen = HashSet::new();
-        let mut entries = Vec::with_capacity(read.entries.len());
+        let mut chosen: HashMap<ObjectId, usize> = HashMap::new();
+        let mut entries: Vec<Entry> = Vec::with_capacity(read.entries.len());
         for entry in read.entries {
-            if !seen.contains(&entry.id)
-                && scan::matches(&mut window, &entry).map_err(io_error("read", &seg_path))?
-            {
-                seen.insert(entry.id);
-                entries.push(entry);
+            if !scan::matches(&mut window, &entry).map_err(io_error("read", &seg_path))? {
+                continue;
+            }
+            match chosen.get(&entry.id) {
+                None => {
+                    chosen.insert(entry.id, entries.len());
+                    entries.push(entry);
+                }
+                Some(&at) if record::rank(entry.codec) < record::rank(entries[at].codec) => {
+                    entries[at] = entry;
+                }
+                Some(_) => {}
             }
         }
         entries.sort_by_key(|entry| entry.id);
@@ -750,27 +1021,9 @@ impl Catalog {
     }
 }
 
-fn encode(kind: Kind, id: ObjectId, payload: &[u8]) -> Result<Encoded, Error> {
-    record::encode(kind, id, payload).map_err(|size| Error::ObjectTooLarge { size })
-}
-
-/// Reads and checks the record an entry points at, and decodes its payload.
-pub(crate) fn read_object(file: &File, path: &Path, entry: &Entry) -> Result<Vec<u8>, Error> {
-    let corrupt =
-        |detail: &str| Error::corrupt(path, entry.offset, format!("object {}: {detail}", entry.id));
-    let header = entry.header();
-    let bytes = match read_range(file, entry.offset, header.unpadded_len()) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
-            return Err(corrupt("record runs past the end of the segment"));
-        }
-        Err(err) => return Err(io_error("read", path)(err)),
-    };
-    let (found, crc, stored) = record::check(&bytes).map_err(corrupt)?;
-    if found != header || crc != entry.crc {
-        return Err(corrupt("record does not match its entry"));
-    }
-    record::decode(&found, stored).map_err(corrupt)
+/// The error for an object whose stored form does not fit in a record.
+pub(crate) fn too_large(size: u64) -> Error {
+    Error::ObjectTooLarge { size }
 }
 
 /// The segments in `dir` and which of their files exist, by name.

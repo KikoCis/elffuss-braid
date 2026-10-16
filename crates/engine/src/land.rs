@@ -221,8 +221,10 @@ pub fn land<O: Objects>(
         return Ok(LandOutcome::AlreadyApplied);
     }
 
-    for (_, bytes) in &rebase.blobs {
-        objects.put(Kind::Blob, bytes).map_err(store_error)?;
+    for (_, bytes, ours) in &rebase.blobs {
+        objects
+            .put_similar(Kind::Blob, bytes, ours)
+            .map_err(store_error)?;
     }
     write_nodes(objects, &applied.nodes)?;
     let mut extras: Vec<(Vec<u8>, Vec<u8>)> = theirs
@@ -358,8 +360,9 @@ pub(crate) struct Rebase<'o, O> {
     pub(crate) resolved: Vec<Change>,
     /// Paths merged from both sides.
     pub(crate) merged: Vec<Vec<u8>>,
-    /// Merged contents to store.
-    pub(crate) blobs: Vec<(ObjectId, Vec<u8>)>,
+    /// Merged contents to store: their id, their bytes, and the head's blob
+    /// at the same path, which they are probably close to.
+    pub(crate) blobs: Vec<(ObjectId, Vec<u8>, ObjectId)>,
     /// Paths the change adds that had no file in the base or on the head.
     added: Vec<Vec<u8>>,
     /// Paths the change deletes.
@@ -513,7 +516,7 @@ impl<'o, O: Objects> Rebase<'o, O> {
             return Ok(());
         }
         if let Some(bytes) = bytes {
-            self.blobs.push((blob, bytes));
+            self.blobs.push((blob, bytes, o.blob));
         }
         self.resolved.push(Change {
             path: path.to_vec(),
@@ -690,7 +693,7 @@ mod tests {
     use crate::diff::diff;
     use crate::merge::HunkSide;
     use crate::path::MAX_PATH_DEPTH;
-    use crate::testing::{Repo, deep_path, delete, gitlink, signature, text_map};
+    use crate::testing::{Hinted, Repo, deep_path, delete, gitlink, signature, text_map};
     use braid_format::Changes;
 
     struct Setup {
@@ -1026,6 +1029,43 @@ mod tests {
             extras,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_merged_file_names_the_heads_version() {
+        let objects = Hinted::default();
+        let file = |path: &str, text: &str| Change {
+            path: path.as_bytes().to_vec(),
+            op: ChangeOp::File {
+                blob: objects.put(Kind::Blob, text.as_bytes()).unwrap(),
+                size: text.len() as u64,
+            },
+        };
+        let commit = |parents: Vec<ObjectId>, changes| {
+            crate::commit::commit(
+                &objects,
+                parents,
+                changes,
+                signature("author"),
+                signature("author"),
+                b"change\n".to_vec(),
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        let base = commit(Vec::new(), vec![file("f", "1\n2\n3\n4\n5\n")]);
+        let head = commit(vec![base], vec![file("f", "ONE\n2\n3\n4\n5\n")]);
+        let change = commit(vec![base], vec![file("f", "1\n2\n3\n4\nFIVE\n")]);
+        objects.hints.take();
+        let outcome = land(&objects, Some(head), change, signature("x")).unwrap();
+        assert!(
+            matches!(outcome, LandOutcome::Rebased { .. }),
+            "{outcome:?}"
+        );
+        let merged = ObjectId::hash(Kind::Blob, b"ONE\n2\n3\n4\nFIVE\n");
+        let heads = ObjectId::hash(Kind::Blob, b"ONE\n2\n3\n4\n5\n");
+        let hints = objects.hints.take();
+        assert!(hints.contains(&(merged, heads)), "{hints:?}");
     }
 
     #[test]

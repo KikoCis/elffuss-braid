@@ -319,7 +319,8 @@ Fixed-size integers are little-endian; `uv`, `sv` and `bytes` are the codec of
 section 1.
 
 ```
-.braid/store/format            object-format=blake3-dk-v1
+.braid/store/format            object-format=blake3-dk-v1, then storage=<version>
+.braid/store/format.lock       empty; locked exclusively to raise the storage version
 .braid/store/seg/<name>.seg    object records, append-only
 .braid/store/seg/<name>.jrn    journal of a segment that is still open
 .braid/store/seg/<name>.idx    sorted index of a sealed segment
@@ -332,6 +333,29 @@ section 1.
 Segment names are 32 random lowercase hex digits. Files whose names start with
 `tmp-` are still being written, or were left by a writer that died; they are
 never read, and are removed once they are a minute old and unlocked.
+
+**Storage version.** The `format` file has two lines: the object ids
+(`object-format=blake3-dk-v1`), and the storage version, what a reader must
+understand to use the store (`storage=2`). A store without the second line has
+storage version 1: records stored whole (codecs 0 and 1), which every version
+of braid reads. Version 2 adds deltas (codec 3) and chunked blobs (codec 4). A
+version of braid refuses a store of a later storage version, and a `format`
+file with any line it does not know; versions from before storage versions
+compare the whole file with the first line, so they refuse version 2 too.
+
+New stores start at the current version. A store is raised only when a writer
+is about to append the first record that needs a later version, or when a
+handle that opens it finds such records already there. The writer takes an
+exclusive lock on `format.lock`, reads `format` again, and if it is still
+older publishes the new one through a temporary file and a rename: the version
+never goes down, and it is durable before any record that needs it.
+
+A journal entry or an index whose checksum holds but which names an object
+kind or a codec the reader does not know, sets a reserved field, or has a later
+index version, was written by a newer version of braid: it is not torn or
+damaged. The reader refuses the store rather than skip the entry, scan around
+the index, or append after them, so nothing is ever written over records it
+does not understand.
 
 **Sharing.** A writer appends only to a segment it holds an exclusive,
 non-blocking lock on: an unlocked open segment if there is one, else a new one
@@ -356,12 +380,83 @@ u32 crc32c of everything from the sync word to the end of the payload
 zero padding to a multiple of 8 bytes
 ```
 
-Codec 0 is raw (`stored_len == raw_len`) and 1 is one zstd frame; 2 (zstd with
-a dictionary) and 3 (zstd against a reference object) are reserved. Payloads up
-to 64 bytes are stored raw, larger ones compressed at zstd level 3 when that
-makes them smaller. After a crash, the next writer appends at the next multiple
-of 8 after the end of the file, so the remains of a cut append stay in place and
-scans step over them.
+`raw_len` is always the size of the object itself, whatever the codec, so the
+kind and size of any object come from its header without reading its payload.
+After a crash, the next writer appends at the next multiple of 8 after the end
+of the file, so the remains of a cut append stay in place and scans step over
+them.
+
+| Codec | Payload | Used for |
+|---|---|---|
+| 0 raw | the object as it is (`stored_len == raw_len`) | payloads up to 64 bytes, and larger ones zstd does not make smaller |
+| 1 zstd | one zstd frame, level 3 | other objects stored whole |
+| 2 | reserved: zstd with a dictionary | not written yet |
+| 3 delta | one zstd frame against the raw payload of the base the header names | blobs under 4 MiB, trees and derived objects, given a similar object |
+| 4 chunked | the chunk list | blobs only, of 4 MiB or more |
+
+**Deltas (codec 3).** A writer may say which object a new one is probably
+close to. Braid names, for each new tree node and file, the one at the same
+path in the parent (for a merged file, the branch's version); for an imported
+commit's raw bytes, the first parent's; for the git map, the map it grew from.
+A blob under 4 MiB, a tree or a derived object is then compressed with zstd at
+level 3, with the raw payload of the base as a reference prefix
+(`ZSTD_CCtx_refPrefix`), a window that holds the base and the object together
+(at most 2²⁷ bytes, so that any decoder accepts it), and long-distance
+matching. Changesets are never deltas: against their first parent, imported
+histories gave none that met the cut below. The frame is kept only when it and the 32
+bytes of the base id take at most a quarter of the bytes of the object stored
+on its own (codec 0 or 1); otherwise the object is stored on its own.
+
+The fraction decides how often a version is stored whole again, since a delta
+holds every change since its base. Imports of the histories of four public
+repositories took, as a ratio to the same histories packed by `git gc
+--aggressive`, 2.9 to 3.7 keeping deltas up to a half, 2.6 to 3.3 up to a
+third, 2.5 to 3.1 up to a quarter, and 2.6 to 3.1 up to a sixth.
+
+Depth is always one. A base is stored whole, with codec 0 or 1, and when the
+object named as similar is a delta, the new one is made against that delta's
+own base. Reading a delta reads its base and applies one delta, never a chain.
+A reader that knows several copies of one object, as racing writers can leave,
+uses a copy stored whole before a delta, and a delta before a chunked blob, so
+that a base always resolves to a copy stored whole when there is one.
+
+**Chunked blobs (codec 4).** A blob of 4 MiB or more is cut with FastCDC, the
+2020 algorithm with normalisation level 1 and the standard gear table, into
+chunks whose boundaries depend only on the content:
+
+| Blob size | Smallest chunk | Average | Largest |
+|---|---|---|---|
+| 4 MiB to 256 MiB | 16 KiB | 64 KiB | 256 KiB |
+| 256 MiB or more | 256 KiB | 1 MiB | 4 MiB |
+
+The last chunk may be smaller than the smallest size. A writer that streams a
+blob in cuts it with the sizes for the size it expects, such as a file's
+length; how a blob is cut never changes its id. Each chunk is a blob of its
+own, whose id is the hash of its bytes, so a chunk shared by several files or
+versions is stored once. A chunk is stored whole: raw when its first 64 KiB do
+not compress below 0.9 of their size, else compressed when that is smaller. A
+chunk list never names a chunked blob: a chunk is written whole even when a
+chunked copy of the same bytes exists. The blob's own record holds its chunk
+list:
+
+```
+uv n                                 n ≥ 1
+n × ([32] chunk id | uv chunk size)  in order; sizes at least 1
+```
+
+The sizes add up to the record's `raw_len`, and the chunks, in order, make up
+the blob. Its id is still the hash of its full content: readers fetch the
+chunks one at a time, each checked against its own id and size, and check the
+whole against the blob's id, so a blob of any size can be read and written as a
+stream.
+
+**What depends on what.** A delta needs its base, and a chunked blob its
+chunks. A writer that finds a copy of an object instead of writing it again
+relies on it only together with what it needs, and flushes, at its next sync,
+the open segments of other writers that hold any of them, as it does for the
+copy itself. There is no garbage collection yet (`braid gc` is planned): no
+object is ever removed. Garbage collection must never drop a base while a delta
+needs it, nor a chunk while a chunk list names it.
 
 **Journal entry**, 64 bytes at a multiple of 64, written after its record:
 
@@ -384,8 +479,9 @@ count × (u64 offset | u32 stored_len | u8 kind | u8 codec | u16 0
 [32] BLAKE3 hash of everything before it
 ```
 
-Only entries whose record checks out go in, and the first copy of an object
-wins.
+Only entries whose record checks out go in. Of several copies of an object, a
+copy stored whole wins over a delta, a delta over a chunked blob, and the first
+of equals wins.
 
 **Operation record**:
 
@@ -426,10 +522,34 @@ first. Readers take no lock, skip entries that fail their CRC, and let the last
 entry of a key count. The file needs no sync: losing entries only means
 computing values again.
 
-**Planned, not implemented yet:** a binary fuse filter in indexes for fast
-misses, merged indexes, one-level zstd deltas against the same path in the
-first parent (codec 3), per-repository dictionaries (codec 2), and FastCDC
-chunking of blobs of 4 MiB or more.
+**Where the room goes.** Imported, the histories of four public repositories
+take 2.5 to 3.1 times what `git gc --aggressive` packs them into, and 6.1 to
+8.3 times without deltas. As a ratio to git's packed size:
+
+| Part | Share |
+|---|---|
+| Blobs: file contents, and the raw bytes of imported commits | 1.46 to 1.74 |
+| Record headers, checksums and padding | 0.21 to 0.35 |
+| Journal and index entries | 0.18 to 0.33 |
+| Changesets | 0.14 to 0.35 |
+| Trees | 0.25 to 0.31 |
+| The git map | 0.13 to 0.22 |
+
+**Planned, not implemented yet:**
+
+- *Storage version 3, compact records and indexes.* A record header that
+  leaves out the id its index entry already holds and writes lengths as `uv`,
+  and index entries of about half their size. The overhead per object, headers
+  and entries together, is 0.4 to 0.7 of git's size above.
+- *Skip-deltas.* Deltas one level deep hold every change since their base, so
+  blobs take several times what git's delta chains do. A delta could be made
+  against a recent version, with a bounded number of deltas to apply on any
+  read (logarithmic in the number of versions) rather than exactly one.
+- *Per-repository dictionaries (codec 2)*, for the small objects deltas do not
+  help: trees, changesets and raw commits.
+- A binary fuse filter in indexes for fast misses, and merged indexes.
+- Garbage collection (`braid gc`), which must keep every base and chunk that
+  something still needs.
 
 ## 8. Derived data (not frozen, versioned per function)
 

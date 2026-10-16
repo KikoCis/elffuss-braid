@@ -252,10 +252,24 @@ pub(crate) fn write_file(
     content: &[u8],
     executable: bool,
 ) -> io::Result<()> {
+    write_file_from(dir, name, executable, |file| file.write_all(content))
+}
+
+/// Writes `name` in `dir` like [`write_file`], with the content `fill`
+/// writes into the scratch file, a piece at a time: a large file never
+/// needs to be in memory whole. If `fill` fails, `name` is left as it was.
+pub(crate) fn write_file_from(
+    dir: &Dir,
+    name: &OsStr,
+    executable: bool,
+    fill: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
     let (scratch, mut file) = create_scratch(dir)?;
-    let written = file
-        .write_all(content)
-        .and_then(|()| set_mode(&file, executable));
+    let written = {
+        let mut out = io::BufWriter::new(&mut file);
+        fill(&mut out).and_then(|()| out.flush())
+    }
+    .and_then(|()| set_mode(&file, executable));
     drop(file);
     finish(dir, &scratch, name, written)
 }

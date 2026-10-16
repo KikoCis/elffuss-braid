@@ -22,6 +22,23 @@ pub trait Objects {
     /// object that is already present does nothing.
     fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Self::Error>;
 
+    /// Stores `payload` like [`Objects::put`], with a hint: the object is
+    /// probably close to `similar`, such as the previous version of the same
+    /// file or directory. A store may keep it as a difference from that
+    /// object; the id, and what [`Objects::get`] returns, are the same
+    /// either way. A hint that names an object that is not here is ignored.
+    ///
+    /// The default ignores the hint and calls [`Objects::put`].
+    fn put_similar(
+        &self,
+        kind: Kind,
+        payload: &[u8],
+        similar: &ObjectId,
+    ) -> Result<ObjectId, Self::Error> {
+        let _ = similar;
+        self.put(kind, payload)
+    }
+
     /// Whether the object is here.
     fn contains(&self, id: &ObjectId) -> Result<bool, Self::Error> {
         Ok(self.get(id)?.is_some())
@@ -46,6 +63,15 @@ impl<T: Objects + ?Sized> Objects for &T {
 
     fn put(&self, kind: Kind, payload: &[u8]) -> Result<ObjectId, Self::Error> {
         (**self).put(kind, payload)
+    }
+
+    fn put_similar(
+        &self,
+        kind: Kind,
+        payload: &[u8],
+        similar: &ObjectId,
+    ) -> Result<ObjectId, Self::Error> {
+        (**self).put_similar(kind, payload, similar)
     }
 
     fn contains(&self, id: &ObjectId) -> Result<bool, Self::Error> {
@@ -143,5 +169,13 @@ mod tests {
         // Through a reference, too.
         let by_ref: &MemoryObjects = &objects;
         assert!(Objects::contains(&by_ref, &id).unwrap());
+        // A hint changes nothing in memory, even one naming an absent object.
+        let next = Objects::put_similar(&by_ref, Kind::Blob, b"hello!\n", &id).unwrap();
+        assert_eq!(next, ObjectId::hash(Kind::Blob, b"hello!\n"));
+        assert_eq!(
+            objects.put_similar(Kind::Tree, b"x", &other).unwrap(),
+            ObjectId::hash(Kind::Tree, b"x")
+        );
+        assert_eq!(objects.len(), 3);
     }
 }

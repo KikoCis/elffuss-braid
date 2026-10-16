@@ -35,7 +35,7 @@ use crate::safe::{Found, Root, Stat, StatKind, open_file, read_link};
 use crate::scan;
 use crate::state::{Checkout, Lock, Rebase, RecordedConflict, State};
 use crate::status::{self, Status};
-use crate::tree::{flatten, root_of};
+use crate::tree::{Flat, flatten, root_of};
 
 /// A workspace of a repository.
 #[derive(Debug)]
@@ -624,12 +624,18 @@ impl<'r> Workspace<'r> {
     /// Scans the working copy, saves the new stat cache, and compares it
     /// with the base.
     fn scan_status(&self, root: &Root, state: &State) -> Result<Status, Error> {
+        Ok(self.scan_against_base(root, state)?.0)
+    }
+
+    /// Like [`Self::scan_status`], and also returns the base's files.
+    fn scan_against_base(&self, root: &Root, state: &State) -> Result<(Status, Flat), Error> {
         let store = self.store();
         let base = flatten(store, root_of(store, state.base)?)?;
         let cache = Cache::load(&self.state_dir);
         let scan = scan::scan(root, &base, &cache)?;
         scan.cache.save(&self.state_dir)?;
-        Ok(status::compare(&base, &scan, &state.tracked))
+        let status = status::compare(&base, &scan, &state.tracked);
+        Ok((status, base))
     }
 
     /// Fails if the working copy has uncommitted changes.
@@ -693,7 +699,7 @@ impl<'r> Workspace<'r> {
     pub fn commit(&self, request: &CommitRequest) -> Result<CommitOutcome, Error> {
         let (_lock, mut state, root) = self.begin()?;
         let store = self.store();
-        let status = self.scan_status(&root, &state)?;
+        let (status, base) = self.scan_against_base(&root, &state)?;
         if state.rebase.is_some() && !request.paths.is_empty() {
             return Err(Error::PathsDuringRebase);
         }
@@ -749,7 +755,19 @@ impl<'r> Workspace<'r> {
         for change in &selected {
             let op = match &change.op {
                 ChangeOp::Delete | ChangeOp::Gitlink { .. } => change.op.clone(),
-                _ => self.store_file(&root, &change.path)?,
+                _ => {
+                    // The base's file at the same path: what the store may
+                    // keep the new content as a delta against.
+                    let similar = match base.files.get(&change.path) {
+                        Some(
+                            ChangeOp::File { blob, .. }
+                            | ChangeOp::Executable { blob, .. }
+                            | ChangeOp::Symlink { blob, .. },
+                        ) => Some(*blob),
+                        _ => None,
+                    };
+                    self.store_file(&root, &change.path, similar)?
+                }
             };
             changes.push(Change {
                 path: change.path.clone(),
@@ -806,8 +824,15 @@ impl<'r> Workspace<'r> {
     }
 
     /// Reads a changed file again and stores it as a blob: the content
-    /// committed is the content read now.
-    fn store_file(&self, root: &Root, path: &[u8]) -> Result<ChangeOp, Error> {
+    /// committed is the content read now. `similar` is the blob the base
+    /// has at the same path, a hint for the store. A large file is streamed
+    /// into the store in chunks, never held in memory whole.
+    fn store_file(
+        &self,
+        root: &Root,
+        path: &[u8],
+        similar: Option<ObjectId>,
+    ) -> Result<ChangeOp, Error> {
         let (parent, name) = split_last(path);
         let gone = || Error::Io {
             action: "read",
@@ -841,11 +866,25 @@ impl<'r> Workspace<'r> {
                         .map_err(|err| root.error("read", path, err))?,
                 )
                 .executable;
-                let mut content = Vec::new();
-                file.read_to_end(&mut content)
-                    .map_err(|err| root.error("read", path, err))?;
-                let blob = store.put(Kind::Blob, &content)?;
-                let size = content.len() as u64;
+                let (blob, size) = if meta.len() >= braid_store::CHUNKED_MIN {
+                    store
+                        .put_blob_from(&mut file, Some(meta.len()))
+                        .map_err(|err| match err {
+                            braid_store::Error::Stream { source, .. } => {
+                                root.error("read", path, source)
+                            }
+                            other => other.into(),
+                        })?
+                } else {
+                    let mut content = Vec::new();
+                    file.read_to_end(&mut content)
+                        .map_err(|err| root.error("read", path, err))?;
+                    let blob = match &similar {
+                        Some(similar) => store.put_similar(Kind::Blob, &content, similar)?,
+                        None => store.put(Kind::Blob, &content)?,
+                    };
+                    (blob, content.len() as u64)
+                };
                 Ok(if executable {
                     ChangeOp::Executable { blob, size }
                 } else {

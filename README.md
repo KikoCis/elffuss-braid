@@ -108,6 +108,7 @@ braid log main -- src/lib.rs     # only the changes to a path
 braid blame main src/lib.rs      # who last changed each line
 braid show main --json
 braid fsck
+braid stats        # objects by kind, and how they are stored: whole, deltas, chunks
 ```
 
 Exporting writes the same commits back, with the same ids:
