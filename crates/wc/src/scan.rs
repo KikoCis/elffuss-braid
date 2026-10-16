@@ -19,6 +19,10 @@
 //! and its tree is not read. A directory whose stamp says its entries did
 //! not change since the scan that recorded it is not listed either: its
 //! record stands for its listing, and only its files' metadata is read.
+//!
+//! A scan may cover only some paths, as committing those paths needs: it
+//! then reads only the directories on the way to them and below them, and
+//! makes no records.
 
 use std::ffi::OsStr;
 use std::io::{self, Read};
@@ -38,7 +42,7 @@ use crate::cache::{
 use crate::error::Error;
 use crate::fsprobe::{FileSystem, SCRATCH_PREFIX};
 use crate::ignores::{self, Chain};
-use crate::paths::{join, os_name};
+use crate::paths::{is_within, join, os_name};
 use crate::safe::{
     DirStamp, Found, Root, Stat, StatKind, dir_stamp, list, open_child_dir, open_file, read_link,
     stat_entry,
@@ -71,15 +75,16 @@ pub(crate) struct Delta {
 pub(crate) struct Scan<'c> {
     /// Every path where the working copy differs from the base, sorted.
     pub deltas: Vec<Delta>,
-    /// The stat cache for the next scan.
-    pub cache: Next<'c>,
+    /// The stat cache for the next scan, when this scan covered the whole
+    /// working copy.
+    pub cache: Option<Next<'c>>,
     /// How many directories were listed, rather than taken from their
     /// records.
     #[cfg(test)]
     pub listed: usize,
 }
 
-/// The stat cache a scan leaves for the next.
+/// The stat cache a scan of the whole working copy leaves for the next.
 #[derive(Debug)]
 pub(crate) struct Next<'c> {
     /// When the scan started, by the file system's clock.
@@ -92,15 +97,18 @@ pub(crate) struct Next<'c> {
 
 /// Scans the working copy at `root` against the base tree `base`, using
 /// `old` so that files and trees that did not change are not read again.
-/// `fs` says which names the file system takes for the same.
+/// `fs` says which names the file system takes for the same. Given paths in
+/// `scope`, only what lies at or below them is scanned; no paths, or the
+/// root among them, is the whole working copy.
 pub(crate) fn scan<'c, O: Objects + Sync>(
     root: &Root,
     objects: &O,
     base: ObjectId,
     old: &'c Cache,
     fs: FileSystem,
+    scope: &[Vec<u8>],
 ) -> Result<Scan<'c>, Error> {
-    scan_holding(root, objects, base, old, fs, HELD_HANDLES)
+    scan_holding(root, objects, base, old, fs, scope, HELD_HANDLES)
 }
 
 /// [`scan`], keeping at most `held` directory handles open for directories
@@ -111,9 +119,16 @@ fn scan_holding<'c, O: Objects + Sync>(
     base: ObjectId,
     old: &'c Cache,
     fs: FileSystem,
+    scope: &[Vec<u8>],
     held: usize,
 ) -> Result<Scan<'c>, Error> {
-    let time = root.file_system_now().unwrap_or_else(|_| fallback_now());
+    let scope = Scope::of(scope);
+    let whole = matches!(scope, Scope::Whole);
+    let time = if whole {
+        root.file_system_now().unwrap_or_else(|_| fallback_now())
+    } else {
+        old.time()
+    };
     let dir = root
         .dir()
         .try_clone()
@@ -123,6 +138,7 @@ fn scan_holding<'c, O: Objects + Sync>(
         objects,
         old,
         fs,
+        whole,
         time,
         held_limit: held,
         held: AtomicUsize::new(0),
@@ -137,6 +153,7 @@ fn scan_holding<'c, O: Objects + Sync>(
         base: Some(base),
         rules: None,
         ignored: false,
+        scope: scope.clone(),
     };
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(THREADS));
     match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
@@ -153,20 +170,66 @@ fn scan_holding<'c, O: Objects + Sync>(
         return Err(error);
     }
     let mut deltas = out.deltas;
+    if let Scope::Within(paths) = &scope {
+        // Removals found by reading the base may reach past the scope.
+        deltas.retain(|delta| paths.iter().any(|path| is_within(&delta.path, path)));
+    }
     deltas.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    let mut records = out.records;
-    records.sort_unstable_by(|a, b| a.path().cmp(b.path()));
-    let cache = Next {
-        time,
-        records,
-        changed: out.changed || out.seen != old.dir_count(),
-    };
+    let cache = whole.then(|| {
+        let mut records = out.records;
+        records.sort_unstable_by(|a, b| a.path().cmp(b.path()));
+        Next {
+            time,
+            records,
+            changed: out.changed || out.seen != old.dir_count(),
+        }
+    });
     Ok(Scan {
         deltas,
         cache,
         #[cfg(test)]
         listed,
     })
+}
+
+/// What part of a directory a scan covers.
+#[derive(Clone, Debug)]
+enum Scope {
+    /// All of it.
+    Whole,
+    /// What lies at or below these paths, relative to it.
+    Within(Vec<Vec<u8>>),
+}
+
+impl Scope {
+    fn of(paths: &[Vec<u8>]) -> Scope {
+        if paths.is_empty() || paths.iter().any(|path| path.is_empty()) {
+            Scope::Whole
+        } else {
+            Scope::Within(paths.to_vec())
+        }
+    }
+
+    /// The part of the entry `name` covered, if any.
+    fn enter(&self, name: &[u8]) -> Option<Scope> {
+        let Scope::Within(paths) = self else {
+            return Some(Scope::Whole);
+        };
+        let mut below = Vec::new();
+        for path in paths {
+            if path.as_slice() == name {
+                return Some(Scope::Whole);
+            }
+            if path.len() > name.len() && path.starts_with(name) && path[name.len()] == b'/' {
+                let rest = &path[name.len() + 1..];
+                if rest.is_empty() {
+                    return Some(Scope::Whole);
+                }
+                below.push(rest.to_vec());
+            }
+        }
+        (!below.is_empty()).then_some(Scope::Within(below))
+    }
 }
 
 /// One directory to read.
@@ -179,6 +242,7 @@ struct Job<'s> {
     rules: Chain,
     /// Whether it is ignored: inside, only what the base has counts.
     ignored: bool,
+    scope: Scope,
 }
 
 /// How a job gets its directory's handle.
@@ -294,6 +358,7 @@ struct Child {
     path: Vec<u8>,
     base: Option<ObjectId>,
     ignored: bool,
+    scope: Scope,
 }
 
 struct Walk<'a, 'c, O> {
@@ -301,6 +366,8 @@ struct Walk<'a, 'c, O> {
     objects: &'a O,
     old: &'c Cache,
     fs: FileSystem,
+    /// Whether the scan covers the whole working copy.
+    whole: bool,
     /// When the scan started, by the file system's clock.
     time: (i64, u32),
     /// How many directory handles to keep open for jobs not started yet.
@@ -336,6 +403,7 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
             base,
             rules: above,
             ignored,
+            scope: covered,
         } = job;
         let dir = match open {
             Open::Ready(dir) => Some(dir),
@@ -362,12 +430,14 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
         let cached = self.old.dir(&path);
         // Taken before the directory is listed: a change made while it is
         // listed shows in the next scan.
-        let stamp = dir_stamp(&dir);
+        let stamp = if self.whole { dir_stamp(&dir) } else { None };
 
         // The base's tree is read unless the directory's record may stand
         // for it: the directory was clean against the same tree.
-        let trusted =
-            base.is_some() && cached.is_some_and(|record| record.clean() && record.base() == base);
+        let whole = matches!(covered, Scope::Whole);
+        let trusted = whole
+            && base.is_some()
+            && cached.is_some_and(|record| record.clean() && record.base() == base);
         let mut tree: Option<Vec<Entry>> = match base {
             Some(id) if !trusted => Some(read_tree(self.objects, id)?),
             _ => None,
@@ -376,8 +446,9 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
         // The record stands for the listing while the directory did not
         // change; the listing is read when it did, or when an entry the
         // record names turns out to be gone.
-        let mut record_lists =
-            cached.filter(|record| record_holds(record, base, ignored, stamp, self.old.time()));
+        let mut record_lists = cached.filter(|record| {
+            self.whole && record_holds(record, base, ignored, stamp, self.old.time())
+        });
         let (found, rules, ignore_files) = loop {
             let at = |name: &[u8]| match (&tree, cached) {
                 (Some(entries), _) => at_tree(entries, name),
@@ -407,7 +478,8 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
                         dir: entry.kind >= KIND_GITLINK,
                     })
                     .collect();
-                let found = self.classify(&dir, &path, listed, &rules, ignored, &at, cached)?;
+                let found =
+                    self.classify(&dir, &path, listed, &rules, ignored, &covered, &at, cached)?;
                 if !found.vanished {
                     break (found, rules, record.ignore_files());
                 }
@@ -421,7 +493,8 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
             } else {
                 ignores::enter(&dir, &path, &above, &files)
             };
-            let found = self.classify(&dir, &path, listed, &rules, ignored, &at, cached)?;
+            let found =
+                self.classify(&dir, &path, listed, &rules, ignored, &covered, &at, cached)?;
             break (found, rules, ignore_files);
         };
         let Sorted {
@@ -439,10 +512,16 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
             {
                 tree = Some(read_tree(self.objects, id)?);
             }
-            self.differ(&path, tree.as_deref().unwrap_or(&[]), &counted, &children)?
+            self.differ(
+                &path,
+                &covered,
+                tree.as_deref().unwrap_or(&[]),
+                &counted,
+                &children,
+            )?
         };
 
-        let record = {
+        let record = if self.whole {
             // Records that will vouch, or a listing that will stand, where
             // the old ones could not.
             let fresh = counted.iter().any(|file| {
@@ -470,10 +549,12 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
                 ignore_files,
                 files,
             };
-            match cached {
+            Some(match cached {
                 Some(old) if !fresh && made.same_as(&old) => (Record::Kept(old), false),
                 _ => (Record::Made(made), true),
-            }
+            })
+        } else {
+            None
         };
 
         if !children.is_empty() {
@@ -495,6 +576,7 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
                     base: child.base,
                     rules: rules.clone(),
                     ignored: child.ignored,
+                    scope: child.scope,
                 };
                 scope.spawn(move |s| self.run(s, job));
             }
@@ -502,10 +584,11 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
 
         let mut out = self.out();
         out.deltas.extend(deltas);
-        let (record, changed) = record;
-        out.records.push(record);
-        out.changed |= changed;
-        out.seen += usize::from(cached.is_some());
+        if let Some((record, changed)) = record {
+            out.records.push(record);
+            out.changed |= changed;
+            out.seen += usize::from(cached.is_some());
+        }
         Ok(())
     }
 
@@ -521,6 +604,7 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
         listed: Vec<Listed>,
         rules: &Chain,
         ignored: bool,
+        covered: &Scope,
         at: &dyn Fn(&[u8]) -> At,
         cached: Option<CachedDir<'_>>,
     ) -> Result<Sorted, Error> {
@@ -530,6 +614,9 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
             vanished: false,
         };
         for Listed { name, dir: is_dir } in listed {
+            let Some(child_scope) = covered.enter(&name) else {
+                continue;
+            };
             let base_at = at(&name);
             let stat = if is_dir {
                 None
@@ -573,6 +660,7 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
                         path: child_path,
                         base: child_base,
                         ignored: child_ignored,
+                        scope: child_scope,
                     });
                 }
                 Some(
@@ -696,6 +784,7 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
     fn differ(
         &self,
         path: &[u8],
+        covered: &Scope,
         entries: &[Entry],
         counted: &[Counted],
         children: &[Child],
@@ -713,6 +802,9 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
         for entry in entries {
             while let Some(file) = news.next_if(|file| file.name < entry.name) {
                 deltas.extend(added(file));
+            }
+            if covered.enter(&entry.name).is_none() {
+                continue;
             }
             match &entry.kind {
                 EntryKind::Tree { tree } => {
@@ -1027,15 +1119,26 @@ mod tests {
         /// Scans against `base`, with the stat cache of the previous scan,
         /// and saves the new one. Also returns whether it was saved, and how
         /// many directories of the base were read.
-        fn scan_in(&self, base: ObjectId, held: usize) -> (Vec<Delta>, bool, usize) {
-            let (deltas, saved, reads, _) = self.scan_counting(base, held);
+        fn scan_in(
+            &self,
+            base: ObjectId,
+            scope: &[&str],
+            held: usize,
+        ) -> (Vec<Delta>, bool, usize) {
+            let (deltas, saved, reads, _) = self.scan_counting(base, scope, held);
             (deltas, saved, reads)
         }
 
         /// [`Fixture::scan_in`], also returning how many directories were
         /// listed.
-        fn scan_counting(&self, base: ObjectId, held: usize) -> (Vec<Delta>, bool, usize, usize) {
+        fn scan_counting(
+            &self,
+            base: ObjectId,
+            scope: &[&str],
+            held: usize,
+        ) -> (Vec<Delta>, bool, usize, usize) {
             let old = Cache::load(self.state.path());
+            let scope: Vec<Vec<u8>> = scope.iter().map(|path| path.as_bytes().to_vec()).collect();
             self.objects.trees.store(0, Ordering::Relaxed);
             let found = scan_holding(
                 &self.root,
@@ -1043,12 +1146,12 @@ mod tests {
                 base,
                 &old,
                 FileSystem::default(),
+                &scope,
                 held,
             )
             .unwrap();
-            let next = &found.cache;
-            let saved = next.changed;
-            if saved {
+            let saved = found.cache.as_ref().is_some_and(|next| next.changed);
+            if let Some(next) = found.cache.as_ref().filter(|next| next.changed) {
                 cache::save(self.state.path(), next.time, &next.records).unwrap();
             }
             let reads = self.objects.trees.load(Ordering::Relaxed);
@@ -1056,7 +1159,7 @@ mod tests {
         }
 
         fn scan(&self, base: ObjectId) -> (Vec<Delta>, bool, usize) {
-            self.scan_in(base, HELD_HANDLES)
+            self.scan_in(base, &[], HELD_HANDLES)
         }
 
         /// Waits until the file system's clock has moved on from every
@@ -1071,7 +1174,7 @@ mod tests {
 
         /// A whole scan: how many directories it listed.
         fn listings(&self, base: ObjectId) -> (Vec<Delta>, usize) {
-            let (deltas, _, _, listed) = self.scan_counting(base, HELD_HANDLES);
+            let (deltas, _, _, listed) = self.scan_counting(base, &[], HELD_HANDLES);
             (deltas, listed)
         }
     }
@@ -1302,6 +1405,29 @@ mod tests {
     }
 
     #[test]
+    fn scans_of_some_paths() {
+        let f = Fixture::new();
+        let base = f.base(&[("a/x", "1"), ("a/y", "2"), ("c/d/e", "3"), ("top", "4")]);
+        f.scan(base);
+        fs::write(f.at("a/x"), "edited").unwrap();
+        fs::write(f.at("a/y"), "edited").unwrap();
+        fs::write(f.at("new"), "new").unwrap();
+        fs::remove_dir_all(f.at("c")).unwrap();
+        let (deltas, saved, _) = f.scan_in(base, &["a/x", "c/d", "nothing/here"], HELD_HANDLES);
+        assert_eq!(show(&deltas), ["a/x f>f", "c/d/e f>-"]);
+        assert!(!saved, "a scan of some paths keeps the cache as it is");
+        let (deltas, _, _) = f.scan_in(base, &["a"], HELD_HANDLES);
+        assert_eq!(show(&deltas), ["a/x f>f", "a/y f>f"]);
+        // The root is the whole working copy.
+        let (deltas, saved, _) = f.scan_in(base, &["", "a"], HELD_HANDLES);
+        assert_eq!(
+            show(&deltas),
+            ["a/x f>f", "a/y f>f", "c/d/e f>-", "new ->f"]
+        );
+        assert!(saved);
+    }
+
+    #[test]
     fn gitlinks_are_there_or_not() {
         let f = Fixture::new();
         let gitlink = ChangeOp::Gitlink {
@@ -1344,8 +1470,8 @@ mod tests {
         fs::write(f.at("a/b/c/d"), "edited").unwrap();
         fs::write(f.at("f/new"), "new").unwrap();
         fs::remove_file(f.at("h")).unwrap();
-        let (held, _, _) = f.scan_in(base, HELD_HANDLES);
-        let (reopened, _, _) = f.scan_in(base, 0);
+        let (held, _, _) = f.scan_in(base, &[], HELD_HANDLES);
+        let (reopened, _, _) = f.scan_in(base, &[], 0);
         assert_eq!(show(&held), ["a/b/c/d f>f", "f/new ->f", "h f>-"]);
         assert_eq!(held, reopened);
     }

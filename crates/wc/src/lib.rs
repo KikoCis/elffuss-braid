@@ -27,7 +27,8 @@
 //!   directories that did not change are neither listed nor compared with
 //!   their trees again.
 //! - [`Workspace::commit`] records the working copy as a changeset on the
-//!   base. There is no staging area.
+//!   base. There is no staging area; given paths, it reads only what lies at
+//!   or below them.
 //! - [`Workspace::land`] puts the workspace's changesets on its branch in
 //!   one short op log transaction, fast-forwarding or rebasing them with the
 //!   engine; conflicts come back as data and the branch does not move.

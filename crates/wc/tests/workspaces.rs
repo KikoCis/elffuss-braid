@@ -477,3 +477,75 @@ fn refusals() {
     assert_eq!(f.head("main"), Some(made));
     assert_eq!(ws.land(None, "t", &ada()).unwrap().landed, Landed::Nothing);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_commit_of_some_paths_reads_only_those() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let first = f.commit(
+        &[],
+        vec![
+            ("a/x", f.file("1")),
+            ("a/y", f.file("2")),
+            ("c/d/e", f.file("3")),
+            ("locked/z", f.file("4")),
+        ],
+    );
+    f.set_branch("main", first);
+    let dir = f.path("ws");
+    let (ws, _) = Workspace::create(&f.repo, "ws", &dir, Some(first), "main").unwrap();
+    fs::write(dir.join("a/x"), "edited").unwrap();
+    fs::write(dir.join("a/y"), "edited too").unwrap();
+    fs::remove_dir_all(dir.join("c")).unwrap();
+    fs::write(dir.join("locked/new"), "n").unwrap();
+    // A directory that cannot be read: a scan of everything fails on it,
+    // unless the tests run with the rights to read it anyway.
+    let mode = |m| fs::Permissions::from_mode(m);
+    fs::set_permissions(dir.join("locked"), mode(0o000)).unwrap();
+    if fs::read_dir(dir.join("locked")).is_err() {
+        assert!(matches!(ws.status(), Err(Error::Io { .. })));
+    }
+    let outcome = ws.commit(&CommitRequest {
+        message: Some(b"some paths".to_vec()),
+        paths: vec![b"a/x".to_vec(), b"c/d".to_vec()],
+        author: None,
+        committer: ada(),
+        agent: "tester".to_owned(),
+        force: false,
+    });
+    fs::set_permissions(dir.join("locked"), mode(0o755)).unwrap();
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.changes, 2);
+    let changeset =
+        braid_engine::read_changeset(f.repo.store(), outcome.changeset.unwrap()).unwrap();
+    let changes =
+        braid_engine::read_changes(f.repo.store(), outcome.changeset.unwrap(), &changeset)
+            .unwrap()
+            .iter()
+            .map(|change| {
+                (
+                    String::from_utf8(change.path.clone()).unwrap(),
+                    change.op == ChangeOp::Delete,
+                )
+            })
+            .collect::<Vec<_>>();
+    assert_eq!(
+        changes,
+        [("a/x".to_owned(), false), ("c/d/e".to_owned(), true)]
+    );
+    // What lay outside the paths is still to commit.
+    let status = ws.status().unwrap().status;
+    let left: Vec<(&[u8], ChangeKind)> = status
+        .changes
+        .iter()
+        .map(|c| (c.path.as_slice(), c.kind))
+        .collect();
+    assert_eq!(
+        left,
+        [
+            (&b"a/y"[..], ChangeKind::Modified),
+            (b"locked/new", ChangeKind::Added)
+        ]
+    );
+}

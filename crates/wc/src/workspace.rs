@@ -621,9 +621,10 @@ impl<'r> Workspace<'r> {
         Ok(plan.paths())
     }
 
-    /// Scans the working copy and returns where it differs from the base,
-    /// saving the stat cache if it changed.
-    fn scan(&self, root: &Root, state: &State) -> Result<Vec<Delta>, Error> {
+    /// Scans the working copy, or only what lies at or below the paths of
+    /// `scope`, and returns where it differs from the base. A scan of the
+    /// whole working copy saves the stat cache, if it changed.
+    fn scan(&self, root: &Root, state: &State, scope: &[Vec<u8>]) -> Result<Vec<Delta>, Error> {
         let store = self.store();
         let base = root_of(store, state.base)?;
         let cache = Cache::load(&self.state_dir);
@@ -631,16 +632,16 @@ impl<'r> Workspace<'r> {
             deltas,
             cache: next,
             ..
-        } = scan::scan(root, store, base, &cache, state.fs)?;
-        if next.changed {
+        } = scan::scan(root, store, base, &cache, state.fs, scope)?;
+        if let Some(next) = next.filter(|next| next.changed) {
             cache::save(&self.state_dir, next.time, &next.records)?;
         }
         Ok(deltas)
     }
 
-    /// Scans the working copy and compares it with the base.
+    /// Scans the whole working copy and compares it with the base.
     fn scan_status(&self, root: &Root, state: &State) -> Result<Status, Error> {
-        let deltas = self.scan(root, state)?;
+        let deltas = self.scan(root, state, &[])?;
         Ok(status::compare(&deltas, &state.tracked))
     }
 
@@ -705,11 +706,12 @@ impl<'r> Workspace<'r> {
     pub fn commit(&self, request: &CommitRequest) -> Result<CommitOutcome, Error> {
         let (_lock, mut state, root) = self.begin()?;
         let store = self.store();
-        let deltas = self.scan(&root, &state)?;
-        let status = status::compare(&deltas, &state.tracked);
         if state.rebase.is_some() && !request.paths.is_empty() {
             return Err(Error::PathsDuringRebase);
         }
+        // With paths, only what lies at or below them is read.
+        let deltas = self.scan(&root, &state, &request.paths)?;
+        let status = status::compare(&deltas, &state.tracked);
         let in_scope = |path: &[u8]| {
             request.paths.is_empty() || request.paths.iter().any(|p| is_within(path, p))
         };
