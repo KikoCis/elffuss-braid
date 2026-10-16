@@ -21,20 +21,25 @@
 //!   changeset older than the one where the path last appeared on the
 //!   first-parent chain is, for braid, that changeset's, and git must have
 //!   reached it under another file name.
-//! - When a change has several shortest line diffs, git's diff and braid's
-//!   may keep different copies of lines that repeat, such as closing braces,
-//!   and give them to different changesets. Where the two blames differ for
-//!   that reason, replaying git's own diffs (`git diff -U0`) along the same
-//!   versions must give git's blame line for line, and at every version
-//!   braid's blame must give the changeset that made it as many lines as
-//!   git's diff inserts: both diffs are equally short.
+//! - Git's diff and braid's can differ: when a change has several shortest
+//!   line diffs, they may keep different copies of lines that repeat, such
+//!   as closing braces; and neither always finds a shortest diff, so on some
+//!   changes one inserts a few more lines than the other. Where the two
+//!   blames differ, the tests walk the file's versions along the first-parent
+//!   chain: replaying git's own diffs (`git diff -U0`) must give git's blame
+//!   line for line; braid's blame at each version must be braid's own diff
+//!   applied to its blame at the version before, a diff that keeps only
+//!   equal lines; and that diff must never insert fewer lines than the
+//!   shortest one (`git diff --minimal -U0`), which would be a bug. Files
+//!   where the two diffs insert as many lines at every version count as
+//!   realigned, the others as heuristic divergences.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use braid_engine::{read_changes, read_changeset};
+use braid_engine::{LineChange, read_changes, read_changeset};
 use braid_format::{EntryKind, ObjectId};
 use braid_git::{GitMap, GitOid, ImportOptions};
 use braid_repo::{Repo, RepoHistory};
@@ -371,10 +376,20 @@ struct Tally {
     /// Lines git traced across a rename, which braid gives to the changeset
     /// where the path appeared.
     renamed_lines: usize,
-    /// Files and lines where git and braid kept different copies of equal
-    /// lines in equally short diffs.
+    /// Files and lines where braid and git differ while their diffs insert
+    /// as many lines at every version: they kept different copies of equal
+    /// lines.
     realigned_files: usize,
     realigned_lines: usize,
+    /// Files and lines where braid and git differ and, at some version,
+    /// their diffs insert different numbers of lines, none fewer than the
+    /// shortest diff.
+    heuristic_files: usize,
+    heuristic_lines: usize,
+    /// Versions whose blame was checked against braid's own diff.
+    versions_checked: usize,
+    /// The files that differ, as `path at revision`, and why.
+    differences: Vec<String>,
 }
 
 /// `log -- <path>` for each path, against git.
@@ -523,9 +538,15 @@ fn versions(repo: &Repo, at: ObjectId, path: &str) -> Vec<(ObjectId, ObjectId)> 
     }
 }
 
-/// The hunks of `git diff -U0` between two blobs: for each, the lines it
-/// replaces and the lines it puts there, counted from 0.
-fn git_diff_hunks(git: &Path, old: &GitOid, new: &GitOid) -> Vec<(Range<usize>, Range<usize>)> {
+/// The hunks of `git diff -U0` between two blobs, or of `git diff --minimal
+/// -U0`: for each, the lines it replaces and the lines it puts there,
+/// counted from 0.
+fn git_diff_hunks(
+    git: &Path,
+    old: &GitOid,
+    new: &GitOid,
+    minimal: bool,
+) -> Vec<(Range<usize>, Range<usize>)> {
     if old == new {
         return Vec::new();
     }
@@ -538,6 +559,9 @@ fn git_diff_hunks(git: &Path, old: &GitOid, new: &GitOid) -> Vec<(Range<usize>, 
         "--no-ext-diff",
         "--indent-heuristic",
     ]);
+    if minimal {
+        command.arg("--minimal");
+    }
     command.args([old.to_hex(), new.to_hex()]);
     let range = |spec: &str| -> Range<usize> {
         let (start, len) = match spec.split_once(',') {
@@ -581,20 +605,100 @@ fn replay(
     origins
 }
 
-/// Lines of a blob, as blame counts them.
-fn count_lines(content: &[u8]) -> usize {
-    let breaks = content.iter().filter(|byte| **byte == b'\n').count();
-    breaks + usize::from(content.last().is_some_and(|byte| *byte != b'\n'))
+/// The lines of a blob, as blame counts them: each ends after a `\n`, and
+/// a last line without one is a line too.
+fn split_lines(content: &[u8]) -> Vec<&[u8]> {
+    let mut lines: Vec<&[u8]> = content.split_inclusive(|byte| *byte == b'\n').collect();
+    if content.is_empty() {
+        lines.clear();
+    }
+    lines
+}
+
+/// The lines of the new version that braid's line diff keeps, each paired
+/// with a line of the old version, must be equal to it.
+fn check_kept_lines(old: &[u8], new: &[u8], changes: &[LineChange], what: &str) {
+    let (old, new) = (split_lines(old), split_lines(new));
+    let (mut at_old, mut at_new) = (0, 0);
+    for change in changes {
+        assert_eq!(
+            change.old.start - at_old,
+            change.new.start - at_new,
+            "{what}: as many kept lines on both sides"
+        );
+        while at_old < change.old.start {
+            assert_eq!(old[at_old], new[at_new], "{what}: a kept line is equal");
+            at_old += 1;
+            at_new += 1;
+        }
+        (at_old, at_new) = (change.old.end, change.new.end);
+    }
+    assert_eq!(
+        &old[at_old..],
+        &new[at_new..],
+        "{what}: the kept end is equal"
+    );
+}
+
+/// Braid's blame of every version of a file, oldest first, checked against
+/// braid's own line diff: the first version is all its own, and each other
+/// one is the diff applied to the blame of the version before, a diff that
+/// keeps only equal lines. Returns each version's content and blame.
+fn check_versions(
+    imported: &Imported,
+    history: &mut RepoHistory<'_>,
+    path: &str,
+    versions: &[(ObjectId, ObjectId)],
+    tally: &mut Tally,
+) -> Vec<(Vec<u8>, Vec<ObjectId>)> {
+    let mut checked: Vec<(Vec<u8>, Vec<ObjectId>)> = Vec::new();
+    for (changeset, blob) in versions {
+        let what = format!("{path} at {changeset}");
+        let content = braid_engine::read_blob(imported.repo.store(), *blob).unwrap();
+        let lines = split_lines(&content).len();
+        let own = history
+            .blame(*changeset, path.as_bytes())
+            .unwrap()
+            .unwrap()
+            .origins;
+        assert_eq!(own.len(), lines, "{what}: one origin per line");
+        match checked.last() {
+            None => assert!(
+                own.iter().all(|origin| origin == changeset),
+                "{what}: a new file is all its own"
+            ),
+            Some((old_content, old_own)) => {
+                let changes = braid_engine::line_diff(old_content, &content);
+                check_kept_lines(old_content, &content, &changes, &what);
+                let hunks: Vec<(Range<usize>, Range<usize>)> = changes
+                    .iter()
+                    .map(|change| (change.old.clone(), change.new.clone()))
+                    .collect();
+                assert_eq!(
+                    own,
+                    replay(old_own, lines, &hunks, *changeset),
+                    "{what}: braid's blame follows braid's diff"
+                );
+            }
+        }
+        tally.versions_checked += 1;
+        checked.push((content, own));
+    }
+    checked
+}
+
+/// Lines a diff's hunks insert.
+fn inserts(hunks: &[(Range<usize>, Range<usize>)]) -> usize {
+    hunks.iter().map(|(_, after)| after.len()).sum()
 }
 
 /// Blame of each file at `revision`, against git, line by line.
 ///
-/// Where the two differ, the documented rule must explain it: replaying
-/// git's own diffs of the file's versions along the first-parent chain gives
-/// git's blame line for line, and for every version braid's blame gives the
-/// changeset that made it as many lines as git's diff inserts. So both
-/// diffs of every change are equally short, and the blames differ only in
-/// which of the equal lines each diff keeps.
+/// Braid's blame of every version of the file is checked against braid's
+/// own diff. Where braid's blame and git's differ, the documented rules must
+/// explain it (see the module documentation): git's own diffs, replayed,
+/// give git's blame, and braid's diff never inserts fewer lines than the
+/// shortest one.
 fn compare_blames(
     git: &Path,
     imported: &Imported,
@@ -617,6 +721,12 @@ fn compare_blames(
             "lines of {path} at {revision}"
         );
         let versions = versions(&imported.repo, at, path);
+        let checked = check_versions(imported, history, path, &versions, tally);
+        assert_eq!(
+            checked.last().map(|(_, own)| own),
+            Some(&blame.origins),
+            "{path} at {revision}: the blame of its last version"
+        );
         let appeared = versions[0].0;
         let mut height = |id: ObjectId| -> u64 {
             *heights
@@ -653,40 +763,49 @@ fn compare_blames(
             continue;
         }
 
-        let mut origins: Vec<ObjectId> = Vec::new();
-        let mut old: Option<GitOid> = None;
-        for (changeset, blob) in &versions {
-            let content = braid_engine::read_blob(imported.repo.store(), *blob).unwrap();
-            let lines = count_lines(&content);
+        // Git's blame, replayed from git's own diffs, and the lengths of the
+        // two diffs at every version.
+        let mut replayed: Vec<ObjectId> = Vec::new();
+        let mut same_lengths = true;
+        for (i, (changeset, blob)) in versions.iter().enumerate() {
+            let lines = split_lines(&checked[i].0).len();
+            if i == 0 {
+                replayed = vec![*changeset; lines];
+                continue;
+            }
+            let what = format!("{path} at {changeset}");
+            let old = imported.map.git_blob(&versions[i - 1].1).unwrap();
             let new = imported.map.git_blob(blob).unwrap();
-            origins = match old {
-                None => vec![*changeset; lines],
-                Some(old) => {
-                    let hunks = git_diff_hunks(git, &old, &new);
-                    let inserted: usize = hunks.iter().map(|(_, after)| after.len()).sum();
-                    let own = history
-                        .blame(*changeset, path.as_bytes())
-                        .unwrap()
-                        .unwrap()
-                        .origins
-                        .iter()
-                        .filter(|origin| **origin == *changeset)
-                        .count();
-                    assert_eq!(
-                        own, inserted,
-                        "{path} at {changeset}: braid's diff and git's insert as many lines"
-                    );
-                    replay(&origins, lines, &hunks, *changeset)
-                }
-            };
-            old = Some(new);
+            let inserted = braid_engine::line_diff(&checked[i - 1].0, &checked[i].0)
+                .iter()
+                .map(|change| change.new.len())
+                .sum::<usize>();
+            let fewest = inserts(&git_diff_hunks(git, &old, &new, true));
+            assert!(
+                inserted >= fewest,
+                "{what}: braid's diff inserts {inserted} lines, the shortest diff {fewest}"
+            );
+            let git_hunks = git_diff_hunks(git, &old, &new, false);
+            same_lengths &= inserted == inserts(&git_hunks);
+            replayed = replay(&replayed, lines, &git_hunks, *changeset);
         }
         assert_eq!(
-            origins, wanted,
+            replayed, wanted,
             "{path} at {revision}: git's own diffs, replayed, give git's blame"
         );
-        tally.realigned_files += 1;
-        tally.realigned_lines += differing;
+        let why = if same_lengths {
+            tally.realigned_files += 1;
+            tally.realigned_lines += differing;
+            "realigned"
+        } else {
+            tally.heuristic_files += 1;
+            tally.heuristic_lines += differing;
+            "heuristic"
+        };
+        let short = &revision[..revision.len().min(12)];
+        tally
+            .differences
+            .push(format!("{path} at {short}: {differing} lines, {why}"));
     }
 }
 

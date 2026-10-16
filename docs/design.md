@@ -216,15 +216,20 @@ check that it differs in no other:
   and has no switch to turn that off. Braid's history of a path starts where
   the path last appeared: a line that git traces back across a rename is the
   changeset's that created the path.
-- **Several shortest diffs.** When a change can be written as more than one
-  shortest line diff, git's diff and imara-diff's may pick different ones.
-  Both delete and insert as many lines; they keep different copies of lines
-  that repeat, such as closing braces and blank lines, and blame gives those
-  copies to different changesets. On this repository's own history, fewer
-  than one line in a thousand differs this way. The tests replay git's own
-  diffs along the same versions, which must give git's blame line for line,
-  and check that at every version braid's diff inserts as many lines as
-  git's.
+- **The two diffs can differ.** Git's blame and braid's both use Myers'
+  algorithm with an indentation heuristic, but not the same implementation.
+  When a change has several shortest line diffs, they may keep different
+  copies of lines that repeat, such as closing braces and blank lines. And
+  neither always finds a shortest diff: both give up on it where the search
+  would cost too much, and imara-diff's preprocessing can miss it too, so on
+  a few changes one inserts and deletes more lines than the other. Blame
+  then gives those lines to different changesets. On this repository's own
+  history, fewer than one line in a thousand differs this way. Where the
+  blames differ, the tests walk the versions of the file: replaying git's
+  own diffs must give git's blame line for line, braid's blame at every
+  version must be braid's own diff applied to its blame at the version
+  before, and braid's diff must never insert fewer lines than the shortest
+  diff (`git diff --minimal`).
 
 ## Workspaces
 
