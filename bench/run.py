@@ -1382,9 +1382,9 @@ def scenario_history(ctx):
         ),
         (
             "blame the most changed file",
-            f"Blame of the file most changed in {name}: `braid blame <path>` vs "
+            f"Blame of the file most changed in {name}: `braid blame main <path>` vs "
             "`git blame --first-parent <path>`",
-            ["blame", hot],
+            ["blame", "main", hot],
             ["blame", "--first-parent", "main", "--", hot],
             None,
         ),
