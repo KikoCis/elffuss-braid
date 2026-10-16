@@ -383,28 +383,32 @@ in braid.
 
 ## Testing
 
-- **Deterministic simulation.** The core runs over clock, randomness, disk and
-  network traits. Simulated agents, servers and git remotes run with injected
-  faults: lost acknowledgements, crashes between any two writes, partitions.
-  Every seed reproduces its run, and the invariants above are checked after
-  every step against a simple reference model.
-- **Crash tests.** Failpoints and repeated `kill -9` of real processes, plus a
-  file system shim that drops unsynced writes.
+- **Deterministic simulation** (`crates/sim`). Simulated agents commit and
+  land at once through a lander that does what the CLI does inside its op log
+  transaction, with injected faults: lost acknowledgements, duplicate and
+  late resubmissions, and lander crashes before the compare-and-swap. It runs
+  on memory and on the real store. Every seed reproduces its run, and the
+  landing invariants are checked after every step against an independent
+  reference model.
+- **Crash tests.** Failpoints and repeated `kill -9` of real processes sharing
+  one store, and a power-loss model that drops whatever was not flushed before
+  each flush batch.
 - **Properties.** Encodings round-trip canonically; incremental tree updates
   equal building from scratch; disjoint landings commute; a changeset's change
-  list equals the diff of its trees; ancestry with derived data answers what
-  the walks answer on random histories; changed-path filters never miss a
-  path they hold; derived records do not depend on the order they are
-  computed in.
-- **Fuzzing** of every decoder, the git importer, path validation and merges.
-- **Differential tests with git as the oracle** on real histories: tree diffs,
-  path history (`git log --first-parent -- <path>`), merge bases (`git
-  merge-base --all`), blame (`git blame --first-parent`, with the two
-  differences above checked as such) and three-way merges, on fixtures, on
-  random histories and on this repository's own. Braid merging cleanly where
-  git reports a conflict is treated as a critical bug.
-- **Round trips** of real public repositories through import and export, bit
-  for bit.
+  list equals the diff of its trees; three-way merges keep each side's changes
+  and are symmetric; ancestry with derived data answers what the walks answer
+  on random histories; changed-path filters never miss a path they hold;
+  derived records do not depend on the order they are computed in.
+- **Fuzzing.** Five targets: tree and changeset decoding, name rules, the git
+  map record, and git commit, tag and tree parsing. Anything that decodes must
+  encode back to the same bytes. CI runs each for a minute.
+- **Differential tests with git as the oracle** on fixtures, random histories
+  and this repository's own: path history (`git log --first-parent --
+  <path>`), merge bases (`git merge-base --all`) and blame (`git blame
+  --first-parent`, with the two differences above checked as such).
+- **Round trips** through import and export, bit for bit, of fixture
+  repositories full of unusual git objects and of this repository's history,
+  in CI; several public repositories were also round-tripped by hand.
 
 ## Performance targets
 
