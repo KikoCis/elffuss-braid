@@ -36,7 +36,8 @@ check in `scripts/privacy-check.sh`.
   version.
 - **Performance claims come with a reproducible script** and are stated as a
   ratio against git on the same machine. Do not publish absolute timings or
-  describe your hardware.
+  describe your hardware. [`bench/run.py`](bench/README.md) is that script
+  for every number in the README.
 - **Tests come with the change.** Bug fixes include a test that fails without
   the fix.
 
