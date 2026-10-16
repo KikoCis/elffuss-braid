@@ -32,7 +32,7 @@ use braid_format::{
 };
 use unicode_normalization::UnicodeNormalization;
 
-use crate::access::{Found, Trees, lookup, read_blob, read_changes, read_changeset};
+use crate::access::{Found, Trees, read_blob, read_changes, read_changeset};
 use crate::ancestry::all_ancestors;
 use crate::apply::{Applied, apply_sorted, write_nodes};
 use crate::commit::store_assembled;
@@ -626,10 +626,9 @@ impl<'o, O: Objects> Rebase<'o, O> {
             let slash = path[start..].iter().position(|byte| *byte == b'/');
             let end = slash.map_or(path.len(), |slash| start + slash);
             let name = &path[start..end];
-            let entries = self.trees.read(dir)?;
-            match (lookup(&entries, name), slash) {
+            match (self.trees.entry(dir, name)?, slash) {
                 (Some(EntryKind::Tree { tree }), Some(_)) => {
-                    dir = *tree;
+                    dir = tree;
                     start = end + 1;
                 }
                 // The head has this name already.
@@ -640,6 +639,9 @@ impl<'o, O: Objects> Rebase<'o, O> {
                         return Ok(());
                     }
                     let parent = &path[..start.saturating_sub(1)];
+                    // A new name is compared with every name of the
+                    // directory: only now is it read whole.
+                    let entries = self.trees.read(dir)?;
                     let index = self.folded_names(dir, &entries);
                     let others = index.get(&fold(name)).cloned().unwrap_or_default();
                     for other in others {
