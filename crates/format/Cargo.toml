@@ -16,6 +16,11 @@ name = "braid_format"
 blake3.workspace = true
 unicode-normalization.workspace = true
 
+[features]
+# Exposes the name checks without their ASCII fast path to the fuzz targets
+# in `fuzz/`, which compare both; not a stable API.
+fuzzing = []
+
 [dev-dependencies]
 proptest.workspace = true
 

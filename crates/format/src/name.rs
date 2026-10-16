@@ -7,6 +7,12 @@
 //! names that cannot be one path component, and names that some file system
 //! would treat as `.braid` or `.git`: a crafted repository could otherwise
 //! write into the metadata of the checkout that receives it.
+//!
+//! Every name of a tree is checked each time the tree is built or read, so
+//! the common case is cheap: a name that is all ASCII is folded with ASCII
+//! lowercasing alone, without allocating. [`fold_for_aliases`] says why that
+//! gives the same answer as the full Unicode fold, which every other name
+//! goes through.
 
 use core::fmt;
 
@@ -116,13 +122,28 @@ pub fn validate_path(path: &[u8]) -> Result<(), PathError> {
 
 /// Whether some file system would treat `name` as `.braid` or `.git`.
 pub fn is_reserved(name: &[u8]) -> bool {
-    let folded = fold_for_aliases(name);
-    RESERVED.contains(&folded.as_slice()) || is_short_name(&folded)
+    match ascii_stem(name) {
+        Some(stem) => {
+            RESERVED
+                .iter()
+                .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+                || is_short_stem(stem)
+        }
+        None => {
+            let folded = fold_unicode(name);
+            RESERVED.contains(&folded.as_slice()) || is_short_name(&folded)
+        }
+    }
 }
 
 /// Whether `name` must not be a symlink.
 pub fn forbidden_as_symlink(name: &[u8]) -> bool {
-    NO_SYMLINK.contains(&fold_for_aliases(name).as_slice())
+    match ascii_stem(name) {
+        Some(stem) => NO_SYMLINK
+            .iter()
+            .any(|special| stem.eq_ignore_ascii_case(special)),
+        None => NO_SYMLINK.contains(&fold_unicode(name).as_slice()),
+    }
 }
 
 /// The name as the most forgiving file systems would compare it: without the
@@ -131,7 +152,44 @@ pub fn forbidden_as_symlink(name: &[u8]) -> bool {
 ///
 /// Only meant to detect aliases of special names; checkouts use a fold that
 /// matches the file system they write to.
+///
+/// A name that is all ASCII is folded by ASCII lowercasing alone, which gives
+/// the same bytes as the full fold: such a name is valid UTF-8; every code
+/// point HFS+ ignores is outside ASCII; NFC leaves ASCII text as it is, since
+/// no ASCII character has a decomposition or composes with another; and the
+/// Unicode lowercase of an ASCII character is its ASCII lowercase. ASCII
+/// lowercasing keeps every byte in place, so cutting at the first `:` and
+/// trimming dots and spaces can come first, and the checks above can compare
+/// that stem without letter case instead of lowercasing a copy. The tests
+/// and the `names` fuzz target compare both paths.
 pub fn fold_for_aliases(name: &[u8]) -> Vec<u8> {
+    match ascii_stem(name) {
+        Some(stem) => stem.to_ascii_lowercase(),
+        None => fold_unicode(name),
+    }
+}
+
+/// For a name that is all ASCII, what [`fold_for_aliases`] keeps of it, before
+/// lowercasing: everything before the first `:`, without trailing dots and
+/// spaces. `None` for any other name.
+fn ascii_stem(name: &[u8]) -> Option<&[u8]> {
+    if !name.is_ascii() {
+        return None;
+    }
+    let end = name
+        .iter()
+        .position(|byte| *byte == b':')
+        .unwrap_or(name.len());
+    let mut stem = &name[..end];
+    while let [rest @ .., b'.' | b' '] = stem {
+        stem = rest;
+    }
+    Some(stem)
+}
+
+/// [`fold_for_aliases`] for any name, through Unicode: what names that are
+/// not all ASCII go through.
+fn fold_unicode(name: &[u8]) -> Vec<u8> {
     let mut folded = match core::str::from_utf8(name) {
         Ok(text) => text
             .chars()
@@ -170,9 +228,46 @@ fn is_short_name(folded: &[u8]) -> bool {
     })
 }
 
+/// [`is_short_name`] on the stem of an ASCII name, in any letter case.
+fn is_short_stem(stem: &[u8]) -> bool {
+    RESERVED_SHORT.iter().any(|short| {
+        stem.len() == short.len() + 2
+            && stem[..short.len()].eq_ignore_ascii_case(short)
+            && stem[short.len()] == b'~'
+            && matches!(stem[short.len() + 1], b'1'..=b'9')
+    })
+}
+
+/// The alias checks without the ASCII fast path, every name through the full
+/// Unicode fold, as they were written before it: what the tests and the
+/// `names` fuzz target compare the fast path with. Not part of the stable
+/// API.
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod reference {
+    use super::{NO_SYMLINK, RESERVED, fold_unicode, is_short_name};
+
+    /// [`super::fold_for_aliases`] through Unicode, whatever the name.
+    pub fn fold_for_aliases(name: &[u8]) -> Vec<u8> {
+        fold_unicode(name)
+    }
+
+    /// [`super::is_reserved`] through Unicode, whatever the name.
+    pub fn is_reserved(name: &[u8]) -> bool {
+        let folded = fold_unicode(name);
+        RESERVED.contains(&folded.as_slice()) || is_short_name(&folded)
+    }
+
+    /// [`super::forbidden_as_symlink`] through Unicode, whatever the name.
+    pub fn forbidden_as_symlink(name: &[u8]) -> bool {
+        NO_SYMLINK.contains(&fold_unicode(name).as_slice())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn accepts_ordinary_names() {
@@ -288,5 +383,207 @@ mod tests {
                 error: NameError::DotOrDotDot
             })
         );
+    }
+
+    /// The fast path gives the same fold and the same answers as the full
+    /// Unicode fold.
+    fn assert_agrees(name: &[u8]) {
+        let shown = String::from_utf8_lossy(name);
+        assert_eq!(
+            fold_for_aliases(name),
+            reference::fold_for_aliases(name),
+            "{shown:?}"
+        );
+        assert_eq!(is_reserved(name), reference::is_reserved(name), "{shown:?}");
+        assert_eq!(
+            forbidden_as_symlink(name),
+            reference::forbidden_as_symlink(name),
+            "{shown:?}"
+        );
+    }
+
+    /// The special names, as the full fold gives them.
+    const SPECIAL: [&str; 10] = [
+        ".git",
+        ".braid",
+        "git~1",
+        "braid~9",
+        ".gitmodules",
+        ".gitignore",
+        ".gitattributes",
+        ".braidignore",
+        "git~0",
+        "braid~10",
+    ];
+
+    /// Characters that make folding interesting: those of the special names
+    /// in both cases, what the fold cuts or trims, bytes no name may hold,
+    /// code points HFS+ ignores, combining marks, and characters that NFC or
+    /// lowercasing turn into others, some of them into ASCII.
+    const PALETTE: [char; 59] = [
+        '.', 'g', 'G', 'i', 'I', 't', 'T', 'b', 'B', 'r', 'R', 'a', 'A', 'd', 'D', 'm', 'M', 'o',
+        'u', 'l', 'e', 's', 'n', 'k', 'K', '~', '0', '1', '9', ':', ' ', '$', '/', '\0', '\u{7f}',
+        '\u{200c}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{206a}', '\u{206f}', '\u{feff}',
+        '\u{300}', '\u{301}', '\u{307}', '\u{338}',
+        // KELVIN SIGN, whose NFC is K; ANGSTROM SIGN, whose NFC is Å.
+        '\u{212a}', '\u{212b}',
+        // İ lowercases to i and a combining dot; dotless ı; long s.
+        '\u{130}', '\u{131}', '\u{17f}',
+        // GREEK QUESTION MARK and GREEK VARIA, whose NFC are ; and `.
+        '\u{37e}', '\u{1fef}', // Lookalikes that stay what they are.
+        '\u{ff27}', '\u{ff0e}', '\u{2024}', '\u{e9}', '\u{1e9e}', '\u{fb01}',
+    ];
+
+    #[test]
+    fn fast_path_agrees_on_known_aliases_and_near_misses() {
+        let names: &[&[u8]] = &[
+            b"",
+            b".",
+            b"..",
+            b":",
+            b". :",
+            b".git",
+            b".GiT",
+            b".git.",
+            b".git . .",
+            b".git::$INDEX_ALLOCATION",
+            b".git:",
+            b":.git",
+            b"x.git",
+            b".gitx",
+            b"GIT~1",
+            b"Git~9",
+            b"git~0",
+            b"git~10",
+            b"git~1.",
+            b"git~1:x",
+            b"BRAID~1",
+            b".Braid",
+            b".GITMODULES",
+            b".gitattributes. ",
+            b".braidignore:stream",
+            b"\xff.git",
+            b".git\xff",
+            b"\x80",
+            ".g\u{200c}it".as_bytes(),
+            "\u{feff}.git".as_bytes(),
+            ".bra\u{206f}id".as_bytes(),
+            ".gi\u{307}t".as_bytes(),
+            ".g\u{130}t".as_bytes(),
+            ".g\u{131}t".as_bytes(),
+            "git\u{ff5e}1".as_bytes(),
+            "\u{212a}".as_bytes(),
+            ".git\u{2024}".as_bytes(),
+            ".gitmodule\u{17f}".as_bytes(),
+            ".git\u{37e}".as_bytes(),
+        ];
+        for name in names {
+            assert_agrees(name);
+        }
+    }
+
+    #[test]
+    fn fast_path_agrees_on_every_short_ascii_name() {
+        assert_agrees(b"");
+        for a in 0..0x80u8 {
+            assert_agrees(&[a]);
+            for b in 0..0x80u8 {
+                assert_agrees(&[a, b]);
+            }
+        }
+    }
+
+    #[test]
+    fn fast_path_agrees_on_every_case_and_ending_of_the_special_names() {
+        let endings: [&[u8]; 8] = [b"", b".", b" ", b". .", b":", b":x", b"::$DATA", b"x"];
+        for special in SPECIAL {
+            let special = special.as_bytes();
+            let letters = special.iter().filter(|b| b.is_ascii_alphabetic()).count();
+            for case in 0..1u32 << letters {
+                let mut name = Vec::new();
+                let mut bit = 0;
+                for byte in special {
+                    if byte.is_ascii_alphabetic() {
+                        name.push(if (case >> bit) & 1 == 1 {
+                            byte.to_ascii_uppercase()
+                        } else {
+                            *byte
+                        });
+                        bit += 1;
+                    } else {
+                        name.push(*byte);
+                    }
+                }
+                for ending in endings {
+                    let mut with_ending = name.clone();
+                    with_ending.extend_from_slice(ending);
+                    assert_agrees(&with_ending);
+                }
+            }
+        }
+    }
+
+    /// A special name, with letters in either case, a few characters of the
+    /// palette inserted, and maybe dots, spaces or a stream name after it.
+    fn near_special() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop::sample::select(SPECIAL.to_vec()),
+            any::<u64>(),
+            prop::collection::vec(
+                (
+                    any::<prop::sample::Index>(),
+                    prop::sample::select(PALETTE.to_vec()),
+                ),
+                0..3,
+            ),
+            "[. ]{0,3}(:[a-z$]{0,4})?",
+        )
+            .prop_map(|(special, case, inserts, ending)| {
+                let mut chars: Vec<char> = special
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if (case >> (i % 64)) & 1 == 1 {
+                            c.to_ascii_uppercase()
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                for (at, c) in inserts {
+                    let at = at.index(chars.len() + 1);
+                    chars.insert(at, c);
+                }
+                let mut name: String = chars.into_iter().collect();
+                name.push_str(&ending);
+                name.into_bytes()
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+
+        #[test]
+        fn fast_path_agrees_on_any_bytes(name in prop::collection::vec(any::<u8>(), 0..24)) {
+            assert_agrees(&name);
+        }
+
+        #[test]
+        fn fast_path_agrees_on_ascii(name in prop::collection::vec(0u8..0x80, 0..24)) {
+            assert_agrees(&name);
+        }
+
+        #[test]
+        fn fast_path_agrees_on_mixed_text(
+            chars in prop::collection::vec(prop::sample::select(PALETTE.to_vec()), 0..16),
+        ) {
+            let name: String = chars.into_iter().collect();
+            assert_agrees(name.as_bytes());
+        }
+
+        #[test]
+        fn fast_path_agrees_near_the_special_names(name in near_special()) {
+            assert_agrees(&name);
+        }
     }
 }

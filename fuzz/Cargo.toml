@@ -13,7 +13,7 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4"
-braid-format = { package = "elffuss-braid-format", path = "../crates/format" }
+braid-format = { package = "elffuss-braid-format", path = "../crates/format", features = ["fuzzing"] }
 braid-git = { package = "elffuss-braid-git", path = "../crates/git", features = ["fuzzing"] }
 
 [[bin]]
