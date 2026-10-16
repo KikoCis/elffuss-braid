@@ -30,6 +30,18 @@ impl HexPrefix {
         Some(HexPrefix { digits })
     }
 
+    /// The first bytes the ids that start with these digits can have.
+    pub(crate) fn first_bytes(&self) -> std::ops::RangeInclusive<u8> {
+        match self.digits.as_slice() {
+            [] => 0..=255,
+            [high] => (high << 4)..=(high << 4 | 0x0f),
+            [high, low, ..] => {
+                let byte = high << 4 | low;
+                byte..=byte
+            }
+        }
+    }
+
     /// Whether the hex form of `id` starts with these digits.
     pub(crate) fn matches(&self, id: &ObjectId) -> bool {
         let bytes = id.as_bytes();
@@ -65,6 +77,19 @@ mod tests {
                 .unwrap()
                 .matches(&other)
         );
+    }
+
+    #[test]
+    fn first_bytes_bound_the_ids_a_prefix_matches() {
+        let id = ObjectId::hash(Kind::Blob, b"hello\n");
+        let hex = id.to_hex();
+        for len in 0..=4 {
+            let prefix = HexPrefix::parse(&hex[..len]).unwrap();
+            assert!(prefix.first_bytes().contains(&id.as_bytes()[0]), "{len}");
+        }
+        assert_eq!(HexPrefix::parse("").unwrap().first_bytes(), 0..=255);
+        assert_eq!(HexPrefix::parse("a").unwrap().first_bytes(), 0xa0..=0xaf);
+        assert_eq!(HexPrefix::parse("a7f").unwrap().first_bytes(), 0xa7..=0xa7);
     }
 
     #[test]

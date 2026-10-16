@@ -11,55 +11,83 @@
 //!   other processes may be reading it.
 //! - **Journals.** After each record the lease holder appends a journal
 //!   entry, so readers learn about the record without reading payloads.
-//! - **Sealing.** Once a segment passes the size threshold, its holder
-//!   flushes it, writes its sorted index through a temporary file and a
-//!   rename, flushes the directory, and removes the journal. A sealed segment
-//!   is never written again.
-//! - **Lookups.** Every handle keeps a map from id to location, built from the
-//!   indexes and journals. On a miss it rescans the directory once, since
-//!   another process may have written or sealed something since. When it
-//!   knows several copies of one object, it keeps the best ranked: a copy
-//!   stored whole before a delta, a delta before a chunked blob.
+//! - **Sealing.** Once a segment passes the size threshold, or holds the
+//!   most records a segment may, its holder writes its sorted index through
+//!   a temporary file, flushed with the segment, and a rename, flushes the
+//!   directory, and removes the journal. A sealed segment is never written
+//!   again.
+//! - **Merging.** Once enough segment indexes pile up, a writer merges them
+//!   into a merged index (see the `merge` submodule), so that lookups go
+//!   through few indexes.
+//! - **Lookups.** Every handle keeps a map from id to location for the open
+//!   segments only, built from their journals, which the record limit keeps
+//!   short. Sealed segments are looked up in their indexes, which a handle
+//!   reads as lookups need them (see the `sources` submodule): opening a
+//!   store reads no index entry, whatever it holds. On a miss a handle
+//!   reads the directory again once, since another process may have
+//!   written, sealed or merged something since. When it knows several
+//!   copies of one object, a lookup takes the first that serves: a delta's
+//!   base must be stored whole, and a chunk must not be chunked itself.
 //! - **Durability.** [`Segments::put`] appends without flushing;
-//!   [`Segments::sync`] flushes everything this handle wrote, segments first,
-//!   then journals, so that a durable journal entry always points at a
-//!   durable record. A copy written by someone else stands for a new write
-//!   only together with what it needs to be read: a delta's base, a chunked
-//!   blob's chunks. Those that sit in another writer's open segment are
-//!   flushed by this handle's next sync too.
+//!   [`Segments::sync`] flushes everything this handle wrote, segments and
+//!   journals, in one batch. A copy written by someone else stands for a new
+//!   write only together with what it needs to be read: a delta's base, a
+//!   chunked blob's chunks. Those that sit in another writer's open segment
+//!   are flushed by this handle's next sync too.
 //!
 //! How objects are stored whole, as deltas or in chunks, and read back, is
 //! in the `objects` submodule.
 
+mod merge;
 mod objects;
+mod sources;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, hash_map};
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use braid_format::{Kind, ObjectId};
 
 use crate::error::{Error, io_error};
 use crate::fsutil::{
-    is_random_name, publish_file, random_name, read_range, remove_stale_temps, sync_dir, sync_file,
-    write_all_at,
+    flush, is_random_name, open_dir, publish_file, random_name, read_range, remove_stale_temps,
+    sync_dir, write_all_at,
 };
-use crate::index::IndexError;
+use crate::index::{self, Covered};
 use crate::journal::{self, ENTRY_LEN, Entry};
+use crate::prefix::HexPrefix;
 use crate::record::{self, CODEC_CHUNKED, CODEC_DELTA, CODEC_DICTIONARY, Encoded, Header};
 use crate::scan::{self, Window};
-use crate::{Durability, Options, index};
+use crate::{Durability, Options};
 use crate::{chunks, format_file};
 
 pub(crate) use objects::BaseCache;
+use sources::{Lookup, Source, SourceKind};
 
 /// Segments a handle keeps open for reading. Past this, a read opens the
 /// segment for itself.
 const MAX_CACHED_READERS: usize = 256;
+
+/// How many times a rescan lists the directory again while segments are
+/// sealed and merged under it.
+const RESCAN_PASSES: usize = 3;
+
+/// The storage version a store needs once it holds an index of version 2.
+pub(crate) const INDEX_STORAGE: u32 = 3;
+
+/// The worst copy a lookup takes, by [`record::rank`]: any this version
+/// can read.
+pub(crate) const ANY: u8 = 2;
+/// A copy that is not chunked: stored whole or as a delta.
+pub(crate) const NOT_CHUNKED: u8 = 1;
+/// A copy stored whole, as a delta's base must be.
+pub(crate) const WHOLE: u8 = 0;
 
 /// The object half of a store: the `seg/` directory.
 #[derive(Debug)]
@@ -68,6 +96,8 @@ pub(crate) struct Segments {
     root: PathBuf,
     dir: PathBuf,
     segment_size: u64,
+    segment_records: u64,
+    merge_threshold: usize,
     durability: Durability,
     catalog: RwLock<Catalog>,
     /// Held while rescanning the directory, so that one thread does it at a time.
@@ -79,14 +109,45 @@ pub(crate) struct Segments {
     bases: BaseCache,
     /// The storage version the `format` file is known to have at least.
     storage: AtomicU32,
+    /// Set when enough segment indexes have piled up to merge them.
+    merge_due: AtomicBool,
 }
 
 /// What this handle knows about the segments and the objects in them.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Catalog {
     segments: Vec<Segment>,
     by_name: HashMap<String, u32>,
-    objects: HashMap<ObjectId, Location>,
+    /// The best ranked copy of each object in the open segments, from their
+    /// journals and this handle's own appends.
+    open: HashMap<ObjectId, Location>,
+    /// Every index this handle has registered, by number.
+    sources: Vec<Arc<Source>>,
+    /// Their numbers, by file name.
+    by_file: HashMap<String, u32>,
+    /// The indexes lookups go through, in the order they try them.
+    active: Arc<[Active]>,
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        Self {
+            segments: Vec::new(),
+            by_name: HashMap::new(),
+            open: HashMap::new(),
+            sources: Vec::new(),
+            by_file: HashMap::new(),
+            active: Arc::from(Vec::new()),
+        }
+    }
+}
+
+/// An index lookups go through, and which of its segments it serves: each
+/// sealed segment is served by one index, the best that covers it.
+#[derive(Debug)]
+struct Active {
+    source: Arc<Source>,
+    serves: Box<[bool]>,
 }
 
 #[derive(Debug)]
@@ -101,8 +162,8 @@ struct Segment {
 enum SegmentState {
     /// Still open: its journal has been read up to this offset.
     Open { journal_end: u64 },
-    /// Sealed: its index has been read, and it will not change again.
-    Sealed,
+    /// Sealed, and looked up in this index. It will not change again.
+    Sealed { source: u32 },
 }
 
 /// Where a copy of an object is: its segment, and its journal or index
@@ -122,6 +183,16 @@ pub(crate) enum Wanted {
     Any,
     /// A copy that is not chunked, as a chunk list needs.
     NotChunked,
+}
+
+impl Wanted {
+    /// The worst rank of a copy it takes.
+    fn rank(self) -> u8 {
+        match self {
+            Wanted::Any => ANY,
+            Wanted::NotChunked => NOT_CHUNKED,
+        }
+    }
 }
 
 /// A record read from its segment: its checksum is valid, and it is the one
@@ -194,6 +265,8 @@ struct Lease {
     seg_end: u64,
     /// Where the next journal entry goes.
     journal_end: u64,
+    /// Records its journal lists.
+    records: u64,
     /// Whether something was written since the last sync.
     dirty: bool,
 }
@@ -206,25 +279,28 @@ pub(crate) struct Files {
     pub idx: bool,
 }
 
-/// How a read changes what the catalog knows about a segment.
-#[derive(Clone, Copy, Debug)]
-enum Update {
-    /// The journal was read up to this offset.
-    Journal(u64),
-    /// The index was read.
-    Sealed,
+/// What `seg/` holds.
+#[derive(Debug, Default)]
+pub(crate) struct Listing {
+    /// Segments by name, and which of their files exist.
+    pub segments: BTreeMap<String, Files>,
+    /// The names of merged indexes.
+    pub merged: BTreeSet<String>,
 }
 
 impl Segments {
     /// Opens the segments of the store at `root`, whose `format` file says
-    /// it has storage version `storage`, and reads every index and journal.
-    /// If they already hold records that need a later storage version, as a
-    /// writer that died before raising it could leave, the version is raised.
+    /// it has storage version `storage`, and reads the journals of the open
+    /// segments; indexes are read as lookups need them. If the journals
+    /// already hold records that need a later storage version, as a writer
+    /// from before storage versions could leave, the version is raised.
     pub fn open(root: &Path, options: &Options, storage: u32) -> Result<Self, Error> {
         let segments = Self {
             root: root.to_path_buf(),
             dir: root.join("seg"),
             segment_size: options.segment_size,
+            segment_records: options.segment_records,
+            merge_threshold: options.merge_threshold,
             durability: options.durability,
             catalog: RwLock::new(Catalog::default()),
             rescanning: Mutex::new(()),
@@ -232,12 +308,14 @@ impl Segments {
             cached_readers: AtomicUsize::new(0),
             bases: BaseCache::default(),
             storage: AtomicU32::new(storage),
+            merge_due: AtomicBool::new(false),
         };
         segments.rescan()?;
         let needed = segments
-            .known_entries()
-            .iter()
-            .map(|entry| record::storage_version(entry.codec))
+            .read_catalog()
+            .open
+            .values()
+            .map(|location| record::storage_version(location.entry.codec))
             .max()
             .unwrap_or(1);
         segments.need_storage(needed)?;
@@ -247,11 +325,11 @@ impl Segments {
     /// Makes sure the store's `format` file says it has at least storage
     /// version `version`, raising it if needed, before anything that needs
     /// that version is written.
-    fn need_storage(&self, version: u32) -> Result<(), Error> {
+    pub(crate) fn need_storage(&self, version: u32) -> Result<(), Error> {
         if self.storage.load(Ordering::Acquire) >= version {
             return Ok(());
         }
-        format_file::raise(&self.root, version)?;
+        format_file::raise(&self.root, version, self.durability)?;
         self.storage.fetch_max(version, Ordering::AcqRel);
         Ok(())
     }
@@ -280,13 +358,13 @@ impl Segments {
         let mut make = Some(make);
         // Encode outside the writer lock, unless a copy is already known.
         let mut encoded = None;
-        if self.location(id).is_none()
+        if self.locate(id, wanted.rank())?.is_none()
             && let Some(make) = make.take()
         {
             encoded = Some(make()?);
         }
         let mut writer = self.lock_writer();
-        if let Some(location) = self.location(id)
+        if let Some(location) = self.locate(id, wanted.rank())?
             && self.reuse(&mut writer, &location, wanted)?
         {
             return Ok(());
@@ -304,7 +382,7 @@ impl Segments {
     /// flush the copy and what it needs, wherever another writer has not
     /// flushed them yet.
     pub fn stored(&self, id: &ObjectId, wanted: Wanted) -> Result<bool, Error> {
-        let Some(location) = self.location(id) else {
+        let Some(location) = self.locate(id, wanted.rank())? else {
             return Ok(false);
         };
         let mut writer = self.lock_writer();
@@ -350,7 +428,7 @@ impl Segments {
     /// its own, so a damaged header is an error; damage to the payload only
     /// shows on [`Segments::get`].
     pub fn stat(&self, id: &ObjectId) -> Result<Option<(Kind, u64)>, Error> {
-        let Some(location) = self.find(id)? else {
+        let Some(location) = self.find(id, ANY)? else {
             return Ok(None);
         };
         let (file, path) = self.reader(location.segment)?;
@@ -378,23 +456,37 @@ impl Segments {
 
     /// Whether an index or a journal lists the object. The record is not read.
     pub fn contains(&self, id: &ObjectId) -> Result<bool, Error> {
-        Ok(self.find(id)?.is_some())
+        Ok(self.find(id, ANY)?.is_some())
     }
 
-    /// The ids this handle knows of that `wanted` accepts, in no particular
-    /// order. Nothing is read from disk: see [`Segments::rescan`].
-    pub fn ids_where(&self, mut wanted: impl FnMut(&ObjectId) -> bool) -> Vec<ObjectId> {
-        self.catalog
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .objects
-            .keys()
-            .filter(|id| wanted(id))
-            .copied()
-            .collect()
+    /// The ids this handle knows of whose hex form starts with `prefix`,
+    /// sorted. Only the buckets of the indexes the prefix falls in are
+    /// read: see [`Segments::rescan`] for what is new.
+    pub fn ids_with_prefix(&self, prefix: &HexPrefix) -> Result<Vec<ObjectId>, Error> {
+        self.retry_gone(|| {
+            let (mut found, active) = {
+                let catalog = self.read_catalog();
+                let found: BTreeSet<ObjectId> = catalog
+                    .open
+                    .keys()
+                    .filter(|id| prefix.matches(id))
+                    .copied()
+                    .collect();
+                (found, Arc::clone(&catalog.active))
+            };
+            for active in active.iter() {
+                for (entry, segment) in active.source.with_prefix(prefix, self)? {
+                    if active.serves[usize::from(segment)] {
+                        found.insert(entry.id);
+                    }
+                }
+            }
+            Ok(found.into_iter().collect())
+        })
     }
 
-    /// Flushes everything this handle wrote: segments first, then journals.
+    /// Flushes everything this handle wrote: segments and journals, in one
+    /// batch.
     pub fn sync(&self) -> Result<(), Error> {
         let mut writer = self.lock_writer();
         self.sync_locked(&mut writer)
@@ -408,7 +500,7 @@ impl Segments {
     pub fn make_durable(&self, ids: &[ObjectId]) -> Result<(), Error> {
         let mut writer = self.lock_writer();
         for id in ids {
-            let Some(location) = self.location(id) else {
+            let Some(location) = self.locate(id, ANY)? else {
                 continue;
             };
             if !self.reuse(&mut writer, &location, Wanted::Any)? {
@@ -424,106 +516,190 @@ impl Segments {
     }
 
     /// Reads what changed in the directory since the last look: new
-    /// segments, new journal entries, and segments sealed since.
+    /// segments, new journal entries, segments sealed since, and indexes
+    /// merged since. Index entries are not read here: lookups read them.
     pub fn rescan(&self) -> Result<(), Error> {
         let _one_at_a_time = self
             .rescanning
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        for (name, files) in list(&self.dir)? {
-            if !files.seg {
+        // A listing may miss files that others create or remove while it is
+        // read: a segment sealed and merged meanwhile is found by listing
+        // again.
+        for pass in 1..=RESCAN_PASSES {
+            if self.rescan_once(pass == RESCAN_PASSES)? {
+                break;
+            }
+        }
+        self.note_own_indexes();
+        Ok(())
+    }
+
+    /// One look at the directory. Returns `false` when a segment that holds
+    /// records turned out to have neither a journal nor an index of its own,
+    /// and no merged index listed covers it: sealed and merged since the
+    /// listing, so that another listing finds it. On the `last` pass, such a
+    /// segment is read by scanning it if a merged index cannot be read.
+    fn rescan_once(&self, last: bool) -> Result<bool, Error> {
+        let listing = list(&self.dir)?;
+
+        // The heads of merged indexes this handle has not seen yet.
+        let mut fresh = Vec::new();
+        let mut unreadable = false;
+        for name in &listing.merged {
+            let file = format!("{name}.midx");
+            if self.read_catalog().by_file.contains_key(&file) {
                 continue;
             }
-            let state = {
-                let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
-                catalog
-                    .by_name
-                    .get(&name)
-                    .map(|&index| catalog.segments[index as usize].state)
-            };
-            match state {
-                Some(SegmentState::Sealed) => {}
-                Some(SegmentState::Open { journal_end }) => {
-                    self.follow(&name, journal_end, files.idx)?;
-                }
-                None if files.idx || files.jrn => self.follow(&name, 0, files.idx)?,
-                // Being created, or its writer died before writing anything.
+            match Source::open_merged(&self.dir, &file)? {
+                Some(Ok(opened)) => fresh.push(opened),
+                Some(Err(_damaged)) => unreadable = true,
+                // Merged into another one since the listing.
                 None => {}
             }
         }
-        Ok(())
-    }
 
-    /// Reads what is new in a segment: its index if it is sealed, else its
-    /// journal from `from`.
-    fn follow(&self, name: &str, from: u64, sealed: bool) -> Result<(), Error> {
-        if !sealed {
-            let path = self.path(name, "jrn");
-            match File::open(&path) {
-                Ok(file) => {
-                    let read = journal::read(&file, from, &path)?;
-                    self.apply(name, Update::Journal(read.end), &read.entries);
-                    return Ok(());
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    // Sealed since the listing: the index replaced the journal.
-                    let idx = self.path(name, "idx");
-                    if !idx.try_exists().map_err(io_error("check", &idx))? {
-                        return Ok(());
+        let mut follow = Vec::new();
+        let mut settled = true;
+        {
+            let mut catalog = self.write_catalog();
+            for opened in fresh {
+                catalog.register(opened);
+            }
+            // Which merged index of those listed serves each segment.
+            let mut best: HashMap<&str, u32> = HashMap::new();
+            for name in &listing.merged {
+                let Some(&number) = catalog.by_file.get(&format!("{name}.midx")) else {
+                    continue;
+                };
+                let source = &catalog.sources[number as usize];
+                for (segment, _) in &source.covered {
+                    let better = best.get(segment.as_str()).is_none_or(|&other| {
+                        catalog.sources[other as usize].rank() < source.rank()
+                    });
+                    if better {
+                        best.insert(segment.as_str(), number);
                     }
                 }
-                Err(err) => return Err(io_error("open", &path)(err)),
+            }
+            let best: HashMap<String, u32> = best
+                .into_iter()
+                .map(|(name, number)| (name.to_owned(), number))
+                .collect();
+            let mut changed = false;
+            for (name, files) in &listing.segments {
+                if !files.seg {
+                    continue;
+                }
+                // An index of its own that a lookup found gone is not
+                // there, whatever the listing says.
+                let own_gone = catalog
+                    .by_file
+                    .get(&format!("{name}.idx"))
+                    .is_some_and(|&own| catalog.sources[own as usize].is_gone());
+                if let Some(&source) = best.get(name) {
+                    changed |= catalog.seal(name, source);
+                } else if files.idx && !own_gone {
+                    let source = catalog.own_source(&self.dir, name, None);
+                    changed |= catalog.seal(name, source);
+                } else {
+                    // Open, or new to this handle. Its journal is opened by
+                    // name, whether the listing showed it or not.
+                    match catalog.state(name) {
+                        // Its own index is gone, merged into one that this
+                        // listing missed.
+                        Some(SegmentState::Sealed { source })
+                            if catalog.sources[source as usize].kind == SourceKind::Own =>
+                        {
+                            settled &= last;
+                        }
+                        Some(SegmentState::Sealed { .. }) => {}
+                        Some(SegmentState::Open { journal_end }) => {
+                            follow.push((name.clone(), journal_end));
+                        }
+                        None => follow.push((name.clone(), 0)),
+                    }
+                }
+            }
+            if changed {
+                catalog.refresh();
             }
         }
-        let entries = self.load_index(name)?;
-        self.apply(name, Update::Sealed, &entries);
-        Ok(())
+        for (name, from) in follow {
+            if self.follow(&name, from)? {
+                continue;
+            }
+            // Neither a journal nor an index of its own: never written to,
+            // or sealed and merged since the listing.
+            let path = self.path(&name, "seg");
+            let len = match fs::metadata(&path) {
+                Ok(meta) => meta.len(),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(io_error("read", &path)(err)),
+            };
+            if len == 0 {
+                continue;
+            }
+            if !last {
+                settled = false;
+            } else if unreadable {
+                // Merged into an index this handle cannot read: its records
+                // say what it holds.
+                let mut catalog = self.write_catalog();
+                let source = catalog.scan_source(&name);
+                if catalog.seal(&name, source) {
+                    catalog.refresh();
+                }
+            }
+        }
+        Ok(settled)
     }
 
-    /// The entries of a sealed segment. A damaged index is worked around by
-    /// scanning the segment, whose records describe themselves; fsck reports
-    /// the damage. An index a newer version of braid wrote is refused.
-    fn load_index(&self, name: &str) -> Result<Vec<Entry>, Error> {
-        let path = self.path(name, "idx");
-        let bytes = fs::read(&path).map_err(io_error("read", &path))?;
-        match index::decode(&bytes) {
-            Ok(index) => Ok(index.entries),
-            Err(IndexError::Newer(detail)) => Err(Error::NewerStore {
-                path,
-                detail: format!("it holds {detail}"),
-            }),
-            Err(IndexError::Damaged(_)) => {
-                let path = self.path(name, "seg");
-                let file = File::open(&path).map_err(io_error("open", &path))?;
-                let len = file.metadata().map_err(io_error("read", &path))?.len();
-                let mut entries = Vec::new();
-                scan::scan(&file, len, |offset, found| {
-                    entries.push(Entry::new(offset, &found.header, found.crc));
-                })
-                .map_err(io_error("read", &path))?;
-                Ok(entries)
+    /// Reads what is new in the journal of an open segment, from `from`.
+    /// Returns `false` if the segment has neither a journal nor an index of
+    /// its own any more.
+    fn follow(&self, name: &str, from: u64) -> Result<bool, Error> {
+        let path = self.path(name, "jrn");
+        match File::open(&path) {
+            Ok(file) => {
+                let read = journal::read(&file, from, &path)?;
+                self.apply(name, read.end, &read.entries);
+                Ok(true)
             }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Sealed since the listing: the index replaced the journal.
+                let idx = self.path(name, "idx");
+                if !idx.try_exists().map_err(io_error("check", &idx))? {
+                    return Ok(false);
+                }
+                let mut catalog = self.write_catalog();
+                let source = catalog.own_source(&self.dir, name, None);
+                if catalog.seal(name, source) {
+                    catalog.refresh();
+                }
+                Ok(true)
+            }
+            Err(err) => Err(io_error("open", &path)(err)),
         }
     }
 
-    /// Records what was read about a segment, and returns its number.
-    fn apply(&self, name: &str, update: Update, entries: &[Entry]) -> u32 {
-        let mut catalog = self.catalog.write().unwrap_or_else(PoisonError::into_inner);
+    /// Records the entries read from an open segment's journal, up to `end`,
+    /// and returns the segment's number.
+    fn apply(&self, name: &str, end: u64, entries: &[Entry]) -> u32 {
+        let mut catalog = self.write_catalog();
         let segment = catalog.segment(name);
-        let state = &mut catalog.segments[segment as usize].state;
-        match (update, &mut *state) {
-            (Update::Sealed, _) => *state = SegmentState::Sealed,
-            (Update::Journal(end), SegmentState::Open { journal_end }) => {
-                *journal_end = (*journal_end).max(end);
-            }
-            (Update::Journal(_), SegmentState::Sealed) => {}
-        }
+        let SegmentState::Open { journal_end } = &mut catalog.segments[segment as usize].state
+        else {
+            // Sealed since: its index serves its objects.
+            return segment;
+        };
+        *journal_end = (*journal_end).max(end);
         for entry in entries {
             let location = Location {
                 segment,
                 entry: *entry,
             };
-            match catalog.objects.entry(entry.id) {
+            match catalog.open.entry(entry.id) {
                 hash_map::Entry::Vacant(slot) => {
                     slot.insert(location);
                 }
@@ -538,41 +714,99 @@ impl Segments {
         segment
     }
 
-    /// Where an object is, rescanning the directory once on a miss.
-    pub fn find(&self, id: &ObjectId) -> Result<Option<Location>, Error> {
-        if let Some(location) = self.location(id) {
+    /// Where a copy of an object no worse than `rank` is, rescanning the
+    /// directory once on a miss.
+    pub fn find(&self, id: &ObjectId, rank: u8) -> Result<Option<Location>, Error> {
+        if let Some(location) = self.locate(id, rank)? {
             return Ok(Some(location));
         }
         self.rescan()?;
-        Ok(self.location(id))
+        self.locate(id, rank)
     }
 
-    /// The entries of every object this handle knows of, one copy each, in
-    /// no particular order. Nothing is read from disk.
-    pub fn known_entries(&self) -> Vec<Entry> {
-        self.catalog
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .objects
-            .values()
-            .map(|location| location.entry)
-            .collect()
+    /// Where this handle knows a copy of an object no worse than `rank` to
+    /// be, by [`record::rank`], without listing the directory again: in an
+    /// open segment's journal, or in the first index that serves one. The
+    /// indexes it goes through are read as far as the lookup needs.
+    pub fn locate(&self, id: &ObjectId, rank: u8) -> Result<Option<Location>, Error> {
+        self.retry_gone(|| {
+            let active = {
+                let catalog = self.read_catalog();
+                if let Some(location) = catalog.open.get(id)
+                    && record::rank(location.entry.codec) <= rank
+                {
+                    return Ok(Some(*location));
+                }
+                Arc::clone(&catalog.active)
+            };
+            for active in active.iter() {
+                let Some((entry, segment)) = active.source.find(id, self)? else {
+                    continue;
+                };
+                if active.serves[usize::from(segment)] && record::rank(entry.codec) <= rank {
+                    return Ok(Some(Location {
+                        segment: active.source.covered[usize::from(segment)].1,
+                        entry,
+                    }));
+                }
+            }
+            Ok(None)
+        })
     }
 
-    /// Where this handle knows a copy of an object to be, without looking
-    /// at the directory again.
-    pub fn location(&self, id: &ObjectId) -> Option<Location> {
-        self.catalog
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .objects
-            .get(id)
-            .copied()
+    /// Runs a lookup through the indexes, and again after a rescan if one of
+    /// them was merged away before this handle read it.
+    fn retry_gone<T>(&self, mut lookup: impl FnMut() -> Result<T, Lookup>) -> Result<T, Error> {
+        let mut rescans = 0;
+        loop {
+            match lookup() {
+                Ok(found) => return Ok(found),
+                Err(Lookup::Gone(_)) if rescans < RESCAN_PASSES => {
+                    rescans += 1;
+                    self.rescan()?;
+                }
+                Err(err) => return Err(err.into_error()),
+            }
+        }
+    }
+
+    /// The entries of every object this handle knows of, one copy each, the
+    /// best ranked, in no particular order. Every index is read whole.
+    pub fn known_entries(&self) -> Result<Vec<Entry>, Error> {
+        self.retry_gone(|| {
+            let (mut best, active) = {
+                let catalog = self.read_catalog();
+                let best: HashMap<ObjectId, Entry> = catalog
+                    .open
+                    .iter()
+                    .map(|(id, location)| (*id, location.entry))
+                    .collect();
+                (best, Arc::clone(&catalog.active))
+            };
+            for active in active.iter() {
+                for (entry, segment) in active.source.all(self)? {
+                    if !active.serves[usize::from(segment)] {
+                        continue;
+                    }
+                    match best.entry(entry.id) {
+                        hash_map::Entry::Vacant(slot) => {
+                            slot.insert(entry);
+                        }
+                        hash_map::Entry::Occupied(mut slot) => {
+                            if record::rank(entry.codec) < record::rank(slot.get().codec) {
+                                slot.insert(entry);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(best.into_values().collect())
+        })
     }
 
     /// A handle to read a segment, and its path.
     fn reader(&self, segment: u32) -> Result<(Arc<File>, PathBuf), Error> {
-        let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+        let catalog = self.read_catalog();
         let segment = &catalog.segments[segment as usize];
         let path = self.path(&segment.name, "seg");
         if let Some(file) = segment.reader.get() {
@@ -611,11 +845,9 @@ impl Segments {
                 let Some(base) = self.reference(location)? else {
                     return Ok(false);
                 };
-                match self.find(&base)? {
-                    Some(base) if record::is_whole(base.entry.codec) => {
-                        self.record_stays(writer, &base)
-                    }
-                    _ => Ok(false),
+                match self.find(&base, WHOLE)? {
+                    Some(base) => self.record_stays(writer, &base),
+                    None => Ok(false),
                 }
             }
             CODEC_CHUNKED => {
@@ -628,7 +860,7 @@ impl Segments {
                     return Ok(false);
                 };
                 for chunk in chunks {
-                    let usable = match self.find(&chunk.id)? {
+                    let usable = match self.find(&chunk.id, NOT_CHUNKED)? {
                         Some(found) => {
                             found.entry.kind == Kind::Blob
                                 && found.entry.raw_len == chunk.size
@@ -684,14 +916,14 @@ impl Segments {
     /// flushed it yet.
     fn record_stays(&self, writer: &mut Writer, location: &Location) -> Result<bool, Error> {
         let state = {
-            let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+            let catalog = self.read_catalog();
             catalog.segments[location.segment as usize].state
         };
         let own = writer
             .lease
             .as_ref()
             .is_some_and(|lease| lease.segment == location.segment);
-        if state == SegmentState::Sealed || own {
+        if matches!(state, SegmentState::Sealed { .. }) || own {
             return Ok(true);
         }
         let (file, path) = self.reader(location.segment)?;
@@ -739,16 +971,15 @@ impl Segments {
         }
         lease.seg_end += encoded.bytes.len() as u64;
         lease.journal_end += ENTRY_LEN;
+        lease.records += 1;
         lease.dirty = true;
         let segment = lease.segment;
         let journal_end = lease.journal_end;
-        let full = lease.seg_end >= self.segment_size;
+        let full = self.full(lease.seg_end, lease.records);
         {
-            let mut catalog = self.catalog.write().unwrap_or_else(PoisonError::into_inner);
+            let mut catalog = self.write_catalog();
             // Replaces a damaged copy elsewhere, if that is why this was written.
-            catalog
-                .objects
-                .insert(entry.id, Location { segment, entry });
+            catalog.open.insert(entry.id, Location { segment, entry });
             if let SegmentState::Open { journal_end: known } =
                 &mut catalog.segments[segment as usize].state
             {
@@ -757,24 +988,30 @@ impl Segments {
         }
         if full && let Some(lease) = writer.lease.take() {
             // The object is stored either way. If sealing fails, the segment
-            // stays open and over the threshold, and the next writer to take
-            // it seals it.
+            // stays open and full, and the next writer to take it seals it.
             let _ = self.seal(writer, lease);
         }
         Ok(())
     }
 
+    /// Whether a segment of `len` bytes and `records` records is full.
+    fn full(&self, len: u64, records: u64) -> bool {
+        len >= self.segment_size || (self.segment_records > 0 && records >= self.segment_records)
+    }
+
     /// Takes a lease: on an unlocked segment that is not sealed if there is
     /// one, else on a new segment.
     fn acquire(&self, writer: &mut Writer) -> Result<Lease, Error> {
-        for (name, files) in list(&self.dir)? {
-            if !files.seg || files.idx {
+        for (name, files) in list(&self.dir)?.segments {
+            // An open segment has a journal and no index; a segment with
+            // neither is sealed and merged, or was never written to.
+            if !files.seg || !files.jrn || files.idx {
                 continue;
             }
             let Some(lease) = self.try_lease(&name)? else {
                 continue;
             };
-            if lease.seg_end >= self.segment_size {
+            if self.full(lease.seg_end, lease.records) {
                 // Full, but whoever filled it died before sealing it. If
                 // sealing fails now, it is left for later.
                 let _ = self.seal(writer, lease);
@@ -810,24 +1047,29 @@ impl Segments {
             return Ok(None);
         }
         let jrn_path = self.path(name, "jrn");
-        let journal = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&jrn_path)
-            .map_err(io_error("open", &jrn_path))?;
-        // Whoever created these files may have died before flushing the
-        // directory, and objects acknowledged from now on depend on them.
-        sync_dir(&self.dir)?;
+        // Never created here: a segment without a journal is sealed and
+        // merged since the listing, and merging removes a journal before it
+        // removes the index.
+        let journal = match OpenOptions::new().read(true).write(true).open(&jrn_path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_error("open", &jrn_path)(err)),
+        };
         // A journal a newer version wrote to stops here: this version never
         // writes after entries it does not understand.
         let read = journal::read(&journal, 0, &jrn_path)?;
+        if read.entries.is_empty() {
+            // Whoever created these files may have died before flushing the
+            // directory, and objects acknowledged from now on depend on
+            // them. Once a journal lists a record, someone has.
+            sync_dir(&self.dir, self.durability)?;
+        }
         let seg_len = seg.metadata().map_err(io_error("read", &seg_path))?.len();
         // Never write over bytes an entry points at, even if they are gone.
         let claimed = read.entries.iter().map(Entry::end).max().unwrap_or(0);
         let seg_end = record::align(seg_len).max(claimed);
-        let segment = self.apply(name, Update::Journal(read.end), &read.entries);
+        let records = read.entries.len() as u64;
+        let segment = self.apply(name, read.end, &read.entries);
         Ok(Some(Lease {
             segment,
             name: name.to_owned(),
@@ -835,6 +1077,7 @@ impl Segments {
             journal: Arc::new(journal),
             seg_end,
             journal_end: read.end,
+            records,
             dirty: false,
         }))
     }
@@ -869,8 +1112,10 @@ impl Segments {
                 .truncate(false)
                 .open(&jrn_path)
                 .map_err(io_error("create", &jrn_path))?;
-            sync_dir(&self.dir)?;
-            let segment = self.apply(&name, Update::Journal(0), &[]);
+            // Before any record: others may rely on what this segment holds
+            // and flush it, but not its directory.
+            sync_dir(&self.dir, self.durability)?;
+            let segment = self.apply(&name, 0, &[]);
             return Ok(Lease {
                 segment,
                 name,
@@ -878,6 +1123,7 @@ impl Segments {
                 journal: Arc::new(journal),
                 seg_end: 0,
                 journal_end: 0,
+                records: 0,
                 dirty: false,
             });
         }
@@ -886,8 +1132,14 @@ impl Segments {
     /// Seals a segment and gives its lease up.
     fn seal(&self, writer: &mut Writer, lease: Lease) -> Result<(), Error> {
         match self.write_index(&lease) {
-            Ok(()) => {
-                self.apply(&lease.name, Update::Sealed, &[]);
+            Ok(index) => {
+                let mut catalog = self.write_catalog();
+                let source = catalog.own_source(&self.dir, &lease.name, Some(index));
+                if catalog.seal(&lease.name, source) {
+                    catalog.refresh();
+                }
+                drop(catalog);
+                self.note_own_indexes();
                 Ok(())
             }
             Err(err) => {
@@ -897,12 +1149,13 @@ impl Segments {
         }
     }
 
-    /// Flushes a segment, writes its index, and removes its journal.
-    fn write_index(&self, lease: &Lease) -> Result<(), Error> {
+    /// Writes a segment's index, flushing the segment with it, and removes
+    /// its journal. Returns what it covers and its entries.
+    fn write_index(&self, lease: &Lease) -> Result<(Covered, Vec<Entry>), Error> {
+        // A version 2 index needs a store that says so first.
+        self.need_storage(INDEX_STORAGE)?;
         let seg_path = self.path(&lease.name, "seg");
         let jrn_path = self.path(&lease.name, "jrn");
-        // The index must never point at data that is not durable.
-        sync_file(&lease.seg, self.durability).map_err(io_error("sync", &seg_path))?;
         let read = journal::read(&lease.journal, 0, &jrn_path)?;
         let seg_len = lease
             .seg
@@ -930,18 +1183,26 @@ impl Segments {
             }
         }
         entries.sort_by_key(|entry| entry.id);
-        let covered = entries.iter().map(Entry::end).fold(seg_len, u64::max);
+        let covered = Covered {
+            name: lease.name.clone(),
+            len: entries.iter().map(Entry::end).fold(seg_len, u64::max),
+        };
+        let numbered: Vec<(Entry, u16)> = entries.iter().map(|entry| (*entry, 0)).collect();
         remove_stale_temps(&self.dir);
+        // The index must never reach the disk before the records it points
+        // at: they are flushed in one batch with it, before the rename.
         publish_file(
             &self.dir,
             &format!("{}.idx", lease.name),
-            &index::encode(&entries, covered),
+            &index::encode(std::slice::from_ref(&covered), &numbered),
+            self.durability,
+            &[(&seg_path, &lease.seg)],
         )?;
         // The index supersedes the journal. A journal that cannot be removed
         // now is harmless, and the next writer to look at the segment
         // removes it.
         let _ = fs::remove_file(&jrn_path);
-        Ok(())
+        Ok((covered, entries))
     }
 
     fn sync_locked(&self, writer: &mut Writer) -> Result<(), Error> {
@@ -959,7 +1220,7 @@ impl Segments {
         }
         for &segment in &writer.foreign {
             let name = {
-                let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+                let catalog = self.read_catalog();
                 catalog.segments[segment as usize].name.clone()
             };
             for (extension, list) in [("seg", &mut segments), ("jrn", &mut journals)] {
@@ -975,18 +1236,41 @@ impl Segments {
         if segments.is_empty() && journals.is_empty() {
             return Ok(());
         }
-        for (path, file) in segments.iter().chain(&journals) {
-            sync_file(file, self.durability).map_err(io_error("sync", path))?;
+        let dir = match self.durability {
+            Durability::Full => open_dir(&self.dir)?,
+            Durability::Ordered => None,
+        };
+        let mut batch: Vec<(&Path, &File)> = segments
+            .iter()
+            .chain(&journals)
+            .map(|(path, file)| (path.as_path(), file.as_ref()))
+            .collect();
+        if let Some(dir) = &dir {
+            batch.push((&self.dir, dir));
         }
-        if self.durability == Durability::Full {
-            sync_dir(&self.dir)?;
-        }
+        flush(&batch, self.durability)?;
         if let Some(lease) = &mut writer.lease {
             lease.dirty = false;
         }
         writer.unsynced.clear();
         writer.foreign.clear();
         Ok(())
+    }
+
+    /// Notes whether enough segment indexes have piled up to merge them.
+    fn note_own_indexes(&self) {
+        if self.merge_threshold == 0 {
+            return;
+        }
+        let own = self
+            .read_catalog()
+            .active
+            .iter()
+            .filter(|active| active.source.kind != SourceKind::Merged)
+            .count();
+        if own >= self.merge_threshold {
+            self.merge_due.store(true, Ordering::Release);
+        }
     }
 
     fn lock_writer(&self) -> MutexGuard<'_, Writer> {
@@ -1001,6 +1285,14 @@ impl Segments {
                 writer
             }
         }
+    }
+
+    fn read_catalog(&self) -> std::sync::RwLockReadGuard<'_, Catalog> {
+        self.catalog.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write_catalog(&self) -> std::sync::RwLockWriteGuard<'_, Catalog> {
+        self.catalog.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -1019,6 +1311,110 @@ impl Catalog {
         self.by_name.insert(name.to_owned(), index);
         index
     }
+
+    /// What this handle knows of a segment's state.
+    fn state(&self, name: &str) -> Option<SegmentState> {
+        let &segment = self.by_name.get(name)?;
+        Some(self.segments[segment as usize].state)
+    }
+
+    /// Registers an index, numbering the segments it covers, and returns its
+    /// number. An index already registered keeps its number.
+    fn register(&mut self, source: Source) -> u32 {
+        if let Some(&number) = self.by_file.get(&source.file) {
+            return number;
+        }
+        let mut source = source;
+        for (name, segment) in &mut source.covered {
+            *segment = self.segment(name);
+        }
+        let number = u32::try_from(self.sources.len()).expect("fewer than 2^32 indexes");
+        self.by_file.insert(source.file.clone(), number);
+        self.sources.push(Arc::new(source));
+        number
+    }
+
+    /// The number of a segment's own index, registered if new. `known` is
+    /// what it covers and its entries, when this handle just wrote it.
+    fn own_source(&mut self, dir: &Path, name: &str, known: Option<(Covered, Vec<Entry>)>) -> u32 {
+        let file = format!("{name}.idx");
+        if let Some(&number) = self.by_file.get(&file) {
+            return number;
+        }
+        self.register(Source::own(dir, name, known))
+    }
+
+    /// The number of a source that scans a sealed segment no readable index
+    /// covers.
+    fn scan_source(&mut self, name: &str) -> u32 {
+        let file = format!("{name}.seg");
+        if let Some(&number) = self.by_file.get(&file) {
+            return number;
+        }
+        self.register(Source::scan(name))
+    }
+
+    /// Makes `source` serve the segment `name` if it is better than what
+    /// serves it now, and returns whether anything changed. A segment that
+    /// was open forgets its journal's entries: the index serves them now.
+    fn seal(&mut self, name: &str, source: u32) -> bool {
+        let segment = self.segment(name);
+        let state = &mut self.segments[segment as usize].state;
+        match *state {
+            SegmentState::Sealed { source: current }
+                if current == source
+                    || self.sources[current as usize].rank()
+                        >= self.sources[source as usize].rank() =>
+            {
+                false
+            }
+            SegmentState::Sealed { .. } => {
+                *state = SegmentState::Sealed { source };
+                true
+            }
+            SegmentState::Open { .. } => {
+                *state = SegmentState::Sealed { source };
+                self.open.retain(|_, location| location.segment != segment);
+                true
+            }
+        }
+    }
+
+    /// Rebuilds the list of indexes lookups go through: those that serve a
+    /// segment, the segments' own first, which are the youngest, then the
+    /// merged ones, smallest first.
+    fn refresh(&mut self) {
+        let mut active: Vec<Active> = Vec::new();
+        for (number, source) in self.sources.iter().enumerate() {
+            let serves: Box<[bool]> = source
+                .covered
+                .iter()
+                .map(|(_, segment)| {
+                    self.segments[*segment as usize].state
+                        == SegmentState::Sealed {
+                            source: number as u32,
+                        }
+                })
+                .collect();
+            if serves.iter().any(|serves| *serves) {
+                active.push(Active {
+                    source: Arc::clone(source),
+                    serves,
+                });
+            }
+        }
+        active.sort_by(|a, b| {
+            let key = |active: &Active| {
+                (
+                    active.source.kind,
+                    active.source.covered.len(),
+                    active.source.file.clone(),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        self.active = Arc::from(active);
+    }
 }
 
 /// The error for an object whose stored form does not fit in a record.
@@ -1026,9 +1422,10 @@ pub(crate) fn too_large(size: u64) -> Error {
     Error::ObjectTooLarge { size }
 }
 
-/// The segments in `dir` and which of their files exist, by name.
-pub(crate) fn list(dir: &Path) -> Result<BTreeMap<String, Files>, Error> {
-    let mut out = BTreeMap::new();
+/// What `seg/` holds: segments and which of their files exist, and merged
+/// indexes.
+pub(crate) fn list(dir: &Path) -> Result<Listing, Error> {
+    let mut out = Listing::default();
     for entry in fs::read_dir(dir).map_err(io_error("list", dir))? {
         let entry = entry.map_err(io_error("list", dir))?;
         let file_name = entry.file_name();
@@ -1039,7 +1436,11 @@ pub(crate) fn list(dir: &Path) -> Result<BTreeMap<String, Files>, Error> {
         if !is_random_name(stem) {
             continue;
         }
-        let files: &mut Files = out.entry(stem.to_owned()).or_default();
+        if extension == "midx" {
+            out.merged.insert(stem.to_owned());
+            continue;
+        }
+        let files: &mut Files = out.segments.entry(stem.to_owned()).or_default();
         match extension {
             "seg" => files.seg = true,
             "jrn" => files.jrn = true,

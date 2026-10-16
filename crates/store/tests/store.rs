@@ -197,7 +197,12 @@ fn opening_needs_a_store() {
 
 #[test]
 fn full_segments_are_sealed() {
-    let (_dir, store) = new_store(options(4096, 1000));
+    // Indexes are not merged here: see the indexes tests.
+    let unmerged = Options {
+        merge_threshold: 0,
+        ..options(4096, 1000)
+    };
+    let (_dir, store) = new_store(unmerged);
     let root = store.root().to_path_buf();
     let objects = payloads(120);
     for (kind, payload) in &objects {
@@ -711,7 +716,7 @@ fn many_threads_can_create_the_same_store() {
     }
     assert_eq!(
         fs::read_to_string(root.join("format")).unwrap(),
-        "object-format=blake3-dk-v1\nstorage=2\n"
+        "object-format=blake3-dk-v1\nstorage=3\n"
     );
     assert_clean(&store);
 }
@@ -1022,6 +1027,7 @@ fn full_durability_works_the_same() {
         durability: Durability::Full,
         segment_size: 2048,
         checkpoint_interval: 2,
+        ..Options::default()
     };
     let (_dir, store) = new_store(options.clone());
     let root = store.root().to_path_buf();

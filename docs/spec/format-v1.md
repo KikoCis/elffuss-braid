@@ -324,31 +324,38 @@ section 1.
 .braid/store/seg/<name>.seg    object records, append-only
 .braid/store/seg/<name>.jrn    journal of a segment that is still open
 .braid/store/seg/<name>.idx    sorted index of a sealed segment
+.braid/store/seg/<name>.midx   merged index of several sealed segments
+.braid/store/seg/merge.lock    empty; locked exclusively while indexes are merged
 .braid/store/oplog/lock        empty; locked exclusively by transactions, shared by readers
 .braid/store/oplog/log         operation records, append-only
 .braid/store/oplog/ckpt.<seq>  every ref as of operation <seq>
 .braid/store/derived/index     where the records of derived values are, by key
 ```
 
-Segment names are 32 random lowercase hex digits. Files whose names start with
-`tmp-` are still being written, or were left by a writer that died; they are
-never read, and are removed once they are a minute old and unlocked.
+Segment and merged index names are 32 random lowercase hex digits. Files whose
+names start with `tmp-` are still being written, or were left by a writer that
+died; they are never read, and are removed once they are a minute old and
+unlocked.
 
 **Storage version.** The `format` file has two lines: the object ids
 (`object-format=blake3-dk-v1`), and the storage version, what a reader must
-understand to use the store (`storage=2`). A store without the second line has
+understand to use the store (`storage=3`). A store without the second line has
 storage version 1: records stored whole (codecs 0 and 1), which every version
-of braid reads. Version 2 adds deltas (codec 3) and chunked blobs (codec 4). A
-version of braid refuses a store of a later storage version, and a `format`
-file with any line it does not know; versions from before storage versions
-compare the whole file with the first line, so they refuse version 2 too.
+of braid reads. Version 2 adds deltas (codec 3) and chunked blobs (codec 4).
+Version 3 adds indexes of version 2, whose every part carries its own
+checksum, and merged indexes, which take the place of the segment indexes they
+merge, so that a sealed segment may have no index of its own. A version of
+braid refuses a store of a later storage version, and a `format` file with any
+line it does not know; versions from before storage versions compare the whole
+file with the first line, so they refuse version 2 and later too.
 
 New stores start at the current version. A store is raised only when a writer
-is about to append the first record that needs a later version, or when a
-handle that opens it finds such records already there. The writer takes an
+is about to write the first record or index that needs a later version (a
+delta or a chunked blob needs 2, an index of version 2 needs 3), or when a
+handle finds records that need it already there. The writer takes an
 exclusive lock on `format.lock`, reads `format` again, and if it is still
 older publishes the new one through a temporary file and a rename: the version
-never goes down, and it is durable before any record that needs it.
+never goes down, and it reaches the disk before anything that needs it.
 
 A journal entry or an index whose checksum holds but which names an object
 kind or a codec the reader does not know, sets a reserved field, or has a later
@@ -361,13 +368,60 @@ does not understand.
 non-blocking lock on: an unlocked open segment if there is one, else a new one
 made with an exclusive create. The kernel releases the lock when the writer
 dies, and the next writer resumes after what the segment's journal lists.
-Segments are never truncated, since others may be reading them. A segment past
-the size threshold is sealed: flushed, given a sorted index through a temporary
-file and a rename, and its journal removed; it is never written again.
+Segments are never truncated, since others may be reading them. A segment is
+sealed once it holds 256 MiB, or once its journal lists 8,192 records: given a
+sorted index through a temporary file, flushed together with the segment, and
+a rename, and its journal removed; it is never written again. A segment is
+open while it has a journal and no index of its own; a writer takes over only
+such a segment, and never makes a journal for a segment that has none.
 
-**Publish order.** Objects are written and synced before the op log records an
-operation that refers to them, so the op log never points at an object that is
-not durable.
+**Lookups.** A reader keeps a map of where objects are only for the open
+segments, from their journals, which the record limit keeps short. It looks up
+sealed segments in their indexes, binary searching the fan-out bucket of the
+id's first byte, and reads an index as lookups need it: the head on first
+use, then one bucket at a time. Opening a store reads the open journals and
+the heads of the merged indexes, whatever the store holds. On a miss, a reader
+reads the directory again once. Of several copies of an object, a lookup takes
+the first that serves its purpose; a delta's base must be a copy stored whole,
+and a chunk a copy that is not chunked.
+
+**Merged indexes.** Once 8 segment indexes are there, a writer merges indexes
+at its next sync, or at the end of its next transaction, under an exclusive,
+non-blocking lock on `seg/merge.lock`, so that one process merges at a time
+and the others go on. A merge takes every segment index that no merged index
+covers, then the merged indexes that hold at most twice as many entries as it
+took so far, smallest first, so that each merged index left holds more than
+twice what the new one does, and an entry is written again a number of times
+that grows with the logarithm of the store's size. It reads them whole, checking every entry (one found damaged is made
+again from its segments' records), and writes one copy of each object, the
+best ranked, as a new merged index through a temporary file, a flush and a
+rename, then flushes the directory. Only then does it remove what it merged:
+first the journals that sealers which died left next to indexes it took,
+flushing the directory, so that a merged segment never looks open, then the
+indexes, with any that an earlier merge cut short left behind. A merge cut
+short at any point leaves a store that reads the same: a segment covered by
+several indexes is served by a merged index before its own, and by the merged
+index that covers more segments, the newer, before one that covers fewer.
+
+**Publish order.** Objects are written and flushed before the op log records
+an operation that refers to them, so the op log never points at an object that
+is not durable. An index is flushed in one batch with the segment it points
+into, before its rename, and a file published through a rename never reaches
+the disk before its contents.
+
+**Flushes.** A store is opened in one of two modes. `ordered`, the local
+default, may lose the last operations on power loss but never leaves a store
+inconsistent; `full`, the server default, makes what a transaction
+acknowledges durable before it returns. Flushes come in batches: a sync flushes
+every segment and journal it covers together, and a transaction flushes its
+objects in one batch, then appends its record and flushes the log. On Apple
+systems, where `fsync` keeps no order and `F_FULLFSYNC` has the drive write
+out its whole cache, every file of a batch but the last is moved to the drive
+with `fsync`, and the last is flushed with `F_BARRIERFSYNC` (`ordered`), a
+barrier: the writes issued before it reach the medium before any issued after
+it; or with `F_FULLFSYNC` (`full`), which covers the whole batch. Other systems
+have no barrier to ask for, and each file of a batch is flushed on its own:
+with `fdatasync` (`ordered`) or `fsync` (`full`) on Linux.
 
 **Object record**, starting at a multiple of 8 bytes:
 
@@ -468,7 +522,34 @@ u64 raw_len | u32 record crc | u32 crc32c of the 60 bytes before it
 Entries that fail their CRC are skipped, and a new lease holder writes after the
 last valid one.
 
-**Index**, written once when a segment is sealed:
+**Index**, version 2, written once when a segment is sealed (`<name>.idx`,
+one segment) or when indexes are merged (`<name>.midx`, several):
+
+```
+[8] "braididx" | u32 version = 2 | u32 0 | u64 count | u32 segments
+u32 crc32c of the 28 bytes before it
+segments × ([16] segment name | u64 segment length)
+256 × u32 fan-out: entry b counts the ids whose first byte is at most b
+u32 crc32c of the segment table and the fan-out
+count × 64-byte entries, ids strictly ascending:
+    [32] id | u64 offset | u32 stored_len | u8 kind | u8 codec | u16 segment
+    u64 raw_len | u32 record crc | u32 crc32c of the 60 bytes before it
+```
+
+An entry is a journal entry whose reserved field holds the number of its
+record's segment in the table: 0 in the index of one segment, and at most
+65,536 segments per index. A segment name is its 32 hex digits as 16 bytes,
+and its length the size it had when it was sealed; no entry points past it.
+The head (everything up to the second checksum) and every entry carry their
+own checksums, so that a reader checks what it reads and nothing more. The
+first 32 bytes of every later index version carry their own checksum too, so
+that a reader can tell a later version from damage without knowing its
+layout. Only entries whose record checks out go in. Of several copies of an
+object, a copy stored whole wins over a delta, a delta over a chunked blob,
+and the first of equals wins; a merged index keeps one copy of each object.
+
+Stores of storage versions 1 and 2 hold indexes of version 1, which readers of
+version 3 still read, whole, and merge like the others:
 
 ```
 [8] "braididx" | u32 version = 1 | u32 0 | u64 count | u64 segment length
@@ -479,9 +560,9 @@ count × (u64 offset | u32 stored_len | u8 kind | u8 codec | u16 0
 [32] BLAKE3 hash of everything before it
 ```
 
-Only entries whose record checks out go in. Of several copies of an object, a
-copy stored whole wins over a delta, a delta over a chunked blob, and the first
-of equals wins.
+A damaged index, of either version, is worked around by scanning the segments
+it covers; fsck reports it. A sealed segment that no readable index covers,
+when the head of a merged index is damaged, is scanned the same way.
 
 **Operation record**:
 
@@ -547,7 +628,7 @@ take 2.5 to 3.1 times what `git gc --aggressive` packs them into, and 6.1 to
   read (logarithmic in the number of versions) rather than exactly one.
 - *Per-repository dictionaries (codec 2)*, for the small objects deltas do not
   help: trees, changesets and raw commits.
-- A binary fuse filter in indexes for fast misses, and merged indexes.
+- A binary fuse filter in indexes for fast misses.
 - Garbage collection (`braid gc`), which must keep every base and chunk that
   something still needs.
 

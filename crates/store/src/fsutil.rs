@@ -1,8 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 UtopiaIA
 
-//! File system helpers: positional I/O, syncs, unique names, and files
+//! File system helpers: positional I/O, flushes, unique names, and files
 //! published whole through a temporary file and a rename.
+//!
+//! # Flushes
+//!
+//! Every flush goes through [`flush`], which takes a batch of files and
+//! makes everything written to them so far durable, `Full`, or ordered
+//! before anything written after it returns, `Ordered`:
+//!
+//! - **Apple systems.** `fsync` moves a file's data to the drive, but the
+//!   drive may keep it in its cache and write it out in any order;
+//!   `F_FULLFSYNC` also has the drive write out its whole cache, which can
+//!   cost many times what the rest of a transaction does; `F_BARRIERFSYNC`
+//!   makes every write issued before it reach the medium before any write
+//!   issued after it, without waiting for the cache. A batch moves every
+//!   file but the last with `fsync`, then ends with one `F_BARRIERFSYNC`
+//!   (`Ordered`) or `F_FULLFSYNC` (`Full`), which covers the writes of the
+//!   whole batch, since cache and barrier are the drive's.
+//! - **Elsewhere.** `fdatasync` (`Ordered`) or `fsync` (`Full`), file by
+//!   file. Linux has no barrier to ask for: each of them writes out what
+//!   the drive holds.
+//!
+//! Directories are flushed the same way on Unix systems, and not at all
+//! elsewhere.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
@@ -74,27 +96,170 @@ pub(crate) fn read_range(file: &File, offset: u64, len: u64) -> io::Result<Vec<u
     Ok(buf)
 }
 
-/// Flushes a file's data: its contents and what is needed to read them back
-/// (`Ordered`), or its contents and all of its metadata (`Full`).
-pub(crate) fn sync_file(file: &File, durability: Durability) -> io::Result<()> {
-    match durability {
-        Durability::Ordered => file.sync_data(),
-        Durability::Full => file.sync_all(),
+/// Flushes a batch of files, each with the path errors name: everything
+/// written to them before the call is durable once it returns (`Full`), or
+/// reaches the disk before anything written after it (`Ordered`). See the
+/// module documentation for what that takes on each system.
+pub(crate) fn flush(files: &[(&Path, &File)], durability: Durability) -> Result<(), Error> {
+    let Some(((last_path, last), rest)) = files.split_last() else {
+        return Ok(());
+    };
+    #[cfg(test)]
+    observe::before(files);
+    #[cfg(target_vendor = "apple")]
+    {
+        for (path, file) in rest {
+            apple::push(file).map_err(io_error("sync", path))?;
+        }
+        match durability {
+            Durability::Ordered => apple::barrier(last),
+            Durability::Full => apple::full(last),
+        }
+        .map_err(io_error("sync", last_path))?;
     }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = (rest, last, last_path);
+        for (path, file) in files {
+            match durability {
+                Durability::Ordered => file.sync_data(),
+                Durability::Full => file.sync_all(),
+            }
+            .map_err(io_error("sync", path))?;
+        }
+    }
+    #[cfg(test)]
+    observe::after(files);
+    Ok(())
 }
 
-/// Flushes a directory, so that files created or renamed in it stay there.
-pub(crate) fn sync_dir(path: &Path) -> Result<(), Error> {
+/// Flushes one file, as [`flush`] does a batch.
+pub(crate) fn flush_file(path: &Path, file: &File, durability: Durability) -> Result<(), Error> {
+    flush(&[(path, file)], durability)
+}
+
+/// A directory opened to flush it, so that files created, renamed or
+/// removed in it stay that way. `None` where directories cannot be opened
+/// as files, and need no flush.
+pub(crate) fn open_dir(path: &Path) -> Result<Option<File>, Error> {
     #[cfg(unix)]
     {
         File::open(path)
-            .and_then(|dir| dir.sync_all())
-            .map_err(io_error("sync directory", path))
+            .map(Some)
+            .map_err(io_error("open directory", path))
     }
     #[cfg(not(unix))]
     {
         let _ = path;
-        Ok(())
+        Ok(None)
+    }
+}
+
+/// Flushes a directory, so that files created, renamed or removed in it
+/// stay that way.
+pub(crate) fn sync_dir(path: &Path, durability: Durability) -> Result<(), Error> {
+    match open_dir(path)? {
+        Some(dir) => flush_file(path, &dir, durability),
+        None => Ok(()),
+    }
+}
+
+/// The flushes of Apple systems, through `nix`, which wraps the calls safely.
+#[cfg(target_vendor = "apple")]
+mod apple {
+    use std::fs::File;
+    use std::io;
+
+    use nix::errno::Errno;
+    use nix::fcntl::{FcntlArg, fcntl};
+
+    /// `fsync`: the drive has the data, in its cache, in no particular order.
+    pub fn push(file: &File) -> io::Result<()> {
+        retry(|| nix::unistd::fsync(file))
+    }
+
+    /// `F_BARRIERFSYNC`: `fsync`, then a barrier, so that the writes before
+    /// it reach the medium before any after it. Where the file system does
+    /// not take barriers, a full flush stands in for one.
+    pub fn barrier(file: &File) -> io::Result<()> {
+        match retry(|| fcntl(file, FcntlArg::F_BARRIERFSYNC).map(drop)) {
+            Ok(()) => Ok(()),
+            Err(_) => full(file),
+        }
+    }
+
+    /// `F_FULLFSYNC`: `fsync`, then the drive writes out its whole cache.
+    pub fn full(file: &File) -> io::Result<()> {
+        retry(|| fcntl(file, FcntlArg::F_FULLFSYNC).map(drop))
+    }
+
+    fn retry(mut call: impl FnMut() -> nix::Result<()>) -> io::Result<()> {
+        loop {
+            match call() {
+                Err(Errno::EINTR) => continue,
+                result => return result.map_err(io::Error::from),
+            }
+        }
+    }
+}
+
+/// What tests see of flushes: a hook called before and after every batch,
+/// with the paths of its files, on the thread that flushes.
+#[cfg(test)]
+pub(crate) mod observe {
+    use std::cell::RefCell;
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+
+    /// When a batch is reported.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum When {
+        /// About to flush: what was written may or may not be durable.
+        Before,
+        /// Flushed.
+        After,
+    }
+
+    type Hook = Box<dyn FnMut(When, &[PathBuf])>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Calls `hook` for every batch this thread flushes, until the returned
+    /// guard is dropped.
+    pub(crate) fn watch(hook: impl FnMut(When, &[PathBuf]) + 'static) -> Guard {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Guard
+    }
+
+    /// Stops the hook when dropped.
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn call(when: When, files: &[(&Path, &File)]) {
+        let paths: Vec<PathBuf> = files.iter().map(|(path, _)| path.to_path_buf()).collect();
+        HOOK.with(|slot| {
+            // A hook that flushes itself does not see its own batches.
+            if let Ok(mut hook) = slot.try_borrow_mut()
+                && let Some(hook) = hook.as_mut()
+            {
+                hook(when, &paths);
+            }
+        });
+    }
+
+    pub(super) fn before(files: &[(&Path, &File)]) {
+        call(When::Before, files);
+    }
+
+    pub(super) fn after(files: &[(&Path, &File)]) {
+        call(When::After, files);
     }
 }
 
@@ -119,18 +284,29 @@ pub(crate) fn is_random_name(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Writes `bytes` as `dir/name` all at once: into a temporary file, flushed,
-/// then renamed over `name`, then the directory flushed. Readers see the old
-/// file or the new one, never a mix, even after a crash.
-pub(crate) fn publish_file(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), Error> {
+/// Writes `bytes` as `dir/name` all at once: into a temporary file, flushed
+/// in one batch with `with`, then renamed over `name`, then the directory
+/// flushed. Readers see the old file or the new one, never a mix, even after
+/// a crash, and the new one never reaches the disk before what `with` holds.
+pub(crate) fn publish_file(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    durability: Durability,
+    with: &[(&Path, &File)],
+) -> Result<(), Error> {
     let (temp_path, mut file) = create_temp(dir)?;
     let target = dir.join(name);
     let result = file
         .write_all(bytes)
-        .and_then(|()| file.sync_all())
         .map_err(io_error("write", &temp_path))
+        .and_then(|()| {
+            let mut batch = with.to_vec();
+            batch.push((&temp_path, &file));
+            flush(&batch, durability)
+        })
         .and_then(|()| fs::rename(&temp_path, &target).map_err(io_error("rename", &temp_path)))
-        .and_then(|()| sync_dir(dir));
+        .and_then(|()| sync_dir(dir, durability));
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);
     }
@@ -223,8 +399,8 @@ mod tests {
     #[test]
     fn publish_replaces_whole_files() {
         let dir = tempfile::tempdir().unwrap();
-        publish_file(dir.path(), "f", b"one").unwrap();
-        publish_file(dir.path(), "f", b"two").unwrap();
+        publish_file(dir.path(), "f", b"one", Durability::Ordered, &[]).unwrap();
+        publish_file(dir.path(), "f", b"two", Durability::Full, &[]).unwrap();
         assert_eq!(fs::read(dir.path().join("f")).unwrap(), b"two");
         assert_eq!(count_temps(dir.path()), 0);
     }

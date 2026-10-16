@@ -13,17 +13,21 @@
 //! what a reader must understand to use the store. A store without it has
 //! storage version 1: records stored whole (codecs 0 and 1), which every
 //! version of braid reads. Version 2 adds deltas (codec 3) and chunked
-//! blobs (codec 4). Versions of braid from before storage versions compare
-//! the whole file with the first line, so they refuse a store of version 2,
-//! and this version refuses any version after 2, and any line it does not
+//! blobs (codec 4). Version 3 adds indexes of version 2, whose entries carry
+//! their own checksums, and merged indexes, which take the place of the
+//! indexes they merge, so that a sealed segment may have no index of its
+//! own. Versions of braid from before storage versions compare the whole
+//! file with the first line, so they refuse a store of version 2 or later,
+//! and this version refuses any version after 3, and any line it does not
 //! know.
 //!
-//! New stores start at the current version. A store of version 1 is raised
-//! to 2 only when a writer is about to append its first record of codec 3
-//! or 4, or when a handle opening it finds such records already there. The
-//! file is rewritten through a temporary file and a rename, under an
-//! exclusive lock on `format.lock`, after reading it again: a store is never
-//! lowered, and its new version is durable before any record that needs it.
+//! New stores start at the current version. An older store is raised only
+//! when a writer is about to append its first record of codec 3 or 4 (to
+//! 2), or to write its first index of version 2 (to 3), or when a handle
+//! finds records that need a later version already there. The file is
+//! rewritten through a temporary file and a rename, under an exclusive lock
+//! on `format.lock`, after reading it again: a store is never lowered, and
+//! its new version reaches the disk before anything that needs it.
 
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -31,7 +35,7 @@ use std::path::Path;
 
 use crate::error::{Error, io_error};
 use crate::fsutil::publish_file;
-use crate::{OBJECT_FORMAT, STORAGE_VERSION};
+use crate::{Durability, OBJECT_FORMAT, STORAGE_VERSION};
 
 /// The bytes of the `format` file of a store of storage `version`.
 pub(crate) fn contents(version: u32) -> String {
@@ -94,7 +98,7 @@ pub(crate) fn read(root: &Path) -> Result<u32, Error> {
 /// Raises the storage version of the store at `root` to at least `version`,
 /// under the lock that every writer takes to change it. Fails, changing
 /// nothing, if the store needs a newer version of braid by now.
-pub(crate) fn raise(root: &Path, version: u32) -> Result<(), Error> {
+pub(crate) fn raise(root: &Path, version: u32, durability: Durability) -> Result<(), Error> {
     let lock_path = root.join("format.lock");
     let lock = OpenOptions::new()
         .write(true)
@@ -104,7 +108,13 @@ pub(crate) fn raise(root: &Path, version: u32) -> Result<(), Error> {
         .map_err(io_error("create", &lock_path))?;
     lock.lock().map_err(io_error("lock", &lock_path))?;
     if read(root)? < version {
-        publish_file(root, "format", contents(version).as_bytes())?;
+        publish_file(
+            root,
+            "format",
+            contents(version).as_bytes(),
+            durability,
+            &[],
+        )?;
     }
     Ok(())
 }
@@ -123,8 +133,10 @@ mod tests {
     fn versions_are_read_and_written() {
         assert_eq!(read_text(&contents(1)).unwrap(), 1);
         assert_eq!(read_text(&contents(2)).unwrap(), 2);
+        assert_eq!(read_text(&contents(3)).unwrap(), 3);
         assert_eq!(contents(1), "object-format=blake3-dk-v1\n");
         assert_eq!(contents(2), "object-format=blake3-dk-v1\nstorage=2\n");
+        assert_eq!(contents(3), "object-format=blake3-dk-v1\nstorage=3\n");
         // Without the final newline too.
         assert_eq!(
             read_text("object-format=blake3-dk-v1\nstorage=2").unwrap(),
@@ -134,9 +146,9 @@ mod tests {
 
     #[test]
     fn newer_versions_and_unknown_lines_are_refused() {
-        let err = read_text("object-format=blake3-dk-v1\nstorage=3\n").unwrap_err();
+        let err = read_text("object-format=blake3-dk-v1\nstorage=4\n").unwrap_err();
         assert!(matches!(err, Error::NewerStore { .. }), "{err}");
-        assert!(err.to_string().contains("storage version 3"), "{err}");
+        assert!(err.to_string().contains("storage version 4"), "{err}");
         for bad in [
             "object-format=sha1\n",
             "object-format=blake3-dk-v1\nstorage=\n",
@@ -160,14 +172,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("format");
         fs::write(&path, contents(1)).unwrap();
-        raise(dir.path(), 2).unwrap();
+        raise(dir.path(), 2, Durability::Ordered).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), contents(2));
-        raise(dir.path(), 1).unwrap();
+        raise(dir.path(), 1, Durability::Ordered).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), contents(2));
+        raise(dir.path(), 3, Durability::Full).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents(3));
         // A store that went past this version is left alone.
         fs::write(&path, "object-format=blake3-dk-v1\nstorage=9\n").unwrap();
         assert!(matches!(
-            raise(dir.path(), 2),
+            raise(dir.path(), 2, Durability::Ordered),
             Err(Error::NewerStore { .. })
         ));
         assert_eq!(

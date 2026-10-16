@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use braid_format::{IdHasher, Kind, ObjectId};
 
-use super::{Location, Record, Segments, Wanted, too_large};
+use super::{ANY, Location, NOT_CHUNKED, Record, Segments, WHOLE, Wanted, too_large};
 use crate::chunks::{self, CHUNKED_MIN, ChunkRef};
 use crate::delta;
 use crate::error::Error;
@@ -204,12 +204,12 @@ impl Segments {
     /// similar, with its payload: that object if it is stored whole, or its
     /// base if it is a delta. `None` when there is none to use.
     fn delta_base(&self, similar: &ObjectId) -> Option<(ObjectId, Arc<Vec<u8>>)> {
-        let location = self.location(similar)?;
+        let location = self.locate(similar, NOT_CHUNKED).ok()??;
         let (base, location) = match location.entry.codec {
             codec if record::is_whole(codec) => (*similar, location),
             CODEC_DELTA => {
                 let base = self.reference(&location).ok()??;
-                (base, self.location(&base)?)
+                (base, self.locate(&base, WHOLE).ok()??)
             }
             _ => return None,
         };
@@ -239,7 +239,7 @@ impl Segments {
 
     /// Reads an object, checking every record it takes and its id.
     pub fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, Error> {
-        let Some(location) = self.find(id)? else {
+        let Some(location) = self.find(id, ANY)? else {
             return Ok(None);
         };
         let payload = if location.entry.codec == CODEC_CHUNKED {
@@ -267,7 +267,7 @@ impl Segments {
         id: &ObjectId,
         out: &mut dyn Write,
     ) -> Result<Option<(Kind, u64)>, Error> {
-        let Some(location) = self.find(id)? else {
+        let Some(location) = self.find(id, ANY)? else {
             return Ok(None);
         };
         let mut write = |bytes: &[u8]| {
@@ -296,24 +296,19 @@ impl Segments {
         }
     }
 
-    /// The payload of the base a delta names. A handle that only knows a
-    /// copy of the base that is not whole looks at the directory again once,
-    /// since the copy the delta was made against may be new to it.
+    /// The payload of the base a delta names. A handle that knows no copy
+    /// of the base stored whole looks at the directory again once, since the
+    /// copy the delta was made against may be new to it.
     fn base_of(&self, delta: &Record, base: &ObjectId) -> Result<Arc<Vec<u8>>, Error> {
         if let Some(payload) = self.bases.get(base) {
             return Ok(payload);
         }
-        let mut location = self.find(base)?;
-        if location.is_some_and(|found| !record::is_whole(found.entry.codec)) {
-            self.rescan()?;
-            location = self.location(base);
-        }
-        let location = match location {
-            None => return Err(delta.corrupt(format_args!("its base {base} is missing"))),
-            Some(found) if !record::is_whole(found.entry.codec) => {
+        let location = match self.find(base, WHOLE)? {
+            Some(found) => found,
+            None if self.locate(base, ANY)?.is_some() => {
                 return Err(delta.corrupt(format_args!("its base {base} is not stored whole")));
             }
-            Some(found) => found,
+            None => return Err(delta.corrupt(format_args!("its base {base} is missing"))),
         };
         self.base_payload(base, &location).map_err(|err| match err {
             Error::Corrupt { detail, .. } => delta.corrupt(format_args!("its base: {detail}")),
@@ -345,26 +340,27 @@ impl Segments {
 
     /// Reads one chunk of the chunked blob `list`.
     fn read_chunk(&self, list: &Record, chunk: &ChunkRef) -> Result<Vec<u8>, Error> {
-        let mut location = self.find(&chunk.id)?;
-        if location.is_some_and(|found| found.entry.codec == CODEC_CHUNKED) {
-            self.rescan()?;
-            location = self.location(&chunk.id);
-        }
-        let location = match location {
-            None => {
+        let location = match self.find(&chunk.id, NOT_CHUNKED)? {
+            None if self.locate(&chunk.id, ANY)?.is_none() => {
                 return Err(list.corrupt(format_args!("its chunk {} is missing", chunk.id)));
             }
+            None => None,
+            found => found,
+        };
+        let location = match location {
             Some(found)
-                if found.entry.codec == CODEC_CHUNKED
-                    || found.entry.kind != Kind::Blob
-                    || found.entry.raw_len != chunk.size =>
+                if found.entry.codec != CODEC_CHUNKED
+                    && found.entry.kind == Kind::Blob
+                    && found.entry.raw_len == chunk.size =>
             {
+                found
+            }
+            _ => {
                 return Err(list.corrupt(format_args!(
                     "its chunk {} is not stored as a blob of {} bytes",
                     chunk.id, chunk.size
                 )));
             }
-            Some(found) => found,
         };
         self.read_single(&location).map_err(|err| match err {
             Error::Corrupt { detail, .. } => list.corrupt(format_args!("its chunk: {detail}")),
@@ -403,11 +399,13 @@ mod tests {
     }
 
     fn codec(segments: &Segments, id: &ObjectId) -> u8 {
-        segments.location(id).unwrap().entry.codec
+        segments.locate(id, ANY).unwrap().unwrap().entry.codec
     }
 
     fn base(segments: &Segments, id: &ObjectId) -> Option<ObjectId> {
-        segments.reference(&segments.location(id).unwrap()).unwrap()
+        segments
+            .reference(&segments.locate(id, ANY).unwrap().unwrap())
+            .unwrap()
     }
 
     #[test]

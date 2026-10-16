@@ -59,7 +59,7 @@ pub struct Stats {
     pub record_bytes: u64,
     /// Bytes of segment files.
     pub segment_bytes: u64,
-    /// Bytes of indexes and journals.
+    /// Bytes of indexes, merged indexes and journals.
     pub index_bytes: u64,
 }
 
@@ -68,10 +68,10 @@ impl Store {
     /// as stored and decoded, and the size of the files that hold them.
     ///
     /// It reads the directory again first, then counts one copy of each
-    /// object from the indexes and journals: no payload is read, so the cost
-    /// follows the number of objects, not their size. Copies of an object
-    /// written twice by racing writers, and remains of writes cut short,
-    /// count in the file sizes only.
+    /// object from the indexes and journals, which it reads whole: no
+    /// payload is read, so the cost follows the number of objects, not
+    /// their size. Copies of an object written twice by racing writers, and
+    /// remains of writes cut short, count in the file sizes only.
     pub fn stats(&self) -> Result<Stats, Error> {
         self.segments.rescan()?;
         let mut kinds: Vec<KindStats> = Kind::ALL
@@ -102,7 +102,7 @@ impl Store {
             segment_bytes: 0,
             index_bytes: 0,
         };
-        for entry in self.segments.known_entries() {
+        for entry in self.segments.known_entries()? {
             let stored = u64::from(entry.stored_len);
             stats.objects += 1;
             stats.stored_bytes += stored;
@@ -124,24 +124,30 @@ impl Store {
         stats.kinds = kinds;
         stats.codecs = codecs;
         let dir = self.segments.dir();
-        for (name, files) in list(dir)? {
-            for (extension, present) in [("seg", files.seg), ("jrn", files.jrn), ("idx", files.idx)]
-            {
-                if !present {
-                    continue;
-                }
-                let path = self.segments.path(&name, extension);
-                let len = match fs::metadata(&path) {
-                    Ok(meta) => meta.len(),
-                    // A journal removed by sealing since the listing.
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
-                    Err(err) => return Err(io_error("read", &path)(err)),
-                };
-                if extension == "seg" {
-                    stats.segment_bytes += len;
-                } else {
-                    stats.index_bytes += len;
-                }
+        let listing = list(dir)?;
+        let files = listing
+            .segments
+            .iter()
+            .flat_map(|(name, files)| {
+                [("seg", files.seg), ("jrn", files.jrn), ("idx", files.idx)]
+                    .into_iter()
+                    .filter(|(_, present)| *present)
+                    .map(move |(extension, _)| (name, extension))
+            })
+            .chain(listing.merged.iter().map(|name| (name, "midx")));
+        for (name, extension) in files {
+            let path = self.segments.path(name, extension);
+            let len = match fs::metadata(&path) {
+                Ok(meta) => meta.len(),
+                // A journal removed by sealing, or an index by merging,
+                // since the listing.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(err) => return Err(io_error("read", &path)(err)),
+            };
+            if extension == "seg" {
+                stats.segment_bytes += len;
+            } else {
+                stats.index_bytes += len;
             }
         }
         Ok(stats)
