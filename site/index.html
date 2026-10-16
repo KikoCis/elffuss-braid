@@ -1,0 +1,741 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     Copyright (c) 2026 UtopiaIA -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elffuss Braid · version control for many agents at once</title>
+<meta name="description" content="Version control for repositories where many AI agents land changes at the same time. Written from scratch in Rust, with git at the edges. Pre-alpha, Apache-2.0.">
+<link rel="canonical" href="https://braid.elffuss.com/">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#090a11" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f4ee" media="(prefers-color-scheme: light)">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Elffuss">
+<meta property="og:title" content="Elffuss Braid">
+<meta property="og:description" content="Version control for repositories where many AI agents land changes at the same time. Written from scratch in Rust, with git at the edges. Pre-alpha, Apache-2.0.">
+<meta property="og:url" content="https://braid.elffuss.com/">
+<meta property="og:image" content="https://braid.elffuss.com/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Elffuss Braid logo, three strands braided together, above the line: Many agents. One main. No retry loop.">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="es_ES">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Elffuss Braid">
+<meta name="twitter:description" content="Version control for repositories where many AI agents land changes at the same time. Written from scratch in Rust, with git at the edges. Pre-alpha, Apache-2.0.">
+<meta name="twitter:image" content="https://braid.elffuss.com/og.png">
+<meta name="twitter:image:alt" content="The Elffuss Braid logo, three strands braided together, above the line: Many agents. One main. No retry loop.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="site.css">
+<script src="site.js"></script>
+</head>
+<body id="top">
+<a class="skip" href="#main"><span data-l="en" lang="en">Skip to content</span><span data-l="es" lang="es">Saltar al contenido</span></a>
+
+<header class="site-head">
+<div class="wrap head-row">
+<a class="brand" href="#top"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" class="mark" aria-hidden="true" focusable="false"><defs><mask id="hm-cut0" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M38.67 21.01C41.17 21.11 43.67 22.42 46.17 24.77C48.67 27.12 51.17 30.51 53.67 34.5C56.17 38.49 58.67 43.08 61.17 47.69C63.67 52.3 66.17 56.92 68.67 60.96M84.67 74.99C87.17 74.89 89.67 73.58 92.17 71.23C94.67 68.88 97.17 65.49 99.67 61.5C102.17 57.51 104.67 52.92 107.17 48.31C109.67 43.7 112.17 39.08 114.67 35.04M130.67 21.01C133.17 21.11 135.67 22.42 138.17 24.77C140.67 27.12 143.17 30.51 145.67 34.5C148.17 38.49 150.67 43.08 153.17 47.69C155.67 52.3 158.17 56.92 160.67 60.96M176.67 74.99C179.17 74.89 181.67 73.58 184.17 71.23C186.67 68.88 189.17 65.49 191.67 61.5C194.17 57.51 196.67 52.92 199.17 48.31C201.67 43.7 204.17 39.08 206.67 35.04M222.67 21.01C225.17 21.11 227.67 22.42 230.17 24.77C232.67 27.12 235.17 30.51 237.67 34.5C240.17 38.49 242.67 43.08 245.17 47.69C247.67 52.3 250.17 56.92 252.67 60.96M268.67 74.99C271.11 74.89 273.56 73.64 276 71.38C278.44 69.13 280.89 65.88 283.33 62.03C285.78 58.18 288.22 53.73 290.67 49.23C293.11 44.73 295.56 40.18 298 36.13" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask><mask id="hm-cut1" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M22 32.94C23.78 35.66 25.56 38.71 27.33 41.91C29.11 45.1 30.89 48.43 32.67 51.68C34.44 54.92 36.22 58.09 38 60.96M54 74.99C56.5 74.89 59 73.58 61.5 71.23C64 68.88 66.5 65.49 69 61.5C71.5 57.51 74 52.92 76.5 48.31C79 43.7 81.5 39.08 84 35.04M100 21.01C102.5 21.11 105 22.42 107.5 24.77C110 27.12 112.5 30.51 115 34.5C117.5 38.49 120 43.08 122.5 47.69C125 52.3 127.5 56.92 130 60.96M146 74.99C148.5 74.89 151 73.58 153.5 71.23C156 68.88 158.5 65.49 161 61.5C163.5 57.51 166 52.92 168.5 48.31C171 43.7 173.5 39.08 176 35.04M192 21.01C194.5 21.11 197 22.42 199.5 24.77C202 27.12 204.5 30.51 207 34.5C209.5 38.49 212 43.08 214.5 47.69C217 52.3 219.5 56.92 222 60.96M238 74.99C240.5 74.89 243 73.58 245.5 71.23C248 68.88 250.5 65.49 253 61.5C255.5 57.51 258 52.92 260.5 48.31C263 43.7 265.5 39.08 268 35.04" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask><mask id="hm-cut2" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M23.33 74.99C25.83 74.89 28.33 73.58 30.83 71.23C33.33 68.88 35.83 65.49 38.33 61.5C40.83 57.51 43.33 52.92 45.83 48.31C48.33 43.7 50.83 39.08 53.33 35.04M69.33 21.01C71.83 21.11 74.33 22.42 76.83 24.77C79.33 27.12 81.83 30.51 84.33 34.5C86.83 38.49 89.33 43.08 91.83 47.69C94.33 52.3 96.83 56.92 99.33 60.96M115.33 74.99C117.83 74.89 120.33 73.58 122.83 71.23C125.33 68.88 127.83 65.49 130.33 61.5C132.83 57.51 135.33 52.92 137.83 48.31C140.33 43.7 142.83 39.08 145.33 35.04M161.33 21.01C163.83 21.11 166.33 22.42 168.83 24.77C171.33 27.12 173.83 30.51 176.33 34.5C178.83 38.49 181.33 43.08 183.83 47.69C186.33 52.3 188.83 56.92 191.33 60.96M207.33 74.99C209.83 74.89 212.33 73.58 214.83 71.23C217.33 68.88 219.83 65.49 222.33 61.5C224.83 57.51 227.33 52.92 229.83 48.31C232.33 43.7 234.83 39.08 237.33 35.04M253.33 21.01C255.83 21.11 258.33 22.42 260.83 24.77C263.33 27.12 265.83 30.51 268.33 34.5C270.83 38.49 273.33 43.08 275.83 47.69C278.33 52.3 280.83 56.92 283.33 60.96" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask></defs><path d="M22 74.94C25.83 75.42 29.67 73 33.5 68.35C37.33 63.7 41.17 56.89 45 49.84C48.83 42.79 52.67 35.58 56.5 30.26C60.33 24.93 64.17 21.55 68 21.06C71.83 20.58 75.67 23 79.5 27.65C83.33 32.3 87.17 39.11 91 46.16C94.83 53.21 98.67 60.42 102.5 65.74C106.33 71.07 110.17 74.45 114 74.94C117.83 75.42 121.67 73 125.5 68.35C129.33 63.7 133.17 56.89 137 49.84C140.83 42.79 144.67 35.58 148.5 30.26C152.33 24.93 156.17 21.55 160 21.06C163.83 20.58 167.67 23 171.5 27.65C175.33 32.3 179.17 39.11 183 46.16C186.83 53.21 190.67 60.42 194.5 65.74C198.33 71.07 202.17 74.45 206 74.94C209.83 75.42 213.67 73 217.5 68.35C221.33 63.7 225.17 56.89 229 49.84C232.83 42.79 236.67 35.58 240.5 30.26C244.33 24.93 248.17 21.55 252 21.06C255.83 20.58 259.67 23 263.5 27.65C267.33 32.3 271.17 39.11 275 46.16C278.83 53.21 282.67 60.42 286.5 65.74C290.33 71.07 294.17 74.45 298 74.94" fill="none" class="sa" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round" mask="url(#hm-cut0)"/><path d="M22 36.13C25.83 29.78 29.67 24.75 33.5 22.46C37.33 20.17 41.17 20.64 45 23.75C48.83 26.86 52.67 32.56 56.5 39.25C60.33 45.94 64.17 53.52 68 59.87C71.83 66.22 75.67 71.25 79.5 73.54C83.33 75.83 87.17 75.36 91 72.25C94.83 69.14 98.67 63.44 102.5 56.75C106.33 50.06 110.17 42.48 114 36.13C117.83 29.78 121.67 24.75 125.5 22.46C129.33 20.17 133.17 20.64 137 23.75C140.83 26.86 144.67 32.56 148.5 39.25C152.33 45.94 156.17 53.52 160 59.87C163.83 66.22 167.67 71.25 171.5 73.54C175.33 75.83 179.17 75.36 183 72.25C186.83 69.14 190.67 63.44 194.5 56.75C198.33 50.06 202.17 42.48 206 36.13C209.83 29.78 213.67 24.75 217.5 22.46C221.33 20.17 225.17 20.64 229 23.75C232.83 26.86 236.67 32.56 240.5 39.25C244.33 45.94 248.17 53.52 252 59.87C255.83 66.22 259.67 71.25 263.5 73.54C267.33 75.83 271.17 75.36 275 72.25C278.83 69.14 282.67 63.44 286.5 56.75C290.33 50.06 294.17 42.48 298 36.13" fill="none" class="sb" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round" mask="url(#hm-cut1)"/><path d="M22 32.94C25.83 38.8 29.67 46.26 33.5 53.19C37.33 60.13 41.17 66.46 45 70.41C48.83 74.35 52.67 75.86 56.5 74.5C60.33 73.14 64.17 68.93 68 63.06C71.83 57.2 75.67 49.74 79.5 42.81C83.33 35.87 87.17 29.54 91 25.59C94.83 21.65 98.67 20.14 102.5 21.5C106.33 22.86 110.17 27.07 114 32.94C117.83 38.8 121.67 46.26 125.5 53.19C129.33 60.13 133.17 66.46 137 70.41C140.83 74.35 144.67 75.86 148.5 74.5C152.33 73.14 156.17 68.93 160 63.06C163.83 57.2 167.67 49.74 171.5 42.81C175.33 35.87 179.17 29.54 183 25.59C186.83 21.65 190.67 20.14 194.5 21.5C198.33 22.86 202.17 27.07 206 32.94C209.83 38.8 213.67 46.26 217.5 53.19C221.33 60.13 225.17 66.46 229 70.41C232.83 74.35 236.67 75.86 240.5 74.5C244.33 73.14 248.17 68.93 252 63.06C255.83 57.2 259.67 49.74 263.5 42.81C267.33 35.87 271.17 29.54 275 25.59C278.83 21.65 282.67 20.14 286.5 21.5C290.33 22.86 294.17 27.07 298 32.94" fill="none" class="sc" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round" mask="url(#hm-cut2)"/></svg><span lang="en">Elffuss Braid</span></a>
+<nav class="nav" aria-label="Sections" data-aria-en="Sections" data-aria-es="Secciones">
+<ul>
+<li><a href="#story"><span data-l="en" lang="en">Story</span><span data-l="es" lang="es">Historia</span></a></li>
+<li><a href="#how"><span data-l="en" lang="en">How it works</span><span data-l="es" lang="es">Cómo funciona</span></a></li>
+<li><a href="#start"><span data-l="en" lang="en">Quick start</span><span data-l="es" lang="es">Primeros pasos</span></a></li>
+<li><a href="#agents"><span data-l="en" lang="en">Agents</span><span data-l="es" lang="es">Agentes</span></a></li>
+<li><a href="#git">Git</a></li>
+<li><a href="#measured"><span data-l="en" lang="en">Measured</span><span data-l="es" lang="es">Medido</span></a></li>
+<li><a href="#honest"><span data-l="en" lang="en">Honest</span><span data-l="es" lang="es">Sin letra pequeña</span></a></li>
+<li><a href="https://github.com/KikoCis/elffuss-braid">GitHub</a></li>
+</ul>
+</nav>
+<div class="lang" role="group" aria-label="Language" data-aria-en="Language" data-aria-es="Idioma" hidden>
+<button type="button" data-set-lang="en" lang="en" aria-pressed="true" title="English">EN</button><button type="button" data-set-lang="es" lang="es" aria-pressed="false" title="Español">ES</button>
+</div>
+</div>
+</header>
+
+<main id="main" tabindex="-1">
+
+<section class="hero" aria-labelledby="hero-title">
+<div class="wrap hero-grid">
+<div class="hero-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" class="logo" role="img" aria-label="Three strands braided together" data-aria-en="Three strands braided together" data-aria-es="Tres hebras trenzadas"><defs><mask id="hl-cut0" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M38.67 21.01C41.17 21.11 43.67 22.42 46.17 24.77C48.67 27.12 51.17 30.51 53.67 34.5C56.17 38.49 58.67 43.08 61.17 47.69C63.67 52.3 66.17 56.92 68.67 60.96M84.67 74.99C87.17 74.89 89.67 73.58 92.17 71.23C94.67 68.88 97.17 65.49 99.67 61.5C102.17 57.51 104.67 52.92 107.17 48.31C109.67 43.7 112.17 39.08 114.67 35.04M130.67 21.01C133.17 21.11 135.67 22.42 138.17 24.77C140.67 27.12 143.17 30.51 145.67 34.5C148.17 38.49 150.67 43.08 153.17 47.69C155.67 52.3 158.17 56.92 160.67 60.96M176.67 74.99C179.17 74.89 181.67 73.58 184.17 71.23C186.67 68.88 189.17 65.49 191.67 61.5C194.17 57.51 196.67 52.92 199.17 48.31C201.67 43.7 204.17 39.08 206.67 35.04M222.67 21.01C225.17 21.11 227.67 22.42 230.17 24.77C232.67 27.12 235.17 30.51 237.67 34.5C240.17 38.49 242.67 43.08 245.17 47.69C247.67 52.3 250.17 56.92 252.67 60.96M268.67 74.99C271.11 74.89 273.56 73.64 276 71.38C278.44 69.13 280.89 65.88 283.33 62.03C285.78 58.18 288.22 53.73 290.67 49.23C293.11 44.73 295.56 40.18 298 36.13" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask><mask id="hl-cut1" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M22 32.94C23.78 35.66 25.56 38.71 27.33 41.91C29.11 45.1 30.89 48.43 32.67 51.68C34.44 54.92 36.22 58.09 38 60.96M54 74.99C56.5 74.89 59 73.58 61.5 71.23C64 68.88 66.5 65.49 69 61.5C71.5 57.51 74 52.92 76.5 48.31C79 43.7 81.5 39.08 84 35.04M100 21.01C102.5 21.11 105 22.42 107.5 24.77C110 27.12 112.5 30.51 115 34.5C117.5 38.49 120 43.08 122.5 47.69C125 52.3 127.5 56.92 130 60.96M146 74.99C148.5 74.89 151 73.58 153.5 71.23C156 68.88 158.5 65.49 161 61.5C163.5 57.51 166 52.92 168.5 48.31C171 43.7 173.5 39.08 176 35.04M192 21.01C194.5 21.11 197 22.42 199.5 24.77C202 27.12 204.5 30.51 207 34.5C209.5 38.49 212 43.08 214.5 47.69C217 52.3 219.5 56.92 222 60.96M238 74.99C240.5 74.89 243 73.58 245.5 71.23C248 68.88 250.5 65.49 253 61.5C255.5 57.51 258 52.92 260.5 48.31C263 43.7 265.5 39.08 268 35.04" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask><mask id="hl-cut2" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M23.33 74.99C25.83 74.89 28.33 73.58 30.83 71.23C33.33 68.88 35.83 65.49 38.33 61.5C40.83 57.51 43.33 52.92 45.83 48.31C48.33 43.7 50.83 39.08 53.33 35.04M69.33 21.01C71.83 21.11 74.33 22.42 76.83 24.77C79.33 27.12 81.83 30.51 84.33 34.5C86.83 38.49 89.33 43.08 91.83 47.69C94.33 52.3 96.83 56.92 99.33 60.96M115.33 74.99C117.83 74.89 120.33 73.58 122.83 71.23C125.33 68.88 127.83 65.49 130.33 61.5C132.83 57.51 135.33 52.92 137.83 48.31C140.33 43.7 142.83 39.08 145.33 35.04M161.33 21.01C163.83 21.11 166.33 22.42 168.83 24.77C171.33 27.12 173.83 30.51 176.33 34.5C178.83 38.49 181.33 43.08 183.83 47.69C186.33 52.3 188.83 56.92 191.33 60.96M207.33 74.99C209.83 74.89 212.33 73.58 214.83 71.23C217.33 68.88 219.83 65.49 222.33 61.5C224.83 57.51 227.33 52.92 229.83 48.31C232.33 43.7 234.83 39.08 237.33 35.04M253.33 21.01C255.83 21.11 258.33 22.42 260.83 24.77C263.33 27.12 265.83 30.51 268.33 34.5C270.83 38.49 273.33 43.08 275.83 47.69C278.33 52.3 280.83 56.92 283.33 60.96" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask></defs><path d="M22 74.94C25.83 75.42 29.67 73 33.5 68.35C37.33 63.7 41.17 56.89 45 49.84C48.83 42.79 52.67 35.58 56.5 30.26C60.33 24.93 64.17 21.55 68 21.06C71.83 20.58 75.67 23 79.5 27.65C83.33 32.3 87.17 39.11 91 46.16C94.83 53.21 98.67 60.42 102.5 65.74C106.33 71.07 110.17 74.45 114 74.94C117.83 75.42 121.67 73 125.5 68.35C129.33 63.7 133.17 56.89 137 49.84C140.83 42.79 144.67 35.58 148.5 30.26C152.33 24.93 156.17 21.55 160 21.06C163.83 20.58 167.67 23 171.5 27.65C175.33 32.3 179.17 39.11 183 46.16C186.83 53.21 190.67 60.42 194.5 65.74C198.33 71.07 202.17 74.45 206 74.94C209.83 75.42 213.67 73 217.5 68.35C221.33 63.7 225.17 56.89 229 49.84C232.83 42.79 236.67 35.58 240.5 30.26C244.33 24.93 248.17 21.55 252 21.06C255.83 20.58 259.67 23 263.5 27.65C267.33 32.3 271.17 39.11 275 46.16C278.83 53.21 282.67 60.42 286.5 65.74C290.33 71.07 294.17 74.45 298 74.94" fill="none" class="sa" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round" mask="url(#hl-cut0)" pathLength="1"/><path d="M22 36.13C25.83 29.78 29.67 24.75 33.5 22.46C37.33 20.17 41.17 20.64 45 23.75C48.83 26.86 52.67 32.56 56.5 39.25C60.33 45.94 64.17 53.52 68 59.87C71.83 66.22 75.67 71.25 79.5 73.54C83.33 75.83 87.17 75.36 91 72.25C94.83 69.14 98.67 63.44 102.5 56.75C106.33 50.06 110.17 42.48 114 36.13C117.83 29.78 121.67 24.75 125.5 22.46C129.33 20.17 133.17 20.64 137 23.75C140.83 26.86 144.67 32.56 148.5 39.25C152.33 45.94 156.17 53.52 160 59.87C163.83 66.22 167.67 71.25 171.5 73.54C175.33 75.83 179.17 75.36 183 72.25C186.83 69.14 190.67 63.44 194.5 56.75C198.33 50.06 202.17 42.48 206 36.13C209.83 29.78 213.67 24.75 217.5 22.46C221.33 20.17 225.17 20.64 229 23.75C232.83 26.86 236.67 32.56 240.5 39.25C244.33 45.94 248.17 53.52 252 59.87C255.83 66.22 259.67 71.25 263.5 73.54C267.33 75.83 271.17 75.36 275 72.25C278.83 69.14 282.67 63.44 286.5 56.75C290.33 50.06 294.17 42.48 298 36.13" fill="none" class="sb" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round" mask="url(#hl-cut1)" pathLength="1"/><path d="M22 32.94C25.83 38.8 29.67 46.26 33.5 53.19C37.33 60.13 41.17 66.46 45 70.41C48.83 74.35 52.67 75.86 56.5 74.5C60.33 73.14 64.17 68.93 68 63.06C71.83 57.2 75.67 49.74 79.5 42.81C83.33 35.87 87.17 29.54 91 25.59C94.83 21.65 98.67 20.14 102.5 21.5C106.33 22.86 110.17 27.07 114 32.94C117.83 38.8 121.67 46.26 125.5 53.19C129.33 60.13 133.17 66.46 137 70.41C140.83 74.35 144.67 75.86 148.5 74.5C152.33 73.14 156.17 68.93 160 63.06C163.83 57.2 167.67 49.74 171.5 42.81C175.33 35.87 179.17 29.54 183 25.59C186.83 21.65 190.67 20.14 194.5 21.5C198.33 22.86 202.17 27.07 206 32.94C209.83 38.8 213.67 46.26 217.5 53.19C221.33 60.13 225.17 66.46 229 70.41C232.83 74.35 236.67 75.86 240.5 74.5C244.33 73.14 248.17 68.93 252 63.06C255.83 57.2 259.67 49.74 263.5 42.81C267.33 35.87 271.17 29.54 275 25.59C278.83 21.65 282.67 20.14 286.5 21.5C290.33 22.86 294.17 27.07 298 32.94" fill="none" class="sc" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round" mask="url(#hl-cut2)" pathLength="1"/></svg></div>
+<div class="hero-copy">
+<p class="eyebrow"><span data-l="en" lang="en">Elffuss Braid · <span class="nw">pre-alpha</span> <span class="nw">· Apache-2.0</span></span><span data-l="es" lang="es">Elffuss Braid · <span class="nw">pre-alfa</span> <span class="nw">· Apache-2.0</span></span></p>
+<h1 id="hero-title"><span data-l="en" lang="en"><span class="nw">Many agents.</span> <span class="nw">One main.</span> <span class="nw">No retry loop.</span></span><span data-l="es" lang="es"><span class="nw">Muchos agentes.</span> <span class="nw">Un solo main.</span> <span class="nw">Sin reintentos.</span></span></h1>
+<p class="pitch" data-l="en" lang="en">Version control for repositories where many agents land changes at the same time.</p>
+<p class="pitch" data-l="es" lang="es">Control de versiones para repositorios en los que muchos agentes aterrizan cambios a la vez.</p>
+<p class="sub" data-l="en" lang="en">Written from scratch in Rust. Each agent commits in its own workspace, and a change that fell behind is rebased onto whatever landed first. Git stays at the edges, so GitHub keeps working.</p>
+<p class="sub" data-l="es" lang="es">Escrito desde cero en Rust. Cada agente hace commit en su propio espacio de trabajo, y si un cambio se ha quedado atrás, braid le hace rebase sobre lo que haya aterrizado antes. Git se queda en los bordes, así que GitHub sigue funcionando.</p>
+<div class="cta">
+<a class="btn btn-primary" href="#story"><span data-l="en" lang="en">Watch three agents land</span><span data-l="es" lang="es">Mira cómo aterrizan tres agentes</span></a>
+<a class="btn" href="#start"><span data-l="en" lang="en">Quick start</span><span data-l="es" lang="es">Primeros pasos</span></a>
+<a class="btn" href="https://github.com/KikoCis/elffuss-braid">GitHub</a>
+</div>
+<p class="fine"><span data-l="en" lang="en">Pre-alpha. Keep your git repository as the source of truth.</span><span data-l="es" lang="es">Pre-alfa: tu repositorio de git sigue siendo la fuente de verdad.</span></p>
+</div>
+<figure class="hero-card">
+<div class="term term-hero" lang="en">
+<pre><code><span class="pr"><span class="ag ag-c">[agent-c]</span> $ </span><span class="cmd">braid land</span>
+Landed <span class="id">e39b1668831b</span> on main <span class="nw">(fast-forward)</span>
+<span class="pr"><span class="ag ag-a">[agent-a]</span> $ </span><span class="cmd">braid land</span>
+Landed on main as <span class="id">e0c85ddea85b</span>, rebased onto <span class="id">e39b1668831b</span> (1 path merged)
+<span class="pr"><span class="ag ag-b">[agent-b]</span> $ </span><span class="cmd">braid land</span>
+<span class="x"><span class="id">65bb04180402</span> conflicts with main at <span class="id">e0c85ddea85b</span>; main did not move:</span> <span class="exit" title="exit status 2">exit 2</span></code></pre>
+</div>
+<figcaption><span data-l="en" lang="en">The first line of each landing in the scene below. Two changes land. The third touched the same line as another, so main stays where it was and the conflict comes back as data.</span><span data-l="es" lang="es">La primera línea de cada aterrizaje de la escena que viene a continuación. Entran dos cambios. El tercero tocó la misma línea que otro, así que main se queda donde estaba y el conflicto vuelve como datos.</span></figcaption>
+</figure>
+</div>
+</section>
+
+<section id="story" class="sec story" aria-labelledby="story-title">
+<div class="wrap">
+<div class="sec-head">
+<p class="eyebrow"><span data-l="en" lang="en">The scene</span><span data-l="es" lang="es">La escena</span></p>
+<h2 id="story-title"><span data-l="en" lang="en">Three agents, one main</span><span data-l="es" lang="es">Tres agentes, un solo main</span></h2>
+</div>
+
+<div class="chapter">
+<div class="ch-num" aria-hidden="true">I</div>
+<div class="ch-main">
+<h3><span class="sr-only">1. </span><span data-l="en" lang="en">Three agents, one file</span><span data-l="es" lang="es">Tres agentes, un fichero</span></h3>
+<p data-l="en" lang="en">Three agents get three small tasks in the same repository. Two of them, A and B, are asked to reword the same line of <code>notes.txt</code>. The third, C, only adds a line at the end. They finish within moments of each other.</p>
+<p data-l="es" lang="es">Tres agentes reciben tres encargos pequeños en el mismo repositorio. A dos de ellos, A y B, les toca reescribir la misma línea de <code>notes.txt</code>. El tercero, C, solo añade una línea al final. Terminan casi a la vez.</p>
+<ul class="tasks" lang="en">
+<li class="task t-a"><span class="task-who">agent-a · notes.txt</span><pre><code><span class="del">- alpha</span>
+<span class="add">+ alpha, from a</span></code></pre></li>
+<li class="task t-b"><span class="task-who">agent-b · notes.txt</span><pre><code><span class="del">- alpha</span>
+<span class="add">+ alpha, from b</span></code></pre></li>
+<li class="task t-c"><span class="task-who">agent-c · notes.txt</span><pre><code><span class="ctx">  gamma</span>
+<span class="add">+ delta, from c</span></code></pre></li>
+</ul>
+</div>
+</div>
+
+<div class="chapter ch-x">
+<div class="ch-num" aria-hidden="true">II</div>
+<div class="ch-main">
+<h3><span class="sr-only">2. </span><span data-l="en" lang="en">In git, they step on each other</span><span data-l="es" lang="es">En git, se pisan</span></h3>
+<p data-l="en" lang="en">Put them in one checkout and they trip over its single index:</p>
+<p data-l="es" lang="es">Si trabajan en la misma copia, chocan con el índice, porque solo hay uno:</p>
+<figure class="term t-n" lang="en">
+<figcaption class="term-bar"><span>git</span></figcaption>
+<pre><code><span class="x">fatal: Unable to create '…/.git/index.lock': File exists.</span>
+Another git process seems to be running in this repository, e.g. …</code></pre>
+</figure>
+<p data-l="en" lang="en">So each one gets a clone of its own, and the fight moves to the push. C gets in first. A is turned away:</p>
+<p data-l="es" lang="es">Así que cada uno se lleva su propio clon, y la pelea pasa al push. C llega primero. Al agente A le rechazan el suyo:</p>
+<figure class="term t-a" lang="en">
+<figcaption class="term-bar"><span>agent-a · git push</span></figcaption>
+<pre><code><span class="x"> ! [rejected]        main -&gt; main (fetch first)</span>
+<span class="x">error: failed to push some refs to '…/remote.git'</span>
+hint: Updates were rejected because the remote contains work that you do
+hint: not have locally. …</code></pre>
+</figure>
+<div class="loop-row">
+<div>
+<p data-l="en" lang="en">A fetches, rebases and pushes again. B is turned away too: its rebase runs into A's edit, it fixes the conflict and pushes again, and if anyone got in meanwhile, it is turned away once more. Every agent that loses the race runs the same lap: fetch, rebase, push, again. The more agents, the more laps; we counted them in <a href="#measured">Measured against git</a>. And much of what comes back is text written for people.</p>
+<p data-l="es" lang="es">A hace fetch, rebase y vuelve a hacer push. Con B pasa lo mismo, pero al hacer rebase choca con el cambio de A: arregla el conflicto, vuelve a empujar y, si alguien ha entrado entretanto, otra vez rechazado. Todo agente que pierde la carrera da la misma vuelta: fetch, rebase, push, y vuelta a empezar. Cuantos más agentes, más vueltas; las contamos en <a href="#measured">«Medido frente a git»</a>. Y buena parte de lo que devuelve git es texto pensado para personas.</p>
+</div>
+<div class="loop-fig"><svg class="gitloop" viewBox="0 0 460 200" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="gl-path" d="M14 43.35C60 43.35 93.93 49.35 143.93 43.35 L147.26 41.55 L150.68 39.83 L154.2 38.17 L157.81 36.59 L161.5 35.08 L165.28 33.66 L169.13 32.31 L173.06 31.04 L177.05 29.86 L181.11 28.76 L185.22 27.75 L189.39 26.82 L193.6 25.98 L197.86 25.22 L202.15 24.56 L206.47 23.98 L210.83 23.49 L215.2 23.1 L219.59 22.79 L223.99 22.57 L228.39 22.45 L232.8 22.41 L237.2 22.47 L241.59 22.61 L245.96 22.85 L250.32 23.17 L254.65 23.59 L258.94 24.09 L263.21 24.68 L267.43 25.35 L271.6 26.11 L275.72 26.96 L279.79 27.89 L283.8 28.9 L287.74 29.99 L291.61 31.16 L295.41 32.4 L299.12 33.73 L302.76 35.12 L306.31 36.59 L309.77 38.13 L313.13 39.74 L316.39 41.42 L319.55 43.16 L322.6 44.96 L325.55 46.82 L328.38 48.73 L331.09 50.71 L333.69 52.73 L336.16 54.81 L338.51 56.93 L340.73 59.1 L342.82 61.3 L344.78 63.55 L346.61 65.84 L348.3 68.16 L349.85 70.51 L351.26 72.88 L352.53 75.29 L353.66 77.71 L354.65 80.15 L355.49 82.61 L356.19 85.09 L356.74 87.57 L357.15 90.06 L357.41 92.56 L357.53 95.05 L357.5 97.55 L357.33 100.04 L357.01 102.52 L356.55 104.99 L355.94 107.45 L355.19 109.89 L354.31 112.31 L353.28 114.71 L352.11 117.09 L350.81 119.43 L349.37 121.75 L347.8 124.03 L346.1 126.28 L344.28 128.49 L342.32 130.66 L340.25 132.78 L338.05 134.86 L335.74 136.89 L333.31 138.86 L330.77 140.79 L328.12 142.66 L325.37 144.47 L322.52 146.23 L319.57 147.92 L316.53 149.55 L313.4 151.11 L310.18 152.61 L306.88 154.03 L303.5 155.39 L300.05 156.68 L296.53 157.89 L292.95 159.03 L289.3 160.09 L285.6 161.08 L281.85 161.99 L278.05 162.82 L274.21 163.57 L270.34 164.25 L266.43 164.84 L262.49 165.35 L258.53 165.78 L254.55 166.12 L250.56 166.39 L246.55 166.57 L242.55 166.67 L238.55 166.69 L234.55 166.62 L230.56 166.48 L226.59 166.25 L222.63 165.94 L218.71 165.55 L214.81 165.08 L210.95 164.53 L207.12 163.9 L203.34 163.2 L199.6 162.42 L195.92 161.56 L192.29 160.63 L188.72 159.63 L185.22 158.56 L181.79 157.41 L178.43 156.2 L175.14 154.92 L171.94 153.57 L168.82 152.17 L165.78 150.7 L162.84 149.17 L159.99 147.58 L157.24 145.94 L154.59 144.24 L152.04 142.49 L149.6 140.7 L147.27 138.85 L145.05 136.96 L142.94 135.03 L140.95 133.06 L139.07 131.05 L137.32 129.01 L135.69 126.94 L134.18 124.83 L132.8 122.7 L131.54 120.54 L130.41 118.36 L129.42 116.16 L128.55 113.95 L127.81 111.72 L127.2 109.48 L126.72 107.23 L126.38 104.98 L126.16 102.72 L126.08 100.46 L126.13 98.2 L126.31 95.95 L126.63 93.71 L127.07 91.48 L127.64 89.26 L128.34 87.05 L129.17 84.87 L130.12 82.7 L131.2 80.56 L132.39 78.45 L133.72 76.36 L135.16 74.3 L136.71 72.28 L138.38 70.29 L140.17 68.34 L142.06 66.43 L144.07 64.56 L146.17 62.74 L148.39 60.96 L150.7 59.23 L153.1 57.55 L155.6 55.93 L158.19 54.36 L160.87 52.84 L163.63 51.38 L166.47 49.98 L169.38 48.65 L172.37 47.37 L175.43 46.16 L178.55 45.01 L181.74 43.93 L184.98 42.92 L188.28 41.97 L191.62 41.09 L195.01 40.29 L198.44 39.55 L201.9 38.89 L205.4 38.3 L208.93 37.78 L212.48 37.33 L216.05 36.96 L219.63 36.66 L223.23 36.44 L226.83 36.29 L230.44 36.22 L234.04 36.21 L237.63 36.29 L241.22 36.43 L244.79 36.65 L248.34 36.94 L251.87 37.31 L255.37 37.75 L258.83 38.25 L262.26 38.83 L265.66 39.48 L269 40.19 L272.3 40.97 L275.55 41.82 L278.75 42.74 L281.88 43.71 L284.95 44.75 L287.96 45.85 L290.89 47.02 L293.75 48.23 L296.54 49.51 L299.25 50.84 L301.87 52.22 L304.41 53.66 L306.86 55.14 L309.22 56.67 L311.49 58.25 L313.66 59.87 L315.73 61.53 L317.7 63.23 L319.57 64.97 L321.34 66.74 L322.99 68.55 L324.54 70.39 L325.98 72.25 L327.31 74.14 L328.53 76.06 L329.63 77.99"/><circle class="gl-dot" cx="143.93" cy="43.35" r="4"/><text class="gl-t" x="135.93" y="27.35" text-anchor="middle">push</text><circle class="gl-dot-x" cx="354.57" cy="79.93" r="5.5"/><text class="gl-x" x="372.57" y="83.93" text-anchor="start">rejected</text><circle class="gl-dot" cx="236" cy="166.66" r="4"/><text class="gl-t" x="236" y="194.66" text-anchor="middle">fetch</text><circle class="gl-dot" cx="126.14" cy="98" r="4"/><text class="gl-t" x="110.14" y="103" text-anchor="end">rebase</text><circle class="gl-dot" cx="160.37" cy="53.11" r="4"/><text class="gl-t" x="166.37" y="75.11" text-anchor="start">push</text><path class="gl-ar" d="M331.93 81.27 L323.9 77.19 L330.82 72.33 Z"/></svg></div>
+</div>
+</div>
+</div>
+
+<div class="chapter">
+<div class="ch-num" aria-hidden="true">III</div>
+<div class="ch-main">
+<h3><span class="sr-only">3. </span><span data-l="en" lang="en">The same three agents, in braid</span><span data-l="es" lang="es">Los mismos tres, en braid</span></h3>
+<p data-l="en" lang="en">Braid gives each agent a workspace of its own over one shared store. There is no index to fight over and no staging area: an agent commits what it changed, and lands it. All three commit before anyone lands; then they land as they finish.</p>
+<p data-l="es" lang="es">Braid da a cada agente su propio espacio de trabajo sobre un único almacén compartido. No hay índice por el que pelearse ni área de preparación: el agente hace commit de lo que ha cambiado y lo aterriza. Los tres hacen commit antes de que aterrice nadie, y luego aterrizan según van terminando.</p>
+<p data-l="en" lang="en">C is first. Nothing has landed since it started, so its change goes straight in:</p>
+<p data-l="es" lang="es">C es el primero. No ha aterrizado nada desde que empezó, así que su cambio entra directo:</p>
+<figure class="term t-c" lang="en">
+<figcaption class="term-bar"><span>agent-c</span></figcaption>
+<pre><code><span class="pr"><span class="ag ag-c">[agent-c]</span> $ </span><span class="cmd">braid land</span>
+Landed <span class="id">e39b1668831b</span> on main <span class="nw">(fast-forward)</span></code></pre>
+</figure>
+<p data-l="en" lang="en">A is one changeset behind. It does not fetch and it does not retry: in one short step, braid rebases A's change onto C's and merges the one file both touched.</p>
+<p data-l="es" lang="es">A va un changeset por detrás. Ni hace fetch ni reintenta: en un solo paso corto, braid le hace rebase sobre el cambio de C y fusiona el único fichero que han tocado los dos.</p>
+<figure class="term t-a" lang="en">
+<figcaption class="term-bar"><span>agent-a</span></figcaption>
+<pre><code><span class="pr"><span class="ag ag-a">[agent-a]</span> $ </span><span class="cmd">braid land</span>
+Landed on main as <span class="id">e0c85ddea85b</span>, rebased onto <span class="id">e39b1668831b</span> (1 path merged)
+Updated 1 path in the working copy</code></pre>
+</figure>
+</div>
+</div>
+
+<div class="chapter">
+<div class="ch-num" aria-hidden="true">IV</div>
+<div class="ch-main">
+<h3><span class="sr-only">4. </span><span data-l="en" lang="en">Main did not move</span><span data-l="es" lang="es">main no se movió</span></h3>
+<p data-l="en" lang="en">B changed the same line as A. That is a real conflict, and no tool should guess its way through one. Braid stops and leaves main where it was:</p>
+<p data-l="es" lang="es">B cambió la misma línea que A. Eso es un conflicto de verdad, y ahí ninguna herramienta debería ir a ciegas. Braid se para y deja main donde estaba:</p>
+<figure class="term t-b" lang="en">
+<figcaption class="term-bar"><span>agent-b</span><span class="exit" title="exit status 2">exit 2</span></figcaption>
+<pre><code><span class="pr"><span class="ag ag-b">[agent-b]</span> $ </span><span class="cmd">braid land</span>
+<span class="x"><span class="id">65bb04180402</span> conflicts with main at <span class="id">e0c85ddea85b</span>; main did not move:</span>
+<span class="x">  CONTENT       notes.txt  (1 region)</span>
+Run `braid update` to bring the conflicts into the working copy.</code></pre>
+</figure>
+<p data-l="en" lang="en">It exits with status 2. A command line braid cannot parse exits with 2 as well, so to be sure an agent asks for <code class="nw">--json</code>: only a conflict prints <code>"outcome": "conflicts"</code>, and the conflict itself comes back as data. Each side is named from B's point of view: <code>base</code> is the common ancestor, <code>branch</code> is what main holds now, <code>workspace</code> is B's own change. Lines count from 0 with the end left out, and <code>next</code> says what to run:</p>
+<p data-l="es" lang="es">Sale con código 2. Un comando que braid no sabe interpretar también sale con 2, así que, para ir sobre seguro, el agente pide <code class="nw">--json</code>: solo un conflicto imprime <code>"outcome": "conflicts"</code>, y el propio conflicto llega como datos. Cada lado se nombra desde el punto de vista de B: <code>base</code> es el ancestro común, <code>branch</code> lo que tiene main ahora y <code>workspace</code> su propio cambio. Las líneas se cuentan desde 0 y el final del tramo no se incluye; <code>next</code> le dice qué ejecutar:</p>
+<figure class="term t-b" lang="en">
+<figcaption class="term-bar"><span>agent-b</span><span class="bar-note"><span data-l="en" lang="en">abridged; braid prints it on one line</span><span data-l="es" lang="es">abreviado; braid lo imprime en una sola línea</span></span></figcaption>
+<pre><code><span class="pr"><span class="ag ag-b">[agent-b]</span> $ </span><span class="cmd">braid land --json</span>
+{
+  <span class="el">…</span>
+  "conflicts": [{
+    <span class="el">…</span>
+    "hunks": [{
+      "base": {
+        "end": 2, "start": 1,
+        "text": "alpha\n" },
+      "branch": {
+        "end": 2, "start": 1,
+        "text": <span class="ln-a">"alpha, from a\n"</span> },
+      "workspace": {
+        "end": 2, "start": 1,
+        "text": <span class="ln-b">"alpha, from b\n"</span> }
+    }],
+    "kind": "CONTENT",
+    "path": "notes.txt",
+    <span class="el">…</span>
+  }],
+  <span class="el">…</span>
+  "next": "braid update",
+  "operation": null,
+  "outcome": "conflicts",
+  <span class="el">…</span>
+}</code></pre>
+</figure>
+<p data-l="en" lang="en">B runs <code>braid update</code>. Its copy gets the markers, with C's line already merged below them:</p>
+<p data-l="es" lang="es">B ejecuta <code>braid update</code>. Su copia recibe las marcas de conflicto, con la línea de C ya fusionada debajo:</p>
+<figure class="term t-b" lang="en">
+<figcaption class="term-bar"><span>agent-b</span><span class="exit" title="exit status 2">exit 2</span></figcaption>
+<pre><code><span class="pr"><span class="ag ag-b">[agent-b]</span> $ </span><span class="cmd">braid update</span>
+<span class="x"><span class="id">65bb04180402</span> conflicts with <span class="id">e0c85ddea85b</span>; the working copy has the merge so far:</span>
+<span class="x">  CONTENT       notes.txt  (1 region)</span>
+Fix the files, `braid resolve` the other conflicts, then `braid commit`.
+Updated 1 path in the working copy</code></pre>
+</figure>
+<figure class="term term-file t-b" lang="en">
+<figcaption class="term-bar"><span>b/notes.txt</span></figcaption>
+<pre><code>title
+<span class="x">&lt;&lt;&lt;&lt;&lt;&lt;&lt; main (e0c85ddea85b)</span>
+<span class="ln-a">alpha, from a</span>
+<span class="x">=======</span>
+<span class="ln-b">alpha, from b</span>
+<span class="x">&gt;&gt;&gt;&gt;&gt;&gt;&gt; 65bb04180402 (b: alpha)</span>
+beta
+gamma
+<span class="ln-c">delta, from c</span></code></pre>
+</figure>
+<p data-l="en" lang="en">Until the markers are gone, <code>braid status</code> says why a commit would be refused:</p>
+<p data-l="es" lang="es">Mientras queden marcas, <code>braid status</code> explica por qué no aceptaría el commit:</p>
+<figure class="term t-b" lang="en">
+<figcaption class="term-bar"><span>agent-b</span></figcaption>
+<pre><code><span class="pr"><span class="ag ag-b">[agent-b]</span> $ </span><span class="cmd">braid status</span>
+<span class="el">…</span>
+Not ready to commit:
+  - conflict markers remain in "notes.txt": edit them out</code></pre>
+</figure>
+<p data-l="en" lang="en">B writes one line that keeps both edits and commits without a new message, so the change keeps its own. Then it lands:</p>
+<p data-l="es" lang="es">B escribe una línea que recoge las dos ediciones y hace commit sin mensaje nuevo, así que el cambio conserva el suyo. Después aterriza:</p>
+<figure class="term t-b" lang="en">
+<figcaption class="term-bar"><span>agent-b</span></figcaption>
+<pre><code><span class="pr"><span class="ag ag-b">[agent-b]</span> $ </span><span class="cmd">braid commit</span>
+Committed <span class="id">4938acdd0794</span> (1 path)
+Rebase finished at <span class="id">4938acdd0794</span>; `braid land` when ready
+<span class="pr"><span class="ag ag-b">[agent-b]</span> $ </span><span class="cmd">braid land</span>
+Landed <span class="id">4938acdd0794</span> on main <span class="nw">(fast-forward)</span></code></pre>
+</figure>
+<p data-l="en" lang="en">Start the three landings at the same moment and the order changes from run to run. The shape does not: one goes straight in, one is rebased, one gets the conflict.</p>
+<p data-l="es" lang="es">Si lanzas los tres aterrizajes a la vez, el orden cambia de una ejecución a otra, pero la forma no: uno entra directo, a otro se le hace rebase y otro se lleva el conflicto.</p>
+</div>
+</div>
+
+<div class="chapter">
+<div class="ch-num" aria-hidden="true">V</div>
+<div class="ch-main">
+<h3><span class="sr-only">5. </span><span data-l="en" lang="en">Everyone ends with the same file, and git sees all of it</span><span data-l="es" lang="es">Todos acaban con el mismo fichero, y git lo ve todo</span></h3>
+<p data-l="en" lang="en">A and C run <code>braid update</code> and get the same file as B. Each line names the agent that last changed it, even through a rebase:</p>
+<p data-l="es" lang="es">A y C hacen <code>braid update</code> y les llega el mismo fichero que tiene B. Cada línea dice qué agente la cambió por última vez, también tras un rebase:</p>
+<figure class="term term-cols term-blame t-n" lang="en">
+<figcaption class="term-bar"><span>repo</span><span class="bar-note"><span data-l="en" lang="en"><span class="bn-ids">ids and </span>dates left out</span><span data-l="es" lang="es">sin <span class="bn-ids">ids ni </span>fechas</span></span></figcaption>
+<pre tabindex="0" role="region" aria-label="Blame of notes.txt, one row per line" data-aria-en="Blame of notes.txt, one row per line" data-aria-es="Blame de notes.txt, una fila por línea"><code><span class="pr">$ </span><span class="cmd">braid blame main notes.txt</span>
+<span class="bl-id"><span class="id">f161e3fa5539</span>  </span>seeder   <span class="el">…</span>  1  title
+<span class="ln-b"><span class="bl-id"><span class="id">4938acdd0794</span>  </span>agent-b  <span class="el">…</span>  2  alpha, from a and b</span>
+<span class="bl-id"><span class="id">f161e3fa5539</span>  </span>seeder   <span class="el">…</span>  3  beta
+<span class="bl-id"><span class="id">f161e3fa5539</span>  </span>seeder   <span class="el">…</span>  4  gamma
+<span class="ln-c"><span class="bl-id"><span class="id">e39b1668831b</span>  </span>agent-c  <span class="el">…</span>  5  delta, from c</span></code></pre>
+</figure>
+<p data-l="en" lang="en">The op log says who did what, and how:</p>
+<p data-l="es" lang="es">El registro de operaciones cuenta quién hizo qué, y cómo:</p>
+<figure class="term term-oplog t-n" lang="en">
+<figcaption class="term-bar"><span>repo</span><span class="bar-note"><span data-l="en" lang="en">times left out</span><span data-l="es" lang="es">sin horas</span></span></figcaption>
+<pre><code><span class="pr">$ </span><span class="cmd">braid op log -n 3</span>
+<span class="ol">#4  <span class="ag ag-b">agent-b</span>  land workspace b on main: fast-forward <span class="id">4938acdd0794</span> -&gt; <span class="id">4938acdd0794</span> <span class="nw">(0 paths merged)</span>
+</span><span class="ol">    main: <span class="id">e0c85ddea85b</span> -&gt; <span class="id">4938acdd0794</span>
+</span><span class="ol">#3  <span class="ag ag-a">agent-a</span>  land workspace a on main: rebased <span class="id">a984ef34e1c9</span> -&gt; <span class="id">e0c85ddea85b</span> <span class="nw">(1 path merged)</span>
+</span><span class="ol">    main: <span class="id">e39b1668831b</span> -&gt; <span class="id">e0c85ddea85b</span>
+</span><span class="ol">#2  <span class="ag ag-c">agent-c</span>  land workspace c on main: fast-forward <span class="id">e39b1668831b</span> -&gt; <span class="id">e39b1668831b</span> <span class="nw">(0 paths merged)</span>
+</span><span class="ol">    main: <span class="id">f161e3fa5539</span> -&gt; <span class="id">e39b1668831b</span></span></code></pre>
+</figure>
+<p data-l="en" lang="en">And git keeps working. One command pushes main to a git remote as a fast-forward, with a lease; history there is never rewritten. Each changeset arrives as one git commit that names its agent in an <code>agent</code> header:</p>
+<p data-l="es" lang="es">Y git sigue funcionando. Un solo comando sube main a un remoto de git como fast-forward y con lease: la historia del remoto nunca se reescribe. Cada changeset llega como un commit de git que nombra a su agente en una cabecera <code>agent</code>:</p>
+<figure class="term t-n" lang="en">
+<figcaption class="term-bar"><span>repo</span></figcaption>
+<pre><code><span class="pr">$ </span><span class="cmd">braid git sync ../remote.git</span>
+Pushed main (<span class="id">4938acdd0794</span>) to main as <span class="id">be3c44e7383b</span>.
+<span class="pr">$ </span><span class="cmd">git -C ../remote.git cat-file commit main</span>
+<span class="el">…</span>
+<span class="ln-b">agent agent-b</span>
+rebased-from <span class="id">65bb04180402</span><span class="el">…</span>
+<span class="el">…</span></code></pre>
+</figure>
+<p data-l="en" lang="en">This scene is one of braid's tests, <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>crates/cli/tests/three_agents.rs</code></a>, which checks each landing, the conflict, the file all three end with, the op log and the push. CI runs it on every push to main and every pull request. Ids change on every run, because every signature carries its time.</p>
+<p data-l="es" lang="es">Esta escena es uno de los tests de braid, <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>crates/cli/tests/three_agents.rs</code></a>, que comprueba cada aterrizaje, el conflicto, el fichero con el que acaban los tres, el registro de operaciones y el push. La integración continua lo ejecuta en cada push a main y en cada pull request. Los ids cambian en cada ejecución, porque cada firma lleva su hora.</p>
+<details class="run">
+<summary><span data-l="en" lang="en">Run it yourself</span><span data-l="es" lang="es">Repítela tú</span></summary>
+<div class="code" lang="en">
+<div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the scene as a script" data-aria-en="Copy the scene as a script" data-aria-es="Copiar la escena como script" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="The scene as a script" data-aria-en="The scene as a script" data-aria-es="La escena como script"><code># with braid on your PATH (see Quick start)
+export BRAID_AUTHOR="Ada Lovelace &lt;ada@example.org&gt;"
+cd "$(mktemp -d)"
+braid init repo
+printf 'title\nalpha\nbeta\ngamma\n' &gt; seed.txt
+(cd repo &amp;&amp; BRAID_AGENT=seeder braid change create --base none \
+   --set notes.txt=@../seed.txt -m "Seed the notes" --land main)
+for n in a b c; do (cd repo &amp;&amp; braid workspace add $n ../$n); done
+printf 'title\nalpha, from a\nbeta\ngamma\n'        &gt; a/notes.txt
+printf 'title\nalpha, from b\nbeta\ngamma\n'        &gt; b/notes.txt
+printf 'title\nalpha\nbeta\ngamma\ndelta, from c\n' &gt; c/notes.txt
+(cd a &amp;&amp; BRAID_AGENT=agent-a braid commit -m "a: alpha")
+(cd b &amp;&amp; BRAID_AGENT=agent-b braid commit -m "b: alpha")
+(cd c &amp;&amp; BRAID_AGENT=agent-c braid commit -m "c: delta")
+(cd c &amp;&amp; BRAID_AGENT=agent-c braid land)     # fast-forward
+(cd a &amp;&amp; BRAID_AGENT=agent-a braid land)     # rebased, 1 path merged
+(cd b &amp;&amp; BRAID_AGENT=agent-b braid land)     # exit status 2: main did not move
+(cd b &amp;&amp; BRAID_AGENT=agent-b braid update)   # markers in b/notes.txt
+printf 'title\nalpha, from a and b\nbeta\ngamma\ndelta, from c\n' &gt; b/notes.txt
+(cd b &amp;&amp; BRAID_AGENT=agent-b braid commit)   # keeps its message
+(cd b &amp;&amp; BRAID_AGENT=agent-b braid land)     # fast-forward
+(cd a &amp;&amp; BRAID_AGENT=agent-a braid update)   # a gets the same file as b
+(cd c &amp;&amp; BRAID_AGENT=agent-c braid update)   # and so does c
+(cd repo &amp;&amp; braid op log -n 3)
+(cd repo &amp;&amp; braid blame main notes.txt)
+git init --quiet --bare remote.git
+(cd repo &amp;&amp; braid git sync ../remote.git)</code></pre>
+</div>
+</details>
+</div>
+</div>
+</div>
+</section>
+
+<!-- autosync:start -->
+<section id="autosync" class="sec autosync" aria-labelledby="autosync-title">
+<div class="wrap">
+<div class="as-band">
+<p class="pill"><span data-l="en" lang="en">In progress</span><span data-l="es" lang="es">En desarrollo</span></p>
+<h2 id="autosync-title"><span data-l="en" lang="en">Coming: the hard work in braid, the clean history in git.</span><span data-l="es" lang="es">Próximamente: el trabajo duro en braid, la historia limpia en git.</span></h2>
+<p data-l="en" lang="en">Today, braid git sync runs when you call it, and every changeset reaches git as a commit of its own. Automatic, curated sync is being built: agents keep landing in braid, and git receives a clean history to read and review. It is not released yet. This section will say how it works once it ships.</p>
+<p data-l="es" lang="es">Hoy, braid git sync se ejecuta cuando lo lanzas, y cada changeset llega a git como un commit propio. Estamos construyendo una sincronización automática y curada: los agentes siguen aterrizando en braid y git recibe una historia limpia, lista para leer y revisar. Aún no está publicada; cuando lo esté, esta sección contará cómo funciona.</p>
+</div>
+</div>
+</section>
+<!-- autosync:end -->
+
+<section id="how" class="sec" aria-labelledby="how-title">
+<div class="wrap">
+<div class="sec-head">
+<h2 id="how-title"><span data-l="en" lang="en">How it works</span><span data-l="es" lang="es">Cómo funciona</span></h2>
+</div>
+<figure class="diagram">
+<svg class="dgm dgm-wide" viewBox="0 0 1000 408" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><rect class="band" x="12" y="12" width="254" height="390" rx="16"/><text class="lb mono dim" font-size="13.5"><tspan data-l="en" lang="en" x="28" y="36">commit: in parallel</tspan><tspan data-l="es" lang="es" x="28" y="36">commit: en paralelo</tspan></text><rect class="card" x="28" y="49" width="222" height="62" rx="10"/><rect class="acc-a" x="40" y="60" width="4" height="40" rx="2"/><text class="lb mono hi" font-size="15"><tspan x="56" y="75">workspace a</tspan></text><text class="lb dim" font-size="13.5"><tspan data-l="en" lang="en" x="56" y="96">own working copy · no index</tspan><tspan data-l="es" lang="es" x="56" y="96">su propia copia · sin índice</tspan></text><rect class="card" x="28" y="137" width="222" height="62" rx="10"/><rect class="acc-c" x="40" y="148" width="4" height="40" rx="2"/><text class="lb mono hi" font-size="15"><tspan x="56" y="163">workspace c</tspan></text><text class="lb dim" font-size="13.5"><tspan data-l="en" lang="en" x="56" y="184">own working copy · no index</tspan><tspan data-l="es" lang="es" x="56" y="184">su propia copia · sin índice</tspan></text><rect class="card" x="28" y="225" width="222" height="62" rx="10"/><rect class="acc-b" x="40" y="236" width="4" height="40" rx="2"/><text class="lb mono hi" font-size="15"><tspan x="56" y="251">workspace b</tspan></text><text class="lb dim" font-size="13.5"><tspan data-l="en" lang="en" x="56" y="272">own working copy · no index</tspan><tspan data-l="es" lang="es" x="56" y="272">su propia copia · sin índice</tspan></text><text class="lb hi strong" font-size="14"><tspan data-l="en" lang="en" x="28" y="318">one shared store</tspan><tspan data-l="es" lang="es" x="28" y="318">un almacén compartido</tspan></text><text class="lb dim" font-size="13.5"><tspan data-l="en" lang="en" x="28" y="340">immutable objects</tspan><tspan data-l="en" lang="en" x="28" y="357.5">named by BLAKE3</tspan><tspan data-l="en" lang="en" x="28" y="375">append-only op log</tspan><tspan data-l="es" lang="es" x="28" y="340">objetos inmutables</tspan><tspan data-l="es" lang="es" x="28" y="357.5">con nombre BLAKE3</tspan><tspan data-l="es" lang="es" x="28" y="375">registro de operaciones</tspan><tspan data-l="es" lang="es" x="28" y="392.5">que solo crece</tspan></text><defs><mask id="dw-m-a" maskUnits="userSpaceOnUse" x="0" y="0" width="1000" height="408"><rect width="1000" height="408" fill="#fff"/><path d="M636.9 192.29C639.15 192.2 641.4 191.02 643.65 188.9C645.9 186.79 648.15 183.74 650.4 180.15C652.65 176.56 654.9 172.43 657.15 168.28C659.4 164.13 661.65 159.97 663.9 156.33" fill="none" stroke="#000" stroke-width="16.65"/><path d="M678.3 143.71C680.55 143.8 682.8 144.98 685.05 147.1C687.3 149.21 689.55 152.26 691.8 155.85C694.05 159.44 696.3 163.57 698.55 167.72C700.8 171.87 703.05 176.03 705.3 179.67" fill="none" stroke="#000" stroke-width="16.65"/><path d="M719.7 192.29C721.95 192.2 724.2 191.02 726.45 188.9C728.7 186.79 730.95 183.74 733.2 180.15C735.45 176.56 737.7 172.43 739.95 168.28C742.2 164.13 744.45 159.97 746.7 156.33" fill="none" stroke="#000" stroke-width="16.65"/></mask><mask id="dw-m-c" maskUnits="userSpaceOnUse" x="0" y="0" width="1000" height="408"><rect width="1000" height="408" fill="#fff"/><path d="M630 147.24C632.23 149.38 634.47 152.43 636.7 156.01C638.93 159.59 641.17 163.7 643.4 167.82C645.63 171.93 647.87 176.06 650.1 179.67" fill="none" stroke="#000" stroke-width="16.65"/><path d="M664.5 192.29C666.75 192.2 669 191.02 671.25 188.9C673.5 186.79 675.75 183.74 678 180.15C680.25 176.56 682.5 172.43 684.75 168.28C687 164.13 689.25 159.97 691.5 156.33" fill="none" stroke="#000" stroke-width="16.65"/><path d="M705.9 143.71C708.15 143.8 710.4 144.98 712.65 147.1C714.9 149.21 717.15 152.26 719.4 155.85C721.65 159.44 723.9 163.57 726.15 167.72C728.4 171.87 730.65 176.03 732.9 179.67" fill="none" stroke="#000" stroke-width="16.65"/></mask><mask id="dw-m-b" maskUnits="userSpaceOnUse" x="0" y="0" width="1000" height="408"><rect width="1000" height="408" fill="#fff"/><path d="M650.7 143.71C652.95 143.8 655.2 144.98 657.45 147.1C659.7 149.21 661.95 152.26 664.2 155.85C666.45 159.44 668.7 163.57 670.95 167.72C673.2 171.87 675.45 176.03 677.7 179.67" fill="none" stroke="#000" stroke-width="16.65"/><path d="M692.1 192.29C694.35 192.2 696.6 191.02 698.85 188.9C701.1 186.79 703.35 183.74 705.6 180.15C707.85 176.56 710.1 172.43 712.35 168.28C714.6 164.13 716.85 159.97 719.1 156.33" fill="none" stroke="#000" stroke-width="16.65"/><path d="M733.5 143.71C735.23 143.78 736.95 144.48 738.67 145.77C740.4 147.05 742.12 148.91 743.85 151.21C745.58 153.51 747.3 156.25 749.02 159.21C750.75 162.18 752.48 165.37 754.2 168.55" fill="none" stroke="#000" stroke-width="16.65"/></mask></defs><rect class="post" x="596" y="88.72" width="8" height="44" rx="4"/><rect class="post" x="596" y="203.28" width="8" height="44" rx="4"/><text class="lb hi" text-anchor="middle" font-size="13.5"><tspan data-l="en" lang="en" x="600" y="74.72">land · one short step, taken in turn</tspan><tspan data-l="es" lang="es" x="600" y="74.72">land · un paso corto, por turnos</tspan></text><path class="strand st-c" d="M250 168C368.33 168 486.67 168 605 168C620 168 632.35 160.63 640.35 150.43C643.8 146.04 647.25 143.56 650.7 143.71C654.15 143.85 657.6 146.61 661.05 151.21C664.5 155.81 667.95 162.19 671.4 168.55C674.85 174.91 678.3 181.17 681.75 185.57C685.2 189.96 688.65 192.44 692.1 192.29C695.55 192.15 699 189.39 702.45 184.79C705.9 180.19 709.35 173.81 712.8 167.45C716.25 161.09 719.7 154.83 723.15 150.43C726.6 146.04 730.05 143.56 733.5 143.71C736.95 143.85 740.4 146.61 743.85 151.21C747.3 155.81 750.75 162.19 754.2 168.55" stroke-width="8.55" mask="url(#dw-m-c)"/><path class="strand st-a" d="M250 80C323.33 80 396.67 80 470 80C555 80 535 146 570 146C580 146 590 146 600 146C610 146 620 137.66 630 147.24C633.45 150.54 636.9 156.07 640.35 162.25C643.8 168.43 647.25 175.19 650.7 180.63C654.15 186.06 657.6 190.1 661.05 191.61C664.5 193.12 667.95 192.07 671.4 188.76C674.85 185.46 678.3 179.93 681.75 173.75C685.2 167.57 688.65 160.81 692.1 155.37C695.55 149.94 699 145.9 702.45 144.39C705.9 142.88 709.35 143.93 712.8 147.24C716.25 150.54 719.7 156.07 723.15 162.25C726.6 168.43 730.05 175.19 733.5 180.63C736.95 186.06 740.4 190.1 743.85 191.61C747.3 193.12 750.75 192.07 754.2 188.76" stroke-width="8.55" mask="url(#dw-m-a)"/><path class="strand st-b" d="M250 256C323.33 256 396.67 256 470 256C560 256 540 190 570 190C580 190 590 190 600 190C610 190 620 180.46 630 189.32C633.45 192.37 636.9 193.11 640.35 191.32C643.8 189.54 647.25 185.25 650.7 179.67C654.15 174.09 657.6 167.28 661.05 161.18C664.5 155.07 667.95 149.74 671.4 146.68C674.85 143.63 678.3 142.89 681.75 144.68C685.2 146.46 688.65 150.75 692.1 156.33C695.55 161.91 699 168.72 702.45 174.82C705.9 180.93 709.35 186.26 712.8 189.32C716.25 192.37 719.7 193.11 723.15 191.32C726.6 189.54 730.05 185.25 733.5 179.67C736.95 174.09 740.4 167.28 743.85 161.18C747.3 155.07 750.75 149.74 754.2 146.68" stroke-width="8.55" mask="url(#dw-m-b)"/><text class="lb mono t-a" font-size="13"><tspan x="284" y="106">rebased · 1 path merged</tspan></text><text class="lb mono t-c" font-size="13"><tspan x="290" y="154">fast-forward</tspan></text><path class="knot" d="M334 256 C352.2 256 371.7 252.1 371.7 237.8 C371.7 223.5 350.9 223.5 350.9 237.8 C350.9 252.1 369.1 256 386 256"/><text class="lb t-x" font-size="13"><tspan data-l="en" lang="en" x="290" y="222">conflict · exit 2 · main did not move</tspan><tspan data-l="es" lang="es" x="290" y="222">conflicto · exit 2 · main no se movió</tspan></text><path class="loop" d="M334 266C316 308 264 312 260 272"/><path class="ar ar-b" d="M260 267 L264.36 273.71 L256.87 274.36 Z"/><text class="lb mono t-b" font-size="13"><tspan data-l="en" lang="en" x="274" y="332">update · fix · commit</tspan><tspan data-l="es" lang="es" x="274" y="332">update · arreglo · commit</tspan></text><text class="lb mono t-b" text-anchor="end" font-size="13"><tspan x="588" y="282">fast-forward</tspan></text><text class="lb mono hi" text-anchor="middle" font-size="15"><tspan x="692.1" y="124">main</tspan></text><path class="flow" d="M766.2 168 L789.2 168"/><path class="ar" d="M795.2 168 L788.14 171.76 L788.14 164.24 Z"/><rect class="box" x="798.2" y="137" width="197.8" height="62" rx="12"/><text class="lb mono hi" font-size="15"><tspan x="814.2" y="163">git sync</tspan></text><text class="lb dim" font-size="13.5"><tspan data-l="en" lang="en" x="814.2" y="184">any git remote</tspan><tspan data-l="es" lang="es" x="814.2" y="184">cualquier remoto de git</tspan></text><text class="lb dim" font-size="13.5"><tspan data-l="en" lang="en" x="800.2" y="222">fast-forward, with a lease</tspan><tspan data-l="es" lang="es" x="800.2" y="222">fast-forward, con lease</tspan></text><rect class="ghost" x="798.2" y="268" width="197.8" height="58" rx="12"/><text class="lb muted" font-size="13.5"><tspan data-l="en" lang="en" x="814.2" y="292">planned:</tspan><tspan data-l="es" lang="es" x="814.2" y="292">previsto:</tspan></text><text class="lb muted" font-size="13.5"><tspan data-l="en" lang="en" x="814.2" y="312">server · daemon · caches</tspan><tspan data-l="es" lang="es" x="814.2" y="312">servidor · daemon · cachés</tspan></text></svg>
+<svg class="dgm dgm-tall" viewBox="0 0 360 836" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><rect class="band" x="1" y="10" width="358" height="214" rx="16"/><text class="lb hi strong" font-size="13"><tspan data-l="en" lang="en" x="14" y="34">one shared store</tspan><tspan data-l="es" lang="es" x="14" y="34">un almacén compartido</tspan></text><text class="lb dim" font-size="12.5"><tspan data-l="en" lang="en" x="14" y="54">immutable objects named by BLAKE3</tspan><tspan data-l="en" lang="en" x="14" y="70.25">append-only op log</tspan><tspan data-l="es" lang="es" x="14" y="54">objetos inmutables con nombre BLAKE3</tspan><tspan data-l="es" lang="es" x="14" y="70.25">registro de operaciones que solo crece</tspan></text><text class="lb mono dim" font-size="12.5"><tspan data-l="en" lang="en" x="14" y="100">commit: in parallel</tspan><tspan data-l="es" lang="es" x="14" y="100">commit: en paralelo</tspan></text><rect class="card" x="8" y="112" width="104" height="100" rx="10"/><rect class="acc-a" x="17" y="124" width="4" height="76" rx="2"/><text class="lb mono hi" font-size="13"><tspan x="29" y="136">workspace</tspan><tspan x="29" y="152.9">a</tspan></text><text class="lb dim" font-size="12"><tspan data-l="en" lang="en" x="29" y="169">own working</tspan><tspan data-l="en" lang="en" x="29" y="184.6">copy</tspan><tspan data-l="en" lang="en" x="29" y="200.2">no index</tspan><tspan data-l="es" lang="es" x="29" y="169">su propia</tspan><tspan data-l="es" lang="es" x="29" y="184.6">copia</tspan><tspan data-l="es" lang="es" x="29" y="200.2">sin índice</tspan></text><rect class="card" x="128" y="112" width="104" height="100" rx="10"/><rect class="acc-c" x="137" y="124" width="4" height="76" rx="2"/><text class="lb mono hi" font-size="13"><tspan x="149" y="136">workspace</tspan><tspan x="149" y="152.9">c</tspan></text><text class="lb dim" font-size="12"><tspan data-l="en" lang="en" x="149" y="169">own working</tspan><tspan data-l="en" lang="en" x="149" y="184.6">copy</tspan><tspan data-l="en" lang="en" x="149" y="200.2">no index</tspan><tspan data-l="es" lang="es" x="149" y="169">su propia</tspan><tspan data-l="es" lang="es" x="149" y="184.6">copia</tspan><tspan data-l="es" lang="es" x="149" y="200.2">sin índice</tspan></text><rect class="card" x="248" y="112" width="104" height="100" rx="10"/><rect class="acc-b" x="257" y="124" width="4" height="76" rx="2"/><text class="lb mono hi" font-size="13"><tspan x="269" y="136">workspace</tspan><tspan x="269" y="152.9">b</tspan></text><text class="lb dim" font-size="12"><tspan data-l="en" lang="en" x="269" y="169">own working</tspan><tspan data-l="en" lang="en" x="269" y="184.6">copy</tspan><tspan data-l="en" lang="en" x="269" y="200.2">no index</tspan><tspan data-l="es" lang="es" x="269" y="169">su propia</tspan><tspan data-l="es" lang="es" x="269" y="184.6">copia</tspan><tspan data-l="es" lang="es" x="269" y="200.2">sin índice</tspan></text><defs><mask id="dt-m-a" maskUnits="userSpaceOnUse" x="0" y="0" width="360" height="836"><rect width="360" height="836" fill="#fff"/><path d="M184.29 512.9C184.2 515.15 183.02 517.4 180.9 519.65C178.79 521.9 175.74 524.15 172.15 526.4C168.56 528.65 164.43 530.9 160.28 533.15C156.13 535.4 151.97 537.65 148.33 539.9" fill="none" stroke="#000" stroke-width="16.65"/><path d="M135.71 554.3C135.8 556.55 136.98 558.8 139.1 561.05C141.21 563.3 144.26 565.55 147.85 567.8C151.44 570.05 155.57 572.3 159.72 574.55C163.87 576.8 168.03 579.05 171.67 581.3" fill="none" stroke="#000" stroke-width="16.65"/><path d="M184.29 595.7C184.2 597.95 183.02 600.2 180.9 602.45C178.79 604.7 175.74 606.95 172.15 609.2C168.56 611.45 164.43 613.7 160.28 615.95C156.13 618.2 151.97 620.45 148.33 622.7" fill="none" stroke="#000" stroke-width="16.65"/></mask><mask id="dt-m-c" maskUnits="userSpaceOnUse" x="0" y="0" width="360" height="836"><rect width="360" height="836" fill="#fff"/><path d="M139.24 506C141.38 508.23 144.43 510.47 148.01 512.7C151.59 514.93 155.7 517.17 159.82 519.4C163.93 521.63 168.06 523.87 171.67 526.1" fill="none" stroke="#000" stroke-width="16.65"/><path d="M184.29 540.5C184.2 542.75 183.02 545 180.9 547.25C178.79 549.5 175.74 551.75 172.15 554C168.56 556.25 164.43 558.5 160.28 560.75C156.13 563 151.97 565.25 148.33 567.5" fill="none" stroke="#000" stroke-width="16.65"/><path d="M135.71 581.9C135.8 584.15 136.98 586.4 139.1 588.65C141.21 590.9 144.26 593.15 147.85 595.4C151.44 597.65 155.57 599.9 159.72 602.15C163.87 604.4 168.03 606.65 171.67 608.9" fill="none" stroke="#000" stroke-width="16.65"/></mask><mask id="dt-m-b" maskUnits="userSpaceOnUse" x="0" y="0" width="360" height="836"><rect width="360" height="836" fill="#fff"/><path d="M135.71 526.7C135.8 528.95 136.98 531.2 139.1 533.45C141.21 535.7 144.26 537.95 147.85 540.2C151.44 542.45 155.57 544.7 159.72 546.95C163.87 549.2 168.03 551.45 171.67 553.7" fill="none" stroke="#000" stroke-width="16.65"/><path d="M184.29 568.1C184.2 570.35 183.02 572.6 180.9 574.85C178.79 577.1 175.74 579.35 172.15 581.6C168.56 583.85 164.43 586.1 160.28 588.35C156.13 590.6 151.97 592.85 148.33 595.1" fill="none" stroke="#000" stroke-width="16.65"/><path d="M135.71 609.5C135.78 611.23 136.48 612.95 137.77 614.67C139.05 616.4 140.91 618.12 143.21 619.85C145.51 621.58 148.25 623.3 151.21 625.02C154.18 626.75 157.37 628.48 160.55 630.2" fill="none" stroke="#000" stroke-width="16.65"/></mask></defs><rect class="post" x="68.72" y="472" width="56" height="8" rx="4"/><rect class="post" x="195.28" y="472" width="56" height="8" rx="4"/><text class="lb hi" font-size="12.5"><tspan data-l="en" lang="en" x="197.28" y="502">land</tspan><tspan data-l="en" lang="en" x="197.28" y="518.25">one short step,</tspan><tspan data-l="en" lang="en" x="197.28" y="534.5">taken in turn</tspan><tspan data-l="es" lang="es" x="197.28" y="502">land</tspan><tspan data-l="es" lang="es" x="197.28" y="518.25">un paso corto,</tspan><tspan data-l="es" lang="es" x="197.28" y="534.5">por turnos</tspan></text><path class="strand st-c" d="M160 212C160 302 160 391 160 481C160 496 152.63 508.35 142.43 516.35C138.04 519.8 135.56 523.25 135.71 526.7C135.85 530.15 138.61 533.6 143.21 537.05C147.81 540.5 154.19 543.95 160.55 547.4C166.91 550.85 173.17 554.3 177.57 557.75C181.96 561.2 184.44 564.65 184.29 568.1C184.15 571.55 181.39 575 176.79 578.45C172.19 581.9 165.81 585.35 159.45 588.8C153.09 592.25 146.83 595.7 142.43 599.15C138.04 602.6 135.56 606.05 135.71 609.5C135.85 612.95 138.61 616.4 143.21 619.85C147.81 623.3 154.19 626.75 160.55 630.2" stroke-width="8.55" mask="url(#dt-m-c)"/><path class="strand st-a" d="M52 212C52 251.33 52 290.67 52 330C52 410 138 390 138 450C138 458.67 138 467.33 138 476C138 486 129.66 496 139.24 506C142.54 509.45 148.07 512.9 154.25 516.35C160.43 519.8 167.19 523.25 172.63 526.7C178.06 530.15 182.1 533.6 183.61 537.05C185.12 540.5 184.07 543.95 180.76 547.4C177.46 550.85 171.93 554.3 165.75 557.75C159.57 561.2 152.81 564.65 147.37 568.1C141.94 571.55 137.9 575 136.39 578.45C134.88 581.9 135.93 585.35 139.24 588.8C142.54 592.25 148.07 595.7 154.25 599.15C160.43 602.6 167.19 606.05 172.63 609.5C178.06 612.95 182.1 616.4 183.61 619.85C185.12 623.3 184.07 626.75 180.76 630.2" stroke-width="8.55" mask="url(#dt-m-a)"/><path class="strand st-b" d="M306 212C306 266.67 306 321.33 306 376C306 446 182 412 182 450C182 458.67 182 467.33 182 476C182 486 172.46 496 181.32 506C184.37 509.45 185.11 512.9 183.32 516.35C181.54 519.8 177.25 523.25 171.67 526.7C166.09 530.15 159.28 533.6 153.18 537.05C147.07 540.5 141.74 543.95 138.68 547.4C135.63 550.85 134.89 554.3 136.68 557.75C138.46 561.2 142.75 564.65 148.33 568.1C153.91 571.55 160.72 575 166.82 578.45C172.93 581.9 178.26 585.35 181.32 588.8C184.37 592.25 185.11 595.7 183.32 599.15C181.54 602.6 177.25 606.05 171.67 609.5C166.09 612.95 159.28 616.4 153.18 619.85C147.07 623.3 141.74 626.75 138.68 630.2" stroke-width="8.55" mask="url(#dt-m-b)"/><text class="lb mono t-a" font-size="12.5"><tspan x="63" y="250">rebased</tspan><tspan x="63" y="266.25">1 path</tspan><tspan x="63" y="282.5">merged</tspan></text><text class="lb mono t-c" font-size="12.5"><tspan x="172" y="250">fast-forward</tspan></text><path class="knot" d="M306 260 C306 278.2 309.9 297.7 324.2 297.7 C338.5 297.7 338.5 276.9 324.2 276.9 C309.9 276.9 306 295.1 306 312"/><text class="lb t-x" text-anchor="end" font-size="12.5"><tspan data-l="en" lang="en" x="290" y="290">conflict · exit 2</tspan><tspan data-l="en" lang="en" x="290" y="306.25">main did not move</tspan><tspan data-l="es" lang="es" x="290" y="290">conflicto · exit 2</tspan><tspan data-l="es" lang="es" x="290" y="306.25">main no se movió</tspan></text><path class="loop" d="M337 270C350 256 337 238 336 223"/><path class="ar ar-b" d="M336 215 L339.76 222.06 L332.24 222.06 Z"/><text class="lb mono t-b" text-anchor="end" font-size="12.5"><tspan data-l="en" lang="en" x="290" y="334">update</tspan><tspan data-l="en" lang="en" x="290" y="350.25">fix</tspan><tspan data-l="en" lang="en" x="290" y="366.5">commit</tspan><tspan data-l="es" lang="es" x="290" y="334">update</tspan><tspan data-l="es" lang="es" x="290" y="350.25">arreglo</tspan><tspan data-l="es" lang="es" x="290" y="366.5">commit</tspan></text><text class="lb mono t-b" text-anchor="end" font-size="12.5"><tspan x="290" y="385.5">fast-forward</tspan></text><text class="lb mono hi" font-size="14"><tspan x="200" y="573.1">main</tspan></text><path class="flow" d="M160 642.2 L160 663.2"/><path class="ar" d="M160 669.2 L156.24 662.14 L163.76 662.14 Z"/><rect class="box" x="30" y="672.2" width="260" height="58" rx="12"/><text class="lb mono hi" font-size="14"><tspan x="46" y="696.2">git sync</tspan></text><text class="lb dim" font-size="12.5"><tspan data-l="en" lang="en" x="46" y="716.2">any git remote</tspan><tspan data-l="es" lang="es" x="46" y="716.2">cualquier remoto de git</tspan></text><text class="lb dim" font-size="12.5"><tspan data-l="en" lang="en" x="32" y="750.2">fast-forward, with a lease</tspan><tspan data-l="es" lang="es" x="32" y="750.2">fast-forward, con lease</tspan></text><rect class="ghost" x="30" y="768.2" width="260" height="54" rx="12"/><text class="lb muted" font-size="12.5"><tspan data-l="en" lang="en" x="46" y="791.2">planned:</tspan><tspan data-l="en" lang="en" x="46" y="807.45">server · daemon · caches</tspan><tspan data-l="es" lang="es" x="46" y="791.2">previsto:</tspan><tspan data-l="es" lang="es" x="46" y="807.45">servidor · daemon · cachés</tspan></text></svg>
+<ol class="sr-only" data-l="en" lang="en">
+<li>Three workspaces, a, b and c, each with its own working copy and no index, sit on one shared store: immutable objects named by BLAKE3, and an append-only op log.</li>
+<li>The agents commit in parallel.</li>
+<li>Landing is one short step, taken in turn.</li>
+<li>c passes straight through: fast-forward.</li>
+<li>a bends over c's strand: rebased, 1 path merged.</li>
+<li>b hits a knot: conflict, exit 2, main did not move. It goes back to update, fix and commit, then passes: fast-forward.</li>
+<li>The strands braid into main, which git sync sends to any git remote as a fast-forward, with a lease.</li>
+<li>Planned: a server, a daemon and caches.</li>
+</ol>
+<ol class="sr-only" data-l="es" lang="es">
+<li>Tres espacios de trabajo, a, b y c, cada uno con su propia copia y sin índice, sobre un único almacén compartido: objetos inmutables con nombre BLAKE3 y un registro de operaciones que solo crece.</li>
+<li>Los agentes hacen commit en paralelo.</li>
+<li>Aterrizar es un paso corto, por turnos.</li>
+<li>c pasa directo: fast-forward.</li>
+<li>a se cruza por encima de la hebra de c: rebased, 1 path merged.</li>
+<li>b choca con un nudo: conflicto, exit 2, main no se movió. Vuelve atrás para hacer update, arreglar y hacer commit, y luego pasa: fast-forward.</li>
+<li>Las hebras se trenzan en main, que git sync manda a cualquier remoto de git como fast-forward, con lease.</li>
+<li>Previsto: un servidor, un daemon y cachés.</li>
+</ol>
+</figure>
+<ol class="points" data-l="en" lang="en">
+<li><strong>Everything is an immutable object named by its BLAKE3 hash:</strong> file contents, directories and changesets. Objects are never rewritten in place; the exact bytes are in <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, with golden vectors.</li>
+<li><strong>A changeset records the files that changed against its first parent,</strong> plus the root tree it produces. History, blame and rebase read that short list, and the root id still commits to the whole repository.</li>
+<li><strong>Agents commit in parallel, each in its own workspace.</strong> Landing is the one step they take in turn, and it is short: a fast-forward, or a rebase path by path that merges only the files both sides touched. Conflicts come back as data, and the branch does not move.</li>
+<li><strong>Many processes share one store without a daemon.</strong> Segments are leased with locks the kernel releases if a process dies, objects reach the disk before anything that refers to them, and an append-only op log records every ref change, so <code>braid undo</code> can step back.</li>
+<li><strong>Planned (milestones 6 and 7): the same API at every tier,</strong> so a local store, a per-machine daemon, a cache and a server all answer the same requests. The daemon, the cache and the server do not exist yet.</li>
+</ol>
+<ol class="points" data-l="es" lang="es">
+<li><strong>Todo es un objeto inmutable que se nombra por su hash BLAKE3:</strong> el contenido de los ficheros, los directorios y los changesets. Ningún objeto se reescribe en su sitio; los bytes exactos están en <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, con vectores de referencia.</li>
+<li><strong>Un changeset registra los ficheros que cambiaron respecto a su primer padre,</strong> más el árbol raíz que resulta. La historia, blame y el rebase leen esa lista corta, y el id de la raíz sigue fijando el estado de todo el repositorio.</li>
+<li><strong>Los agentes hacen commit en paralelo, cada uno en su propio espacio de trabajo.</strong> Aterrizar es el único paso que dan por turnos, y es corto: un fast-forward, o un rebase ruta a ruta que solo fusiona los ficheros que han tocado los dos lados. Los conflictos vuelven como datos, y la rama no se mueve.</li>
+<li><strong>Muchos procesos comparten un almacén sin daemon.</strong> Los segmentos se reservan con cerrojos que el kernel libera si un proceso muere, los objetos llegan al disco antes que lo que apunta a ellos, y un registro de operaciones que solo crece apunta cada cambio de ref, para que <code>braid undo</code> pueda dar marcha atrás.</li>
+<li><strong>Previsto (fases 6 y 7): la misma API en cada nivel,</strong> de modo que un almacén local, un daemon por máquina, una caché y un servidor respondan a las mismas peticiones. El daemon, la caché y el servidor aún no existen.</li>
+</ol>
+<p class="credit" data-l="en" lang="en">Braid starts from ideas Anthropic published about Scion, its internal source control system (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets stored against the first parent, server-side merges, minimal branch state, immutable objects any cache can serve. Braid is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
+<p class="credit" data-l="es" lang="es">Braid parte de ideas que Anthropic publicó sobre Scion, su sistema interno de control de versiones (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets guardados respecto al primer padre, fusiones en el servidor, ramas con un estado mínimo y objetos inmutables que cualquier caché puede servir. Braid es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
+</div>
+</section>
+
+<section id="start" class="sec" aria-labelledby="start-title">
+<div class="wrap narrow">
+<div class="sec-head">
+<h2 id="start-title"><span data-l="en" lang="en">Quick start</span><span data-l="es" lang="es">Primeros pasos</span></h2>
+</div>
+<p data-l="en" lang="en">Braid stores history, moves it in and out of git bit for bit, and gives each agent a workspace of its own. Build it, then import a git repository, this one for a start:</p>
+<p data-l="es" lang="es">Braid guarda historia, la mete y la saca de git bit a bit, y da a cada agente su propio espacio de trabajo. Compílalo e importa un repositorio de git; para empezar, este mismo:</p>
+<div class="code" lang="en">
+<div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the quick start commands" data-aria-en="Copy the quick start commands" data-aria-es="Copiar los comandos de primeros pasos" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="Quick start commands" data-aria-en="Quick start commands" data-aria-es="Comandos de primeros pasos"><code>git clone https://github.com/KikoCis/elffuss-braid
+cd elffuss-braid
+cargo build --release
+export PATH="$PWD/target/release:$PATH"
+SRC="$PWD"                       # this clone; another repository works too, with
+                                 # its branch for main and one of its files for README.md
+
+braid init /tmp/demo
+cd /tmp/demo
+braid git import "$SRC"          # every local branch and tag
+braid log main -n 5
+braid log main -- README.md      # only the changes to a path
+braid blame main README.md       # who last changed each line
+braid show main --json
+braid fsck
+braid stats        # objects by kind, and how they are stored: whole, deltas, chunks</code></pre>
+</div>
+<p data-l="en" lang="en">Exporting writes the same commits back, with the same ids:</p>
+<p data-l="es" lang="es">Al exportar se escriben los mismos commits, con los mismos ids:</p>
+<div class="code" lang="en">
+<div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the export commands" data-aria-en="Copy the export commands" data-aria-es="Copiar los comandos para exportar" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="Export commands" data-aria-en="Export commands" data-aria-es="Comandos para exportar"><code>git init --bare /tmp/mirror.git
+braid git export /tmp/mirror.git</code></pre>
+</div>
+<p data-l="en" lang="en">Ids can be checked with any BLAKE3 implementation, for example the reference <a href="https://github.com/BLAKE3-team/BLAKE3/tree/master/b3sum"><code>b3sum</code></a> tool. In the clone, it prints the id that <code>braid <span class="nw">hash-object</span> README.md</code> gives:</p>
+<p data-l="es" lang="es">Los ids se pueden comprobar con cualquier implementación de BLAKE3, por ejemplo la herramienta de referencia <a href="https://github.com/BLAKE3-team/BLAKE3/tree/master/b3sum"><code>b3sum</code></a>. En el clon, imprime el mismo id que da <code>braid <span class="nw">hash-object</span> README.md</code>:</p>
+<div class="code" lang="en">
+<div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the b3sum commands" data-aria-en="Copy the b3sum commands" data-aria-es="Copiar los comandos de b3sum" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="Checking an id with b3sum" data-aria-en="Checking an id with b3sum" data-aria-es="Comprobar un id con b3sum"><code>cd "$SRC"         # the clone, where README.md is
+b3sum --derive-key "elffuss-braid 2026 blob v1" README.md</code></pre>
+</div>
+<p class="note" data-l="en" lang="en">Needs Rust 1.89 or newer. CI tests Linux and other Unix-like systems; Windows is not tested yet.</p>
+<p class="note" data-l="es" lang="es">Necesita Rust 1.89 o posterior. La integración continua prueba Linux y otros sistemas tipo Unix; Windows aún no se prueba.</p>
+</div>
+</section>
+
+<section id="agents" class="sec" aria-labelledby="agents-title">
+<div class="wrap">
+<div class="sec-head">
+<h2 id="agents-title"><span data-l="en" lang="en">Many agents on one repository</span><span data-l="es" lang="es">Muchos agentes en un repositorio</span></h2>
+</div>
+<div class="narrow-left">
+<p data-l="en" lang="en">Each agent gets its own workspace. There is no staging area and no shared index: an agent commits what it changed and lands it, and braid rebases it onto whatever the others landed first.</p>
+<p data-l="es" lang="es">Cada agente tiene su propio espacio de trabajo. No hay área de preparación ni índice compartido: el agente hace commit de lo que ha cambiado y lo aterriza, y braid le hace rebase sobre lo que hayan aterrizado antes los demás.</p>
+<div class="code" lang="en">
+<div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the commands of one agent" data-aria-en="Copy the commands of one agent" data-aria-es="Copiar los comandos de un agente" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="Commands of one agent" data-aria-en="Commands of one agent" data-aria-es="Comandos de un agente"><code>cd /tmp/demo                         # any braid repository
+export BRAID_AUTHOR="Ada Lovelace &lt;ada@example.org&gt;"
+export BRAID_AGENT=agent-1           # recorded with everything this agent does
+braid workspace add agent-1          # ./agent-1, tracking main
+cd agent-1
+echo 'fn main() {}' &gt; main.rs
+braid status
+braid commit -m "Add main.rs"
+braid land                           # fast-forward, or a rebase onto main</code></pre>
+</div>
+<p data-l="en" lang="en">Every change to a branch or ref (imports, landings, syncs) is in the op log, and <code>braid undo</code> steps back through them, newest first. Here it takes the landing back, and the changeset stays in the workspace, ready to land again:</p>
+<p data-l="es" lang="es">Cada cambio de una rama o una ref (importaciones, aterrizajes, sincronizaciones) queda en el registro de operaciones, y <code>braid undo</code> los deshace uno a uno, del más reciente hacia atrás. Aquí deshace el aterrizaje, y el changeset sigue en el espacio de trabajo, listo para aterrizar otra vez:</p>
+<div class="code" lang="en">
+<div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the op log and undo commands" data-aria-en="Copy the op log and undo commands" data-aria-es="Copiar los comandos del registro de operaciones y de deshacer" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="Op log and undo commands" data-aria-en="Op log and undo commands" data-aria-es="Comandos del registro de operaciones y de deshacer"><code>braid op log      # who did what, newest first
+braid undo        # takes the landing back</code></pre>
+</div>
+</div>
+<h3 class="grid-title"><span data-l="en" lang="en">What an agent can rely on</span><span data-l="es" lang="es">Con qué puede contar un agente</span></h3>
+<ul class="contract">
+<li><h4><span data-l="en" lang="en">Identity</span><span data-l="es" lang="es">Identidad</span></h4>
+<p data-l="en" lang="en"><code>BRAID_AGENT</code> is written into the op log and into every changeset the agent makes, and survives rebases; changesets imported from git name no agent. <code>BRAID_AUTHOR</code> signs the changesets the agent commits, or creates without a checkout, and the ones it remakes in a rebase. A merge made by <code>git sync</code> is signed instead with the agent label and the email in <code>.braid/config</code>, or <code>&lt;agent&gt;@example.org</code>.</p>
+<p data-l="es" lang="es"><code>BRAID_AGENT</code> queda escrito en el registro de operaciones y en cada changeset que crea el agente, y sobrevive a los rebases; los changesets importados de git no nombran agente. <code>BRAID_AUTHOR</code> firma los changesets que el agente crea, con commit o sin checkout, y los que rehace en un rebase. Una fusión hecha por <code>git sync</code>, en cambio, se firma con la etiqueta del agente y el correo de <code>.braid/config</code>, o con <code>&lt;agente&gt;@example.org</code>.</p></li>
+<li><h4><span data-l="en" lang="en">Output</span><span data-l="es" lang="es">Salida</span></h4>
+<p data-l="en" lang="en"><code class="nw">--json</code> on every command; <code>change create</code> always prints JSON.</p>
+<p data-l="es" lang="es"><code class="nw">--json</code> en todos los comandos; <code>change create</code> imprime siempre JSON.</p></li>
+<li><h4><span data-l="en" lang="en">Exit status</span><span data-l="es" lang="es">Código de salida</span></h4>
+<p data-l="en" lang="en"><code>0</code> done, <code>1</code> failed, <code>2</code> conflicts (the branch did not move), or a command line braid could not parse; with <code class="nw">--json</code> only a conflict prints <code>"outcome": "conflicts"</code>.</p>
+<p data-l="es" lang="es"><code>0</code> hecho, <code>1</code> fallo, <code>2</code> conflictos (la rama no se movió) o un comando que braid no sabe interpretar; con <code class="nw">--json</code> solo el conflicto imprime <code>"outcome": "conflicts"</code>.</p></li>
+<li><h4><span data-l="en" lang="en">Status</span><span data-l="es" lang="es">Estado</span></h4>
+<p data-l="en" lang="en"><code>braid status <span class="nw">--json</span></code> gives <code>behind_by</code>, <code>unlanded</code>, <code>ready_to_commit</code> and <code>blocking</code>, which lists the same reasons <code>braid commit</code> refuses with.</p>
+<p data-l="es" lang="es"><code>braid status <span class="nw">--json</span></code> da <code>behind_by</code>, <code>unlanded</code>, <code>ready_to_commit</code> y <code>blocking</code>, que lista los mismos motivos por los que <code>braid commit</code> se niega.</p></li>
+<li><h4><span data-l="en" lang="en">Secrets guard</span><span data-l="es" lang="es">Guarda de secretos</span></h4>
+<p data-l="en" lang="en">New <code>.env*</code>, <code>*.pem</code> and <code>id_*</code> files, and files over 1&nbsp;MiB, wait for <code>braid track</code>. <code class="nw">--force</code> leaves them out.</p>
+<p data-l="es" lang="es">Los ficheros nuevos <code>.env*</code>, <code>*.pem</code> e <code>id_*</code>, y los de más de 1&nbsp;MiB, esperan a <code>braid track</code>. <code class="nw">--force</code> los deja fuera.</p></li>
+<li><h4><span data-l="en" lang="en">Short ids</span><span data-l="es" lang="es">Ids cortos</span></h4>
+<p data-l="en" lang="en">Six hex digits or more. An ambiguous one is an error that lists the candidates.</p>
+<p data-l="es" lang="es">Seis dígitos hexadecimales o más. Uno ambiguo es un error que lista los candidatos.</p></li>
+<li><h4><span data-l="en" lang="en">Conflict kinds</span><span data-l="es" lang="es">Tipos de conflicto</span></h4>
+<p data-l="en" lang="en"><code>CONTENT</code>, <code>MODIFY_DELETE</code>, <code>MODE</code>, <code>DF</code>, <code>DIR_REMOVED</code>, <code>CASE</code>. <code>braid resolve</code> settles the ones that are not about content.</p>
+<p data-l="es" lang="es"><code>CONTENT</code>, <code>MODIFY_DELETE</code>, <code>MODE</code>, <code>DF</code>, <code>DIR_REMOVED</code>, <code>CASE</code>. <code>braid resolve</code> zanja los que no son de contenido.</p></li>
+<li><h4>Checkouts</h4>
+<p data-l="en" lang="en">They never follow symlinks, and nothing from repository content is ever run.</p>
+<p data-l="es" lang="es">Nunca siguen enlaces simbólicos, y nunca se ejecuta nada que venga del contenido del repositorio.</p></li>
+<li class="wide"><h4><span data-l="en" lang="en">No checkout</span><span data-l="es" lang="es">Sin checkout</span></h4>
+<p data-l="en" lang="en"><code>braid change create</code> makes a changeset without a working copy, and can land it. <code class="nw">--expect</code> takes the full blob id the agent read; a mismatch is refused.</p>
+<p data-l="es" lang="es"><code>braid change create</code> crea un changeset sin copia de trabajo, y puede aterrizarlo. <code class="nw">--expect</code> recibe el id completo del blob que el agente leyó; si no coincide, se rechaza.</p>
+<div class="code" lang="en">
+<pre tabindex="0" role="region" aria-label="A changeset made without a checkout" data-aria-en="A changeset made without a checkout" data-aria-es="Un changeset hecho sin checkout"><code># READ_ID: the full blob id the agent read
+braid change create --base main --set src/lib.rs=@new-lib.rs \
+  --expect src/lib.rs="$READ_ID" -m "Fix the parser" --land main</code></pre>
+</div></li>
+</ul>
+</div>
+</section>
+
+<section id="git" class="sec" aria-labelledby="git-title">
+<div class="wrap">
+<div class="sec-head">
+<h2 id="git-title"><span data-l="en" lang="en">Working with git</span><span data-l="es" lang="es">Trabajar con git</span></h2>
+</div>
+<p class="lead" data-l="en" lang="en">Repositories come in with their whole history, and git hosts keep working as mirrors.</p>
+<p class="lead" data-l="es" lang="es">Los repositorios entran con toda su historia, y los servidores de git siguen funcionando como espejos.</p>
+<dl class="rows">
+<div class="row">
+<dt><span data-l="en" lang="en">Import</span><span data-l="es" lang="es">Importar</span><code lang="en">braid git import</code></dt>
+<dd><p data-l="en" lang="en">Goes through <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a> and brings every local branch and tag; to bring every branch of a remote, import a <code>git clone <span class="nw">--mirror</span></code>. Each commit is exported again as it is imported, and the import stops unless its id comes back the same. Running it again imports only what is new, and points braid's branches and tags at git's, even backwards, which drops from the branch any changeset landed in braid that git does not have (the op log keeps it: <code>braid undo</code>). To keep a branch in step with a git remote, use <code class="nw">git sync</code>. Shallow and <span class="nw">SHA-256</span> repositories are refused for now.</p>
+<p data-l="es" lang="es">Pasa por <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a> y trae todas las ramas locales y etiquetas; para traer todas las ramas de un remoto, importa un <code>git clone <span class="nw">--mirror</span></code>. Cada commit se vuelve a exportar al importarlo, y la importación se detiene si su id no sale idéntico. Si se repite, solo importa lo nuevo, y apunta las ramas y etiquetas de braid a las de git, aunque sea hacia atrás, con lo que sale de la rama todo changeset aterrizado en braid que git no tenga (el registro de operaciones lo conserva: <code>braid undo</code>). Para mantener una rama al día con un remoto de git, usa <code class="nw">git sync</code>. Los clones superficiales y los repositorios <span class="nw">SHA-256</span> se rechazan por ahora.</p></dd>
+</div>
+<div class="row">
+<dt><span data-l="en" lang="en">Export</span><span data-l="es" lang="es">Exportar</span><code lang="en">braid git export</code></dt>
+<dd><p data-l="en" lang="en">Writes braid refs, and everything they reach, into a git repository with the same ids. Changesets made in braid export deterministically, with their agent as a commit header. Git refs of the same names are overwritten, so export into a new repository; to keep an existing remote in step, use <code class="nw">git sync</code>.</p>
+<p data-l="es" lang="es">Escribe las refs de braid, y todo lo que alcanzan, en un repositorio de git con los mismos ids. Los changesets hechos en braid se exportan de forma determinista, con su agente como cabecera del commit. Las refs de git con el mismo nombre se sobrescriben: exporta a un repositorio nuevo y, para mantener al día un remoto que ya existe, usa <code class="nw">git sync</code>.</p></dd>
+</div>
+<div class="row">
+<dt><span data-l="en" lang="en">Sync</span><span data-l="es" lang="es">Sincronizar</span><code lang="en">braid git sync</code></dt>
+<dd><ul data-l="en" lang="en">
+<li>It fetches and imports the remote branch, then fast-forwards braid or pushes braid's branch, merging first when both moved.</li>
+<li>The remote only ever fast-forwards: the push carries a lease on what was just fetched, and history there is never rewritten.</li>
+<li>Conflicts move nothing and exit 2; a refused push exits 1.</li>
+<li><code class="nw">--dry-run</code> writes nothing, and <code class="nw">--json</code> names the outcome.</li>
+</ul>
+<ul data-l="es" lang="es">
+<li>Hace fetch de la rama remota y la importa; después hace fast-forward en braid o push de la rama de braid, y antes fusiona si se han movido las dos.</li>
+<li>El remoto solo avanza en fast-forward: el push lleva un lease sobre lo que se acaba de traer, y allí la historia nunca se reescribe.</li>
+<li>Los conflictos no mueven nada y salen con 2; un push rechazado sale con 1.</li>
+<li><code class="nw">--dry-run</code> no escribe nada, y <code class="nw">--json</code> nombra el resultado.</li>
+</ul></dd>
+</div>
+</dl>
+<div class="code narrow-left" lang="en">
+<pre tabindex="0" role="region" aria-label="git sync examples" data-aria-en="git sync examples" data-aria-es="Ejemplos de git sync"><code>braid git sync https://github.com/you/project.git --branch main
+braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
+</div>
+<p class="licence" data-l="en" lang="en">Braid contains no code from git (GPLv2). It reads and writes git data with gitoxide (MIT or <span class="nw">Apache-2.0</span>); <code>git sync</code> also runs the git binary as a subprocess, to set up its mirror, fetch and push.</p>
+<p class="licence" data-l="es" lang="es">Braid no contiene código de git (GPLv2). Lee y escribe datos de git con gitoxide (MIT o <span class="nw">Apache-2.0</span>); <code>git sync</code> además ejecuta el binario de git como subproceso, para preparar su espejo, hacer fetch y hacer push.</p>
+<p class="next-link"><a href="#autosync"><span data-l="en" lang="en">Automatic sync with git</span><span data-l="es" lang="es">Sincronización automática con git</span></a></p>
+</div>
+</section>
+
+<section id="measured" class="sec" aria-labelledby="measured-title">
+<div class="wrap">
+<div class="sec-head">
+<h2 id="measured-title"><span data-l="en" lang="en">Measured against git</span><span data-l="es" lang="es">Medido frente a git</span></h2>
+</div>
+<ul class="method" data-l="en" lang="en">
+<li>Ratios are braid / git for the same work on the same machine; below 1 means braid is faster or smaller.</li>
+<li>braid and git run in alternating order, with warm caches, and the result is the median.</li>
+<li>Each scenario checks both tools did the same work. A failed check is reported as an error, never as a number.</li>
+<li>Git runs with its defaults, with automatic gc and maintenance turned off.</li>
+<li>Only ratios and git's retry counts are published, never times or sizes, together with <a href="https://github.com/KikoCis/elffuss-braid/tree/main/bench">the script</a>.</li>
+<li>Not measured: cold caches, git's fsmonitor daemon or <code>feature.manyFiles</code>, and transfers between machines (there is no server yet).</li>
+</ul>
+<ul class="method" data-l="es" lang="es">
+<li>Cada ratio es braid / git para el mismo trabajo en la misma máquina; por debajo de 1, braid es más rápido o más pequeño.</li>
+<li>braid y git se ejecutan en orden alterno, con las cachés calientes, y el resultado es la mediana.</li>
+<li>Cada escenario comprueba que las dos herramientas hicieron el mismo trabajo. Una comprobación fallida sale como error, nunca como número.</li>
+<li>Git se ejecuta con su configuración por defecto, con el gc y el mantenimiento automáticos desactivados.</li>
+<li>Solo se publican ratios y los reintentos de git, nunca tiempos ni tamaños, junto con <a href="https://github.com/KikoCis/elffuss-braid/tree/main/bench">el script</a>.</li>
+<li>No se mide: cachés frías, el daemon fsmonitor de git o <code>feature.manyFiles</code>, ni transferencias entre máquinas (aún no hay servidor).</li>
+</ul>
+<p class="mk-legend" id="mk-legend" hidden><span data-l="en" lang="en">Each marker is drawn from its row's ratio, on a log scale. The line is 1: to its left braid is faster or smaller, to its right slower or larger.</span><span data-l="es" lang="es">Cada marca sale de la ratio de su fila, en escala logarítmica. La línea es el 1: a su izquierda braid es más rápido o más pequeño; a su derecha, más lento o más grande.</span></p>
+<!-- ratios:start -->
+<div class="ratios-run">
+<p class="run-note" data-l="en" lang="en">One run of <code>bench/run.py</code>, measuring braid at commit <code>5330054</code> on one machine. Run the script before relying on any number.</p>
+<p class="run-note" data-l="es" lang="es">Una sola ejecución de <code>bench/run.py</code>, que mide braid en el commit <code>5330054</code> en una máquina. Ejecuta el script antes de fiarte de ningún número.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Ratios against git" data-aria-en="Ratios against git" data-aria-es="Ratios frente a git">
+<table class="ratios">
+<thead>
+<tr><th scope="col"><span data-l="en" lang="en">What was compared</span><span data-l="es" lang="es">Qué se comparó</span></th><th scope="col" class="num">braid / git</th><th scope="col"><span data-l="en" lang="en">Reproduce</span><span data-l="es" lang="es">Para repetirlo</span></th></tr>
+</thead>
+<tbody>
+<tr><td><span data-l="en" lang="en">Import <a href="https://github.com/tmux/tmux">tmux</a> 3.5a, 10,287 commits: <code>braid init</code> + <code>braid git import</code> vs <code>git clone <span class="nw">--no-local</span> <span class="nw">--bare</span></code></span><span data-l="es" lang="es">Importar <a href="https://github.com/tmux/tmux">tmux</a> 3.5a, 10&nbsp;287 commits: <code>braid init</code> + <code>braid git import</code> frente a <code>git clone <span class="nw">--no-local</span> <span class="nw">--bare</span></code></span></td><td class="num">17.6</td><td><code>python3 bench/run.py <span class="nw">--only import</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Import it and check it out: <code>braid init</code> + <code>braid git import</code> + <code>braid workspace add</code> vs <code>git clone <span class="nw">--no-local</span></code></span><span data-l="es" lang="es">Importarlo y hacer checkout: <code>braid init</code> + <code>braid git import</code> + <code>braid workspace add</code> frente a <code>git clone <span class="nw">--no-local</span></code></span></td><td class="num">17.1</td><td><code>python3 bench/run.py <span class="nw">--only import</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Size after that import: <code>du</code> of <code>.braid/store</code> vs the bare clone after <code>git gc <span class="nw">--aggressive</span></code></span><span data-l="es" lang="es">Tamaño tras esa importación: <code>du</code> de <code>.braid/store</code> frente al clon bare tras <code>git gc <span class="nw">--aggressive</span></code></span></td><td class="num">25.1</td><td><code>python3 bench/run.py <span class="nw">--only store</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Status of a tree of 100,000 files, clean: <code>braid status</code> vs <code>git status</code>, no untracked cache, no fsmonitor</span><span data-l="es" lang="es">Status de un árbol de 100&nbsp;000 ficheros, sin cambios: <code>braid status</code> frente a <code>git status</code>, sin untracked cache ni fsmonitor</span></td><td class="num">2.6</td><td><code>python3 bench/run.py <span class="nw">--only status</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Status of that tree, clean: <code>braid status</code> vs <code>git status</code> with <code>core.untrackedCache=true</code>, no fsmonitor</span><span data-l="es" lang="es">Status de ese árbol, sin cambios: <code>braid status</code> frente a <code>git status</code> con <code>core.untrackedCache=true</code>, sin fsmonitor</span></td><td class="num">5.8</td><td><code>python3 bench/run.py <span class="nw">--only status</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Status of that tree, 10 files modified: <code>braid status</code> vs <code>git status</code>, no untracked cache, no fsmonitor</span><span data-l="es" lang="es">Status de ese árbol con 10 ficheros modificados: <code>braid status</code> frente a <code>git status</code>, sin untracked cache ni fsmonitor</span></td><td class="num">3.0</td><td><code>python3 bench/run.py <span class="nw">--only status</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Status of that tree, 10 files modified: <code>braid status</code> vs <code>git status</code> with <code>core.untrackedCache=true</code>, no fsmonitor</span><span data-l="es" lang="es">Status de ese árbol con 10 ficheros modificados: <code>braid status</code> frente a <code>git status</code> con <code>core.untrackedCache=true</code>, sin fsmonitor</span></td><td class="num">5.7</td><td><code>python3 bench/run.py <span class="nw">--only status</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Commit one changed file of that tree: <code>braid commit</code> vs <code>git add</code> + <code>git commit</code></span><span data-l="es" lang="es">Commit de un fichero modificado de ese árbol: <code>braid commit</code> frente a <code>git add</code> + <code>git commit</code></span></td><td class="num">5.0</td><td><code>python3 bench/run.py <span class="nw">--only commit</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Commit one new file in a directory of 20,000 files, 200 times: <code>braid commit</code> vs <code>git add</code> + <code>git commit</code></span><span data-l="es" lang="es">Commit de un fichero nuevo en un directorio de 20&nbsp;000 ficheros, 200 veces: <code>braid commit</code> frente a <code>git add</code> + <code>git commit</code></span></td><td class="num">1.8</td><td><code>python3 bench/run.py <span class="nw">--only wide</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Commit one new file in that directory without a working copy, 200 times: <code>braid change create <span class="nw">--land</span></code> vs <code>git add</code> + <code>git commit</code></span><span data-l="es" lang="es">Commit de un fichero nuevo en ese directorio sin copia de trabajo, 200 veces: <code>braid change create <span class="nw">--land</span></code> frente a <code>git add</code> + <code>git commit</code></span></td><td class="num">0.9</td><td><code>python3 bench/run.py <span class="nw">--only wide</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">4 agents land 10 commits each, at once: <code>braid commit</code> + <code>braid land</code>, a workspace each, vs <code>git commit</code> + <code>git push</code>, a clone each, with <code>git pull <span class="nw">--rebase</span></code> and a new push when rejected</span><span data-l="es" lang="es">4 agentes aterrizan 10 commits cada uno, a la vez: <code>braid commit</code> + <code>braid land</code>, cada uno en su espacio de trabajo, frente a <code>git commit</code> + <code>git push</code>, cada uno en su clon, con <code>git pull <span class="nw">--rebase</span></code> y un nuevo push cuando se lo rechazan</span></td><td class="num">0.4</td><td><code>python3 bench/run.py <span class="nw">--only agents</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">8 agents, the same</span><span data-l="es" lang="es">8 agentes, igual</span></td><td class="num">0.3</td><td><code>python3 bench/run.py <span class="nw">--only agents</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">16 agents, the same</span><span data-l="es" lang="es">16 agentes, igual</span></td><td class="num">0.2</td><td><code>python3 bench/run.py <span class="nw">--only agents</span></code></td></tr>
+<tr><td><span data-l="en" lang="en">Newest 1,000 changesets of tmux: <code>braid log <span class="nw">-n 1000</span></code> vs <code>git log <span class="nw">--first-parent</span> <span class="nw">-n 1000</span> <span class="nw">--format=%H</span></code> after <code>git gc <span class="nw">--aggressive</span></code></span><span data-l="es" lang="es">Los 1000 changesets más recientes de tmux: <code>braid log <span class="nw">-n 1000</span></code> frente a <code>git log <span class="nw">--first-parent</span> <span class="nw">-n 1000</span> <span class="nw">--format=%H</span></code> tras <code>git gc <span class="nw">--aggressive</span></code></span></td><td class="num">1.7</td><td><code>python3 bench/run.py <span class="nw">--only history</span></code></td></tr>
+</tbody>
+</table>
+</div>
+<p data-l="en" lang="en">Git retried each push 1.1, 2.5 and 5.2 times on average with 4, 8 and 16 agents; no braid agent retried, and nearly every landing was a rebase.</p>
+<p data-l="es" lang="es">Git reintentó cada push 1,1, 2,5 y 5,2 veces de media con 4, 8 y 16 agentes; ningún agente de braid reintentó, y casi todos los aterrizajes fueron un rebase.</p>
+<p data-l="en" lang="en">In that run, braid was faster when many agents landed at once, and slower at importing and storing history, and at status and commit on a large tree.</p>
+<p data-l="es" lang="es">En esa ejecución, braid fue más rápido cuando muchos agentes aterrizaban a la vez, y más lento al importar y guardar historia, y en status y commit sobre un árbol grande.</p>
+<p class="run-note" data-l="en" lang="en">This run predates later work on storage and speed: deltas, chunked large files, editing a large directory in place, a parallel working-copy walk and lazy index lookups. <code class="nw">log -- path</code> and blame came later too, and are not in this table.</p>
+<p class="run-note" data-l="es" lang="es">Esta ejecución es anterior a lo que se ha hecho después en almacenamiento y velocidad: deltas, ficheros grandes troceados, la edición en su sitio de los directorios grandes, un recorrido en paralelo de la copia de trabajo y búsquedas perezosas en los índices. <code class="nw">log -- path</code> y blame también llegaron después y no están en esta tabla.</p>
+</div>
+<!-- ratios:end -->
+</div>
+</section>
+
+<section id="checked" class="sec" aria-labelledby="checked-title">
+<div class="wrap">
+<div class="sec-head">
+<h2 id="checked-title"><span data-l="en" lang="en">What is checked</span><span data-l="es" lang="es">Qué se comprueba</span></h2>
+</div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Guarantees and how they are checked" data-aria-en="Guarantees and how they are checked" data-aria-es="Garantías y cómo se comprueban">
+<table class="checks">
+<thead>
+<tr><th scope="col"><span data-l="en" lang="en">Guarantee</span><span data-l="es" lang="es">Garantía</span></th><th scope="col"><span data-l="en" lang="en">How it is checked</span><span data-l="es" lang="es">Cómo se comprueba</span></th></tr>
+</thead>
+<tbody>
+<tr><td><span data-l="en" lang="en">Landing only moves a branch forward; <code>braid undo</code>, <code>braid ref set</code> and <code>braid git import</code> can move it back.</span><span data-l="es" lang="es">Aterrizar solo hace avanzar la rama; <code>braid undo</code>, <code>braid ref set</code> y <code>braid git import</code> pueden hacerla retroceder.</span></td>
+<td><span data-l="en" lang="en">Simulation invariant I1, checked after every step (<a href="https://github.com/KikoCis/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span><span data-l="es" lang="es">Invariante I1 de la simulación, comprobada tras cada paso (<a href="https://github.com/KikoCis/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span></td></tr>
+<tr><td><span data-l="en" lang="en">A conflict leaves the branch where it was and exits 2.</span><span data-l="es" lang="es">Un conflicto deja la rama donde estaba y sale con 2.</span></td>
+<td><span data-l="en" lang="en">I5; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span><span data-l="es" lang="es">I5; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span></td></tr>
+<tr><td><span data-l="en" lang="en">No lost update.</span><span data-l="es" lang="es">Ninguna actualización se pierde.</span></td>
+<td><span data-l="en" lang="en">I3: the head's tree equals an <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/model.rs">independent reference model</a>, file by file.</span><span data-l="es" lang="es">I3: el árbol de la cabeza coincide, fichero a fichero, con un <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/model.rs">modelo de referencia independiente</a>.</span></td></tr>
+<tr><td><span data-l="en" lang="en">A changeset lands at most once, even with lost answers or duplicate requests.</span><span data-l="es" lang="es">Un changeset aterriza como mucho una vez, aunque se pierdan respuestas o lleguen peticiones duplicadas.</span></td>
+<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/lib.rs">I4</a>, with those faults injected; every seed reproduces its run.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/lib.rs">I4</a>, con esos fallos inyectados; cada semilla reproduce su ejecución.</span></td></tr>
+<tr><td><span data-l="en" lang="en">Changes to unrelated paths land the same in either order.</span><span data-l="es" lang="es">Los cambios en rutas que no tienen que ver entre sí aterrizan igual en cualquier orden.</span></td>
+<td><span data-l="en" lang="en">I7, plus <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/engine/tests/properties.rs">property tests</a>.</span><span data-l="es" lang="es">I7, más <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/engine/tests/properties.rs">tests de propiedades</a>.</span></td></tr>
+<tr><td><span data-l="en" lang="en">A crash or power loss leaves a consistent store.</span><span data-l="es" lang="es">Una caída o un corte de luz dejan el almacén coherente.</span></td>
+<td><span data-l="en" lang="en">The <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/store/src/power_loss.rs">power-loss model</a> and random process kills.</span><span data-l="es" lang="es">El <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/store/src/power_loss.rs">modelo de cortes de luz</a> y procesos matados al azar.</span></td></tr>
+<tr><td><span data-l="en" lang="en">Ids can be recomputed from the spec alone.</span><span data-l="es" lang="es">Los ids se pueden recalcular solo con la especificación.</span></td>
+<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/check_vectors.py"><code>docs/spec/check_vectors.py</code></a> with <code>b3sum</code>, in CI.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/check_vectors.py"><code>docs/spec/check_vectors.py</code></a> con <code>b3sum</code>, en la integración continua.</span></td></tr>
+<tr><td><span data-l="en" lang="en">Every imported git commit exports back to the same id.</span><span data-l="es" lang="es">Todo commit de git importado se exporta de vuelta con el mismo id.</span></td>
+<td><span data-l="en" lang="en">Checked on every import; CI round-trips <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/git/tests/this_repository.rs">this repository's own history</a>.</span><span data-l="es" lang="es">Se comprueba en cada importación; la integración continua hace la ida y vuelta con <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/git/tests/this_repository.rs">la historia de este mismo repositorio</a>.</span></td></tr>
+<tr><td><span data-l="en" lang="en"><code class="nw">log -- path</code>, merge bases and blame agree with git.</span><span data-l="es" lang="es"><code class="nw">log -- path</code>, las bases de fusión y blame coinciden con git.</span></td>
+<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/repo/tests/history_vs_git.rs">Differential tests</a>, apart from two documented differences in blame.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/repo/tests/history_vs_git.rs">Tests diferenciales</a>, salvo dos diferencias documentadas en blame.</span></td></tr>
+<tr><td><span data-l="en" lang="en">Checkouts write nothing outside the workspace.</span><span data-l="es" lang="es">Los checkouts no escriben nada fuera del espacio de trabajo.</span></td>
+<td><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/wc/tests/hostile.rs"><code>crates/wc/tests/hostile.rs</code></a>.</td></tr>
+<tr><td><span data-l="en" lang="en">No unsafe Rust in braid's own crates.</span><span data-l="es" lang="es">Nada de Rust unsafe en los crates propios de braid.</span></td>
+<td><span data-l="en" lang="en"><code>#![forbid(unsafe_code)]</code> in every library crate; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/Cargo.toml">denied workspace-wide</a>.</span><span data-l="es" lang="es"><code>#![forbid(unsafe_code)]</code> en cada crate de biblioteca; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/Cargo.toml">denegado en todo el workspace</a>.</span></td></tr>
+<tr><td><span data-l="en" lang="en">Trees, changesets, names, the git map and git objects are fuzzed.</span><span data-l="es" lang="es">Los árboles, los changesets, los nombres, el mapa de git y los objetos de git pasan por fuzzing.</span></td>
+<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/tree/main/fuzz/fuzz_targets">Five <span class="nw">cargo-fuzz</span> targets</a>, a minute each in CI.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/tree/main/fuzz/fuzz_targets">Cinco objetivos de <span class="nw">cargo-fuzz</span></a>, un minuto cada uno en la integración continua.</span></td></tr>
+</tbody>
+</table>
+</div>
+<p class="after" data-l="en" lang="en">Local stores run in ordered mode: a power loss may lose the newest operations, but never leaves the store inconsistent.</p>
+<p class="after" data-l="es" lang="es">Los almacenes locales funcionan en modo <code>ordered</code>: un corte de luz puede perder las operaciones más recientes, pero nunca deja el almacén incoherente.</p>
+</div>
+</section>
+
+<section id="honest" class="sec" aria-labelledby="honest-title">
+<div class="wrap">
+<div class="sec-head">
+<h2 id="honest-title"><span data-l="en" lang="en">What is honest about this</span><span data-l="es" lang="es">Sin letra pequeña</span></h2>
+</div>
+<ul class="honest" data-l="en" lang="en">
+<li>Pre-alpha: keep git as the source of truth, and nothing only in braid.</li>
+<li>Speed and size against git are in <a href="#measured">Measured against git</a>, as ratios from one run of the script, with the commit measured: check them before relying on braid for speed.</li>
+<li>One machine for now. There is no server, daemon or cache yet, and repositories move between machines only through git.</li>
+<li>Nothing is ever removed from a store; there is no garbage collection yet.</li>
+<li>Format v1 is frozen. Storage and protocols can still change, and an older braid refuses a newer store rather than guess.</li>
+<li>Merges are textual: two changes can merge cleanly and still break the build.</li>
+<li><code class="nw">log -- path</code> and blame follow first parents and do not follow renames.</li>
+<li>Shallow and <span class="nw">SHA-256</span> git repositories are refused for now.</li>
+<li>CI tests Linux and other Unix-like systems; Windows is not tested yet.</li>
+<li>Milestones 0–4 are done. 5 is in progress: deltas, chunked large files, derived indexes, blame and the benchmark script are in. 6 and 7 are planned.</li>
+</ul>
+<ul class="honest" data-l="es" lang="es">
+<li>Pre-alfa: deja git como fuente de verdad, y no guardes nada solo en braid.</li>
+<li>La velocidad y el tamaño frente a git están en <a href="#measured">«Medido frente a git»</a>, como ratios de una ejecución del script y con el commit medido: compruébalos antes de contar con la velocidad de braid.</li>
+<li>Por ahora, una sola máquina. Aún no hay servidor, daemon ni caché, y los repositorios solo pasan de una máquina a otra a través de git.</li>
+<li>Nunca se borra nada de un almacén; aún no hay recolección de basura.</li>
+<li>El formato v1 está congelado. El almacenamiento y los protocolos aún pueden cambiar, y un braid antiguo rechaza un almacén más nuevo en vez de adivinar.</li>
+<li>Las fusiones son textuales: dos cambios pueden fusionarse limpiamente y aun así romper la compilación.</li>
+<li><code class="nw">log -- path</code> y blame siguen los primeros padres y no siguen los renombrados.</li>
+<li>Los clones superficiales y los repositorios <span class="nw">SHA-256</span> de git se rechazan por ahora.</li>
+<li>La integración continua prueba Linux y otros sistemas tipo Unix; Windows aún no se prueba.</li>
+<li>Las fases 0 a 4 están terminadas. La 5 está en marcha: ya están los deltas, los ficheros grandes troceados, los índices derivados, blame y el script de benchmarks. La 6 y la 7 están previstas.</li>
+</ul>
+<p class="scion" data-l="en" lang="en">Braid starts from ideas Anthropic published about Scion, its internal source control system. It is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
+<p class="scion" data-l="es" lang="es">Braid parte de ideas que Anthropic publicó sobre Scion, su sistema interno de control de versiones. Es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
+<p class="credits" data-l="en" lang="en">Credits: <a href="https://github.com/jj-vcs/jj">Jujutsu</a>, for the operation log and undo; <a href="https://sapling-scm.com">Sapling</a>, for history served at scale, and compressing a file version against the previous one; <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a>, for the git bridge; <a href="https://github.com/BLAKE3-team/BLAKE3">BLAKE3</a>, <a href="https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia">FastCDC</a>, <a href="https://www.dolthub.com/docs/architecture/storage-engine/prolly-tree/">prolly trees</a> and <a class="nw" href="https://github.com/pascalkuthe/imara-diff">imara-diff</a>.</p>
+<p class="credits" data-l="es" lang="es">Créditos: <a href="https://github.com/jj-vcs/jj">Jujutsu</a>, por el registro de operaciones y el deshacer; <a href="https://sapling-scm.com">Sapling</a>, por servir historia a gran escala y comprimir cada versión de un fichero respecto a la anterior; <a href="https://github.com/GitoxideLabs/gitoxide">gitoxide</a>, por el puente con git; <a href="https://github.com/BLAKE3-team/BLAKE3">BLAKE3</a>, <a href="https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia">FastCDC</a>, los <a href="https://www.dolthub.com/docs/architecture/storage-engine/prolly-tree/">prolly trees</a> e <a class="nw" href="https://github.com/pascalkuthe/imara-diff">imara-diff</a>.</p>
+</div>
+</section>
+
+<section id="elffuss" class="sec" aria-labelledby="elffuss-title">
+<div class="wrap">
+<div class="sec-head">
+<h2 id="elffuss-title"><span data-l="en" lang="en">Part of Elffuss</span><span data-l="es" lang="es">Parte de Elffuss</span></h2>
+</div>
+<p class="lead" data-l="en" lang="en">Braid is part of Elffuss, a family of tools for building software with agents.</p>
+<p class="lead" data-l="es" lang="es">Braid forma parte de Elffuss, una familia de herramientas para construir software con agentes.</p>
+<ul class="family">
+<li><a href="https://elffuss.com"><span class="f-name">elffuss.com</span><span class="f-desc"><span data-l="en" lang="en">AI that lives in your browser, on your GPU.</span><span data-l="es" lang="es">IA que vive en tu navegador, en tu GPU.</span></span></a></li>
+<li><a href="https://code.elffuss.com"><span class="f-name">Code</span><span class="f-desc"><span data-l="en" lang="en">An IDE with an AI agent that runs in your browser.</span><span data-l="es" lang="es">Un IDE con un agente de IA que corre en tu navegador.</span></span></a></li>
+<li><a href="https://claw.elffuss.com"><span class="f-name">Claw</span><span class="f-desc"><span data-l="en" lang="en">The agentic OS that lives in your browser.</span><span data-l="es" lang="es">El sistema operativo agéntico que vive en tu navegador.</span></span></a></li>
+<li><a href="https://translator.elffuss.com"><span class="f-name">Translator</span><span class="f-desc"><span data-l="en" lang="en">Real-time conversation translation, in the browser.</span><span data-l="es" lang="es">Traducción de conversaciones en tiempo real, en el navegador.</span></span></a></li>
+<li><a href="https://copilot.elffuss.com"><span class="f-name"><span data-l="en" lang="en">Copilot</span><span data-l="es" lang="es">Copiloto</span></span><span class="f-desc"><span data-l="en" lang="en">Zero-trust meeting notes, in your browser.</span><span data-l="es" lang="es">Notas de reunión zero-trust, en tu navegador.</span></span></a></li>
+<li><a href="https://huggingface.co/KikoCis"><span class="f-name">Hugging Face</span><span class="f-desc"><span data-l="en" lang="en">Models and Spaces.</span><span data-l="es" lang="es">Modelos y Spaces.</span></span></a></li>
+</ul>
+<h3 class="repos-title"><span data-l="en" lang="en">On GitHub</span><span data-l="es" lang="es">En GitHub</span></h3>
+<ul class="repos">
+<li><a href="https://github.com/KikoCis/elffuss"><code>elffuss</code></a> <span data-l="en" lang="en">the shared browser-agent core behind Code and Claw.</span><span data-l="es" lang="es">el núcleo de agente de navegador que comparten Code y Claw.</span></li>
+<li><a href="https://github.com/KikoCis/elffuss-code"><code class="nw">elffuss-code</code></a> <span data-l="en" lang="en">an IDE with an AI agent that runs entirely in your browser.</span><span data-l="es" lang="es">un IDE con un agente de IA que corre entero en tu navegador.</span></li>
+<li><a href="https://github.com/KikoCis/elffuss-claw"><code class="nw">elffuss-claw</code></a> <span data-l="en" lang="en">an agentic OS in your browser, with apps generated on demand.</span><span data-l="es" lang="es">un sistema operativo agéntico en tu navegador, con apps que se generan al pedirlas.</span></li>
+<li><a href="https://github.com/KikoCis/elffuss-translator"><code class="nw">elffuss-translator</code></a> <span data-l="en" lang="en">real-time conversation translation in the browser.</span><span data-l="es" lang="es">traducción de conversaciones en tiempo real, en el navegador.</span></li>
+</ul>
+</div>
+</section>
+
+</main>
+
+<footer class="site-foot">
+<div class="wrap">
+<div class="foot-row">
+<a href="https://github.com/KikoCis/elffuss-braid/blob/main/LICENSE">Apache-2.0</a>
+<span class="dot" aria-hidden="true">·</span>
+<span>Copyright 2026 UtopiaIA</span>
+<span class="dot" aria-hidden="true">·</span>
+<a href="https://github.com/KikoCis/elffuss-braid">GitHub</a>
+<span class="dot" aria-hidden="true">·</span>
+<a href="#top"><span data-l="en" lang="en">Back to top</span><span data-l="es" lang="es">Volver arriba</span></a>
+<span class="lang lang-foot" role="group" aria-label="Language" data-aria-en="Language" data-aria-es="Idioma" hidden><button type="button" data-set-lang="en" lang="en" aria-pressed="true" title="English">EN</button><button type="button" data-set-lang="es" lang="es" aria-pressed="false" title="Español">ES</button></span>
+</div>
+<p class="foot-note" data-l="en" lang="en">Braid is an independent implementation inspired by what Anthropic published about Scion. It contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
+<p class="foot-note" data-l="es" lang="es">Braid es una implementación independiente inspirada en lo que Anthropic publicó sobre Scion. No contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
+</div>
+</footer>
+<p id="live" class="sr-only" role="status" aria-live="polite"></p>
+</body>
+</html>
