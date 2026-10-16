@@ -9,10 +9,10 @@
 //! path that is ever resolved as a whole is the workspace root itself. A
 //! symlink in the working copy, whoever made it, is therefore a leaf: braid
 //! reads its target as data, replaces or removes it, and never goes through
-//! it. On Unix, a directory's listing and its entries' metadata are read
-//! through the same handles with plain system calls: the listing through a
-//! second handle opened as `.`, and an entry's metadata by its single name,
-//! without following a symlink.
+//! it. On Unix, a directory's listing, its own metadata and its entries'
+//! metadata are read through the same handles with plain system calls: the
+//! listing through a second handle opened as `.`, and an entry's metadata by
+//! its single name, without following a symlink.
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -89,6 +89,49 @@ impl Stat {
             }
         }
     }
+}
+
+/// What a directory's own metadata says of its entries: when they last
+/// changed, by its modification and status change times, and which
+/// directory it is. Adding, removing or renaming an entry changes both
+/// times; only the first can be set back by hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirStamp {
+    pub mtime: (i64, u32),
+    pub ctime: (i64, u32),
+    pub ino: u64,
+}
+
+impl DirStamp {
+    /// Whether both times are strictly older than `time`.
+    pub(crate) fn older_than(&self, time: (i64, u32)) -> bool {
+        self.mtime < time && self.ctime < time
+    }
+}
+
+/// The stamp of an open directory, where the system gives one.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+pub(crate) fn dir_stamp(dir: &Dir) -> Option<DirStamp> {
+    let stat = rustix::fs::fstat(dir).ok()?;
+    Some(DirStamp {
+        mtime: (
+            i64::try_from(stat.st_mtime).ok()?,
+            u32::try_from(stat.st_mtime_nsec).ok()?,
+        ),
+        ctime: (
+            i64::try_from(stat.st_ctime).ok()?,
+            u32::try_from(stat.st_ctime_nsec).ok()?,
+        ),
+        ino: u64::try_from(stat.st_ino).ok()?,
+    })
+}
+
+/// The stamp of an open directory, where the system gives one: not here,
+/// where there is no status change time.
+#[cfg(not(unix))]
+pub(crate) fn dir_stamp(_dir: &Dir) -> Option<DirStamp> {
+    None
 }
 
 impl Stat {

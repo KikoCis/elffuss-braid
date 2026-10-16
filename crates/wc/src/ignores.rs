@@ -12,7 +12,9 @@
 //! walk checks them whatever the rules say.
 //!
 //! The walk reads a directory's entries once, and opens an ignore file only
-//! where the listing has one.
+//! where the listing has one. The rules in force in a directory have a
+//! digest, of the ignore files read for it and above it, so that a scan can
+//! tell whether they are the ones an earlier scan had.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -20,6 +22,8 @@ use std::sync::Arc;
 use cap_std::fs::Dir;
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+
+use braid_format::{IdHasher, Kind};
 
 use crate::fsprobe::FileSystem;
 use crate::paths::os_name;
@@ -36,10 +40,18 @@ pub(crate) struct Rules {
     /// Its matchers, highest precedence first.
     matchers: Vec<Gitignore>,
     parent: Option<Arc<Rules>>,
+    /// The digest of the ignore files these rules come from, and of their
+    /// parent's.
+    digest: u64,
 }
 
 /// The rules in force in a directory.
 pub(crate) type Chain = Option<Arc<Rules>>;
+
+/// The digest of the rules in force: 0 for none.
+pub(crate) fn digest(chain: &Chain) -> u64 {
+    chain.as_ref().map_or(0, |rules| rules.digest)
+}
 
 /// A directory's ignore files, as named in its listing, in the order of
 /// [`FILES`].
@@ -69,12 +81,26 @@ pub(crate) fn ignore_files<'n>(
     found
 }
 
+/// Which ignore files there are, one bit each, in the order of [`FILES`].
+pub(crate) fn bits(files: &IgnoreFiles<'_>) -> u8 {
+    u8::from(files[0].is_some()) | u8::from(files[1].is_some()) << 1
+}
+
+/// The ignore files that [`bits`] says there are, by their own names: the
+/// file system finds each by that name as it found it before.
+pub(crate) fn from_bits(bits: u8) -> IgnoreFiles<'static> {
+    let named = |index: usize| (bits >> index & 1 != 0).then_some(FILES[index].as_bytes());
+    [named(0), named(1)]
+}
+
 /// The rules in force inside `dir`, whose path is `path`: those of its
 /// ignore files `files` (see [`ignore_files`]) on top of `parent`. Ignore
 /// files that are symlinks, unreadable, or not UTF-8 lines are skipped.
 pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain, files: &IgnoreFiles<'_>) -> Chain {
     let mut matchers = Vec::new();
-    for name in files {
+    let mut hasher = IdHasher::new(Kind::Derived);
+    hasher.update(&digest(parent).to_le_bytes());
+    for (index, name) in files.iter().enumerate() {
         let Some(os) = name.and_then(os_name) else {
             continue;
         };
@@ -85,6 +111,9 @@ pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain, files: &IgnoreFiles<
         if file.read_to_end(&mut text).is_err() {
             continue;
         }
+        hasher.update(&[index as u8]);
+        hasher.update(&(text.len() as u64).to_le_bytes());
+        hasher.update(&text);
         let mut builder = GitignoreBuilder::new(".");
         for line in text.split(|byte| *byte == b'\n') {
             if let Ok(line) = std::str::from_utf8(line) {
@@ -101,10 +130,14 @@ pub(crate) fn enter(dir: &Dir, path: &[u8], parent: &Chain, files: &IgnoreFiles<
     if matchers.is_empty() {
         return parent.clone();
     }
+    let id = hasher.finalize();
+    let mut digest = [0u8; 8];
+    digest.copy_from_slice(&id.as_bytes()[..8]);
     Some(Arc::new(Rules {
         dir: path.to_vec(),
         matchers,
         parent: parent.clone(),
+        digest: u64::from_le_bytes(digest),
     }))
 }
 
@@ -171,6 +204,17 @@ mod tests {
             &[None, None],
         );
         assert!(Arc::ptr_eq(plain.as_ref().unwrap(), root.as_ref().unwrap()));
+
+        // The digest follows the files' content, and the rules above.
+        assert_eq!(digest(&None), 0);
+        assert_ne!(digest(&root), digest(&sub));
+        let again = enter(&dir(temp.path()), b"", &None, &GIT);
+        assert_eq!(digest(&again), digest(&root));
+        std::fs::write(temp.path().join(".gitignore"), "*.log\n").unwrap();
+        let edited = enter(&dir(temp.path()), b"", &None, &GIT);
+        assert_ne!(digest(&edited), digest(&root));
+        let below = enter(&dir(&temp.path().join("sub")), b"sub", &edited, &BOTH);
+        assert_ne!(digest(&below), digest(&sub));
     }
 
     #[test]
@@ -186,6 +230,9 @@ mod tests {
             ignore_files(FileSystem::FORGIVING, only.into_iter()),
             [None, Some(&b".GitIgnore"[..])]
         );
+        for files in [BOTH, GIT, [None, None], [Some(&b".braidignore"[..]), None]] {
+            assert_eq!(from_bits(bits(&files)), files);
+        }
     }
 
     #[cfg(unix)]

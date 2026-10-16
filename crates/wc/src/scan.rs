@@ -16,7 +16,9 @@
 //! The base is read a directory at a time, where it is needed: a directory
 //! whose record says it was clean against the tree the base still has at its
 //! path, and whose entries still match their records, differs in nothing,
-//! and its tree is not read.
+//! and its tree is not read. A directory whose stamp says its entries did
+//! not change since the scan that recorded it is not listed either: its
+//! record stands for its listing, and only its files' metadata is read.
 
 use std::ffi::OsStr;
 use std::io::{self, Read};
@@ -38,7 +40,8 @@ use crate::fsprobe::{FileSystem, SCRATCH_PREFIX};
 use crate::ignores::{self, Chain};
 use crate::paths::{join, os_name};
 use crate::safe::{
-    Found, Root, Stat, StatKind, list, open_child_dir, open_file, read_link, stat_entry,
+    DirStamp, Found, Root, Stat, StatKind, dir_stamp, list, open_child_dir, open_file, read_link,
+    stat_entry,
 };
 use crate::tree::leaves;
 
@@ -70,6 +73,10 @@ pub(crate) struct Scan<'c> {
     pub deltas: Vec<Delta>,
     /// The stat cache for the next scan.
     pub cache: Next<'c>,
+    /// How many directories were listed, rather than taken from their
+    /// records.
+    #[cfg(test)]
+    pub listed: usize,
 }
 
 /// The stat cache a scan leaves for the next.
@@ -119,6 +126,8 @@ fn scan_holding<'c, O: Objects + Sync>(
         time,
         held_limit: held,
         held: AtomicUsize::new(0),
+        #[cfg(test)]
+        listed: AtomicUsize::new(0),
         failed: AtomicBool::new(false),
         out: Mutex::new(Out::default()),
     };
@@ -134,6 +143,8 @@ fn scan_holding<'c, O: Objects + Sync>(
         Ok(pool) => pool.scope(|s| walk.run(s, job)),
         Err(_) => rayon::scope(|s| walk.run(s, job)),
     }
+    #[cfg(test)]
+    let listed = walk.listed.into_inner();
     let out = walk
         .out
         .into_inner()
@@ -150,7 +161,12 @@ fn scan_holding<'c, O: Objects + Sync>(
         records,
         changed: out.changed || out.seen != old.dir_count(),
     };
-    Ok(Scan { deltas, cache })
+    Ok(Scan {
+        deltas,
+        cache,
+        #[cfg(test)]
+        listed,
+    })
 }
 
 /// One directory to read.
@@ -268,6 +284,8 @@ struct Sorted {
     counted: Vec<Counted>,
     /// The subdirectories to read, by name.
     children: Vec<Child>,
+    /// Whether an entry was gone by the time it was looked at.
+    vanished: bool,
 }
 
 /// A subdirectory to read.
@@ -289,6 +307,9 @@ struct Walk<'a, 'c, O> {
     held_limit: usize,
     /// Directory handles kept open for jobs not started yet.
     held: AtomicUsize,
+    /// Directories listed.
+    #[cfg(test)]
+    listed: AtomicUsize,
     failed: AtomicBool,
     out: Mutex<Out<'c>>,
 }
@@ -339,6 +360,9 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
             return Ok(());
         }
         let cached = self.old.dir(&path);
+        // Taken before the directory is listed: a change made while it is
+        // listed shows in the next scan.
+        let stamp = dir_stamp(&dir);
 
         // The base's tree is read unless the directory's record may stand
         // for it: the directory was clean against the same tree.
@@ -349,20 +373,60 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
             _ => None,
         };
 
-        let at = |name: &[u8]| match (&tree, cached) {
-            (Some(entries), _) => at_tree(entries, name),
-            (None, Some(record)) if trusted => at_record(&record, name),
-            _ => At::Nothing,
+        // The record stands for the listing while the directory did not
+        // change; the listing is read when it did, or when an entry the
+        // record names turns out to be gone.
+        let mut record_lists =
+            cached.filter(|record| record_holds(record, base, ignored, stamp, self.old.time()));
+        let (found, rules, ignore_files) = loop {
+            let at = |name: &[u8]| match (&tree, cached) {
+                (Some(entries), _) => at_tree(entries, name),
+                (None, Some(record)) if trusted => at_record(&record, name),
+                _ => At::Nothing,
+            };
+            if let Some(record) = record_lists.take() {
+                let files = ignores::from_bits(record.ignore_files());
+                let rules = if ignored {
+                    above.clone()
+                } else {
+                    ignores::enter(&dir, &path, &above, &files)
+                };
+                // A name that the listing could not have given, as a damaged
+                // or forged cache could hold, is never looked up.
+                if ignores::digest(&rules) != record.rules()
+                    || record
+                        .files()
+                        .any(|entry| !one_name(entry.name) || skipped(entry.name))
+                {
+                    continue;
+                }
+                let listed = record
+                    .files()
+                    .map(|entry| Listed {
+                        name: entry.name.to_vec(),
+                        dir: entry.kind >= KIND_GITLINK,
+                    })
+                    .collect();
+                let found = self.classify(&dir, &path, listed, &rules, ignored, &at, cached)?;
+                if !found.vanished {
+                    break (found, rules, record.ignore_files());
+                }
+                continue;
+            }
+            let listed = self.list(&dir, &path)?;
+            let files = ignores::ignore_files(self.fs, listed.iter().map(|e| e.name.as_slice()));
+            let ignore_files = ignores::bits(&files);
+            let rules = if ignored {
+                above.clone()
+            } else {
+                ignores::enter(&dir, &path, &above, &files)
+            };
+            let found = self.classify(&dir, &path, listed, &rules, ignored, &at, cached)?;
+            break (found, rules, ignore_files);
         };
-        let listed = self.list(&dir, &path)?;
-        let files = ignores::ignore_files(self.fs, listed.iter().map(|e| e.name.as_slice()));
-        let rules = if ignored {
-            above
-        } else {
-            ignores::enter(&dir, &path, &above, &files)
-        };
-        let Sorted { counted, children } =
-            self.classify(&dir, &path, listed, &rules, ignored, &at, cached)?;
+        let Sorted {
+            counted, children, ..
+        } = found;
         let counted = self.hash(&dir, &path, counted)?;
 
         let clean_by_record =
@@ -379,9 +443,12 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
         };
 
         let record = {
-            // Records that will vouch where the old ones could not.
+            // Records that will vouch, or a listing that will stand, where
+            // the old ones could not.
             let fresh = counted.iter().any(|file| {
                 file.read && file.vouches && file.stat.is_some_and(|stat| stat.mtime < self.time)
+            }) || stamp.is_some_and(|stamp| {
+                !stamp.older_than(self.old.time()) && stamp.older_than(self.time)
             });
             let mut files: Vec<FileRecord> = counted.into_iter().map(Counted::record).collect();
             files.extend(children.iter().map(|child| {
@@ -397,6 +464,10 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
                 path: path.clone(),
                 base,
                 clean,
+                stamp,
+                ignored,
+                rules: ignores::digest(&rules),
+                ignore_files,
                 files,
             };
             match cached {
@@ -441,7 +512,7 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
     /// Sorts a directory's entries into what counts and what to read next.
     /// `at` says what the base has at a name, and `cached` is the
     /// directory's record. An entry that is gone by the time it is looked at
-    /// is left out.
+    /// is left out, and noted.
     #[allow(clippy::too_many_arguments)]
     fn classify(
         &self,
@@ -456,6 +527,7 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
         let mut found = Sorted {
             counted: Vec::with_capacity(listed.len()),
             children: Vec::new(),
+            vanished: false,
         };
         for Listed { name, dir: is_dir } in listed {
             let base_at = at(&name);
@@ -465,7 +537,10 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
                 let os = os_name(&name).ok_or_else(|| unrepresentable(&join(path, &name)))?;
                 match stat_entry(dir, os) {
                     Ok(stat) => Some(stat),
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                        found.vanished = true;
+                        continue;
+                    }
                     Err(err) => return Err(self.root.error("read", &join(path, &name), err)),
                 }
             };
@@ -553,6 +628,8 @@ impl<'a, 'c, O: Objects + Sync> Walk<'a, 'c, O> {
 
     /// The entries of `dir`, by name, less those the walk never looks at.
     fn list(&self, dir: &Dir, path: &[u8]) -> Result<Vec<Listed>, Error> {
+        #[cfg(test)]
+        self.listed.fetch_add(1, Ordering::Relaxed);
         let mut listed: Vec<Listed> = list(dir)
             .map_err(|err| self.root.error("read", path, err))?
             .into_iter()
@@ -729,6 +806,29 @@ fn matches_record(record: &CachedDir<'_>, counted: &[Counted], children: &[Child
         }
     }
     files.next().is_none() && dirs.next().is_none()
+}
+
+/// Whether a directory's record may stand for its listing: the directory's
+/// stamp is the recorded one, both its times strictly older than the scan
+/// that recorded it, and the walk takes its entries as it did then, against
+/// the same base tree and ignored or not as then. The ignore rules are
+/// compared once they are read.
+fn record_holds(
+    record: &CachedDir<'_>,
+    base: Option<ObjectId>,
+    ignored: bool,
+    stamp: Option<DirStamp>,
+    time: (i64, u32),
+) -> bool {
+    stamp.is_some_and(|stamp| record.stamp() == Some(stamp) && stamp.older_than(time))
+        && record.base() == base
+        && record.ignored() == ignored
+}
+
+/// Whether `name` is one name, as a listing gives them: not empty, not `.`
+/// or `..`, and without `/` or NUL.
+fn one_name(name: &[u8]) -> bool {
+    !name.is_empty() && name != b"." && name != b".." && !name.contains(&b'/') && !name.contains(&0)
 }
 
 /// Names the walk never looks at: `.braid` and `.git` and every name that
@@ -928,6 +1028,13 @@ mod tests {
         /// and saves the new one. Also returns whether it was saved, and how
         /// many directories of the base were read.
         fn scan_in(&self, base: ObjectId, held: usize) -> (Vec<Delta>, bool, usize) {
+            let (deltas, saved, reads, _) = self.scan_counting(base, held);
+            (deltas, saved, reads)
+        }
+
+        /// [`Fixture::scan_in`], also returning how many directories were
+        /// listed.
+        fn scan_counting(&self, base: ObjectId, held: usize) -> (Vec<Delta>, bool, usize, usize) {
             let old = Cache::load(self.state.path());
             self.objects.trees.store(0, Ordering::Relaxed);
             let found = scan_holding(
@@ -945,7 +1052,7 @@ mod tests {
                 cache::save(self.state.path(), next.time, &next.records).unwrap();
             }
             let reads = self.objects.trees.load(Ordering::Relaxed);
-            (found.deltas, saved, reads)
+            (found.deltas, saved, reads, found.listed)
         }
 
         fn scan(&self, base: ObjectId) -> (Vec<Delta>, bool, usize) {
@@ -960,6 +1067,12 @@ mod tests {
             while self.root.file_system_now().unwrap() <= then {
                 std::thread::sleep(Duration::from_millis(5));
             }
+        }
+
+        /// A whole scan: how many directories it listed.
+        fn listings(&self, base: ObjectId) -> (Vec<Delta>, usize) {
+            let (deltas, _, _, listed) = self.scan_counting(base, HELD_HANDLES);
+            (deltas, listed)
         }
     }
 
@@ -1235,6 +1348,152 @@ mod tests {
         let (reopened, _, _) = f.scan_in(base, 0);
         assert_eq!(show(&held), ["a/b/c/d f>f", "f/new ->f", "h f>-"]);
         assert_eq!(held, reopened);
+    }
+
+    // Directories have a stamp only where the system gives one.
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_directories_are_not_listed_again() {
+        let f = Fixture::new();
+        let base = f.base(&[("a/x", "1"), ("a/b/y", "2"), ("c/z", "3")]);
+        fs::create_dir(f.at("untracked")).unwrap();
+        fs::write(f.at("untracked/u"), "u").unwrap();
+        f.settle();
+        let (deltas, listed) = f.listings(base);
+        assert_eq!(show(&deltas), ["untracked/u ->f"]);
+        assert_eq!(listed, 5);
+        let (deltas, listed) = f.listings(base);
+        assert_eq!(show(&deltas), ["untracked/u ->f"]);
+        assert_eq!(listed, 0, "every directory is as its record says");
+
+        // A file edited in place changes no directory: it is found by its
+        // metadata, and nothing is listed.
+        fs::write(f.at("a/b/y"), "edited").unwrap();
+        let (deltas, listed) = f.listings(base);
+        assert_eq!(show(&deltas), ["a/b/y f>f", "untracked/u ->f"]);
+        assert_eq!(listed, 0);
+
+        // A new file is a new entry: its directory alone is listed again.
+        fs::write(f.at("c/new"), "n").unwrap();
+        f.settle();
+        let (deltas, listed) = f.listings(base);
+        assert_eq!(show(&deltas), ["a/b/y f>f", "c/new ->f", "untracked/u ->f"]);
+        assert_eq!(listed, 1);
+        fs::remove_file(f.at("untracked/u")).unwrap();
+        f.settle();
+        let (deltas, listed) = f.listings(base);
+        assert_eq!(show(&deltas), ["a/b/y f>f", "c/new ->f"]);
+        assert_eq!(listed, 1);
+    }
+
+    // Directories have a stamp only where the system gives one.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_stands_only_while_the_rules_and_the_base_do() {
+        let f = Fixture::new();
+        let base = f.base(&[(".gitignore", "*.log\n"), ("d/kept", "k")]);
+        fs::write(f.at("d/app.log"), "ignored").unwrap();
+        f.settle();
+        let (deltas, _) = f.listings(base);
+        assert!(deltas.is_empty(), "{:?}", show(&deltas));
+        let (_, listed) = f.listings(base);
+        assert_eq!(listed, 0);
+
+        // Rules edited in place: no directory changed, but what is ignored
+        // did, below too.
+        fs::write(f.at(".gitignore"), "*.tmp\n").unwrap();
+        let (deltas, listed) = f.listings(base);
+        assert_eq!(show(&deltas), [".gitignore f>f", "d/app.log ->f"]);
+        assert_eq!(listed, 2);
+        fs::write(f.at(".gitignore"), "*.log\n").unwrap();
+        let (deltas, _) = f.listings(base);
+        assert!(deltas.is_empty(), "{:?}", show(&deltas));
+        let (_, listed) = f.listings(base);
+        assert_eq!(listed, 0);
+
+        // A base that tracks the ignored file: the walk must count it now,
+        // though its directory did not change.
+        let tracked = braid_engine::apply(
+            &f.objects,
+            base,
+            &[Change {
+                path: b"d/app.log".to_vec(),
+                op: f.file("tracked"),
+            }],
+        )
+        .unwrap();
+        let (deltas, _) = f.listings(tracked);
+        assert_eq!(show(&deltas), ["d/app.log f>f"]);
+        assert_eq!(deltas[0].new, Some(blob("ignored")));
+    }
+
+    #[test]
+    fn a_listing_stands_only_while_the_stamp_is_older_than_the_scan() {
+        let stamp = DirStamp {
+            mtime: (100, 5),
+            ctime: (100, 6),
+            ino: 7,
+        };
+        let state = tempfile::tempdir().unwrap();
+        let record = |stamp: DirStamp, time: (i64, u32)| {
+            let dir = DirRecord {
+                path: b"d".to_vec(),
+                base: None,
+                clean: false,
+                stamp: Some(stamp),
+                ignored: false,
+                rules: 0,
+                ignore_files: 0,
+                files: Vec::new(),
+            };
+            cache::save(state.path(), time, &[Record::Made(dir)]).unwrap();
+            Cache::load(state.path())
+        };
+        let holds = |cache: &Cache, now: DirStamp| {
+            let dir = cache.dir(b"d").unwrap();
+            record_holds(&dir, None, false, Some(now), cache.time())
+        };
+        let older = record(stamp, (100, 7));
+        assert!(holds(&older, stamp));
+        // Another inode, or either time changed.
+        assert!(!holds(&older, DirStamp { ino: 8, ..stamp }));
+        assert!(!holds(
+            &older,
+            DirStamp {
+                mtime: (100, 4),
+                ..stamp
+            }
+        ));
+        assert!(!holds(
+            &older,
+            DirStamp {
+                ctime: (101, 0),
+                ..stamp
+            }
+        ));
+        // Changed in the same instant as the scan that recorded it, as a
+        // coarse clock would date it: the listing is read again.
+        let racy = record(stamp, (100, 6));
+        assert!(!holds(&racy, stamp));
+        let racy = record(stamp, (100, 5));
+        assert!(!holds(&racy, stamp));
+        // Ignored, or with a base, where it was not.
+        let dir = older.dir(b"d").unwrap();
+        assert!(!record_holds(&dir, None, true, Some(stamp), older.time()));
+        let tree = Some(ObjectId::hash(Kind::Tree, b"t"));
+        assert!(!record_holds(&dir, tree, false, Some(stamp), older.time()));
+        // Where the system gives no stamp, the directory is always listed.
+        assert!(!record_holds(&dir, None, false, None, older.time()));
+    }
+
+    #[test]
+    fn names_are_single_names() {
+        for name in ["a", "a.b", "...", " "] {
+            assert!(one_name(name.as_bytes()), "{name}");
+        }
+        for name in ["", ".", "..", "a/b", "/", "a\0"] {
+            assert!(!one_name(name.as_bytes()), "{name:?}");
+        }
     }
 
     #[test]

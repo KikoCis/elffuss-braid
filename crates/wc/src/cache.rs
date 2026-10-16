@@ -4,8 +4,8 @@
 //! The stat cache: what each file of the working copy hashed to, and the
 //! metadata it had then, so that unchanged files are not read again; and,
 //! for each directory, what the walk found in it and the base tree it was
-//! compared with, so that a directory that still matches that tree is not
-//! compared with it again.
+//! compared with, so that a directory that did not change is neither listed
+//! nor compared with its tree again.
 //!
 //! A file's record vouches for its blob only when the file's modification
 //! time, size, inode number and type are all still the same, and its
@@ -16,7 +16,12 @@
 //! they were read, are recorded with their blob but never vouched for.
 //!
 //! A directory's record lists the entries the walk used: the files,
-//! symlinks and gitlinks that count, and the subdirectories it went into.
+//! symlinks and gitlinks that count, and the subdirectories it went into. It
+//! stands for the directory's listing while the directory's stamp (its
+//! modification and status change times and its inode number) is the same,
+//! both times strictly older than the cache's scan, under the same ignore
+//! rules and against the same base tree: the same guard as for files, since
+//! adding, removing or renaming an entry changes both times.
 //!
 //! A directory is clean when its own entries were exactly those of the base
 //! tree it was compared with: each file, symlink and gitlink of that tree
@@ -31,28 +36,32 @@
 //! entries lie together, by name.
 //!
 //! ```text
-//! [8] "braidwsc" | u32 version = 2 | u32 0
+//! [8] "braidwsc" | u32 version = 3 | u32 0
 //! i64 seconds | u32 nanoseconds            when the scan started
 //! u32 directories | u32 entries | u32 name bytes
-//! directories × 56 bytes, by path, strictly ascending
+//! directories × 96 bytes, by path, strictly ascending
 //! entries × 72 bytes, each directory's together, by name, strictly ascending
 //! name bytes
 //! u32 CRC-32C of everything before it
 //!
 //! directory: u32 names offset | u32 path length | u32 first entry
 //!            u32 entries | [32] base tree, zero if none | u32 flags
-//!            u32 names length
+//!            u32 mtime nanoseconds | i64 mtime seconds | i64 ctime seconds
+//!            u32 ctime nanoseconds | u32 names length | u64 inode
+//!            u64 ignore rules
 //! entry:     u32 name offset | u32 name length | i64 mtime seconds
 //!            u32 mtime nanoseconds | u8 kind | u8 flags (1 vouches) | u16 0
 //!            u64 size | u64 inode | [32] blob
 //! ```
 //!
-//! A directory's flags: 1 it has a base tree, 2 it is clean. An entry's
-//! kind is 0 for a regular file, 1 an executable, 2 a symlink, 3 a gitlink
-//! of the base whose directory is there, 4 a subdirectory that the base
-//! has, with its tree as the blob, and 5 a subdirectory that the base does
-//! not have. Entries of kinds 3 to 5 have no metadata, and of them only
-//! subdirectories of the base have a blob.
+//! A directory's flags: 1 it has a base tree, 2 it is clean, 4 its stamp is
+//! recorded, 8 it is ignored, 16 it has a `.braidignore`, 32 a `.gitignore`.
+//! Its ignore rules are a digest of the ignore files in force for its
+//! entries. An entry's kind is 0 for a regular file, 1 an executable, 2 a
+//! symlink, 3 a gitlink of the base whose directory is there, 4 a
+//! subdirectory that the base has, with its tree as the blob, and 5 a
+//! subdirectory that the base does not have. Entries of kinds 3 to 5 have no
+//! metadata, and of them only subdirectories of the base have a blob.
 //!
 //! Each directory has its own block of name bytes, its path and then its
 //! entries' names: a directory's names offset counts from the start of the
@@ -70,18 +79,21 @@ use braid_format::ObjectId;
 
 use crate::error::Error;
 use crate::fsprobe::random_hex;
-use crate::safe::{Stat, StatKind};
+use crate::safe::{DirStamp, Stat, StatKind};
 
 const MAGIC: &[u8; 8] = b"braidwsc";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 const HEADER_LEN: usize = 40;
-const DIR_LEN: usize = 56;
+const DIR_LEN: usize = 96;
 const FILE_LEN: usize = 72;
 const CHECK_LEN: usize = 4;
 
 const DIR_HAS_BASE: u32 = 1;
 const DIR_CLEAN: u32 = 2;
+const DIR_STAMPED: u32 = 4;
+const DIR_IGNORED: u32 = 8;
+const DIR_IGNORE_FILES: u32 = 16;
 const FILE_VOUCHES: u8 = 1;
 
 /// A regular file.
@@ -204,7 +216,7 @@ impl Cache {
         for index in 0..dirs {
             let at = HEADER_LEN + index * DIR_LEN;
             let record = &body[at..at + DIR_LEN];
-            let block = u32_at(record, 52);
+            let block = u32_at(record, 76);
             let first = u32_at(record, 8) as usize;
             let count = u32_at(record, 12) as usize;
             if !within(u32_at(record, 0), block, names)
@@ -247,7 +259,7 @@ impl<'c> CachedDir<'c> {
     fn block(&self) -> &'c [u8] {
         let record = self.record();
         let start = self.cache.names_at() + u32_at(record, 0) as usize;
-        &self.cache.bytes[start..start + u32_at(record, 52) as usize]
+        &self.cache.bytes[start..start + u32_at(record, 76) as usize]
     }
 
     /// The directory's path.
@@ -281,6 +293,32 @@ impl<'c> CachedDir<'c> {
     /// Whether its entries were exactly those of that tree.
     pub(crate) fn clean(&self) -> bool {
         self.flags() & DIR_CLEAN != 0
+    }
+
+    /// Its stamp when it was listed, if it was.
+    pub(crate) fn stamp(&self) -> Option<DirStamp> {
+        let record = self.record();
+        (self.flags() & DIR_STAMPED != 0).then(|| DirStamp {
+            mtime: (i64_at(record, 56), u32_at(record, 52)),
+            ctime: (i64_at(record, 64), u32_at(record, 72)),
+            ino: u64_at(record, 80),
+        })
+    }
+
+    /// Whether it was ignored: only what the base had counted inside.
+    pub(crate) fn ignored(&self) -> bool {
+        self.flags() & DIR_IGNORED != 0
+    }
+
+    /// The digest of the ignore rules in force for its entries.
+    pub(crate) fn rules(&self) -> u64 {
+        u64_at(self.record(), 88)
+    }
+
+    /// Which ignore files it had: bit 0 for `.braidignore`, 1 for
+    /// `.gitignore`.
+    pub(crate) fn ignore_files(&self) -> u8 {
+        ((self.flags() / DIR_IGNORE_FILES) & 3) as u8
     }
 
     fn range(&self) -> std::ops::Range<usize> {
@@ -355,6 +393,13 @@ pub(crate) struct DirRecord {
     pub path: Vec<u8>,
     pub base: Option<ObjectId>,
     pub clean: bool,
+    /// Its stamp, taken before it was listed; `None` where the system gives
+    /// none.
+    pub stamp: Option<DirStamp>,
+    pub ignored: bool,
+    pub rules: u64,
+    /// See [`CachedDir::ignore_files`].
+    pub ignore_files: u8,
     /// By name, strictly ascending.
     pub files: Vec<FileRecord>,
 }
@@ -362,13 +407,19 @@ pub(crate) struct DirRecord {
 impl DirRecord {
     fn flags(&self) -> u32 {
         let bit = |set: bool, bit: u32| if set { bit } else { 0 };
-        bit(self.base.is_some(), DIR_HAS_BASE) | bit(self.clean, DIR_CLEAN)
+        bit(self.base.is_some(), DIR_HAS_BASE)
+            | bit(self.clean, DIR_CLEAN)
+            | bit(self.stamp.is_some(), DIR_STAMPED)
+            | bit(self.ignored, DIR_IGNORED)
+            | (u32::from(self.ignore_files & 3) * DIR_IGNORE_FILES)
     }
 
     /// Whether `cached` says exactly the same.
     pub(crate) fn same_as(&self, cached: &CachedDir<'_>) -> bool {
         self.flags() == cached.flags()
             && self.base == cached.base()
+            && self.stamp == cached.stamp()
+            && self.rules == cached.rules()
             && self.files.len() == cached.file_count()
             && self
                 .files
@@ -534,7 +585,18 @@ fn encode(time: (i64, u32), records: &[Record<'_>]) -> Option<Vec<u8>> {
                 out.extend_from_slice(&count.to_le_bytes());
                 out.extend_from_slice(dir.base.unwrap_or(ZERO).as_bytes());
                 out.extend_from_slice(&dir.flags().to_le_bytes());
+                let stamp = dir.stamp.unwrap_or(DirStamp {
+                    mtime: (0, 0),
+                    ctime: (0, 0),
+                    ino: 0,
+                });
+                out.extend_from_slice(&stamp.mtime.1.to_le_bytes());
+                out.extend_from_slice(&stamp.mtime.0.to_le_bytes());
+                out.extend_from_slice(&stamp.ctime.0.to_le_bytes());
+                out.extend_from_slice(&stamp.ctime.1.to_le_bytes());
                 out.extend_from_slice(&block_len.to_le_bytes());
+                out.extend_from_slice(&stamp.ino.to_le_bytes());
+                out.extend_from_slice(&dir.rules.to_le_bytes());
                 name_table.extend_from_slice(&dir.path);
                 for file in &dir.files {
                     let offset = name_table.len() as u32 - block_at;
@@ -611,6 +673,14 @@ mod tests {
                 path: Vec::new(),
                 base: Some(tree),
                 clean: true,
+                stamp: Some(DirStamp {
+                    mtime: (40, 1),
+                    ctime: (41, 2),
+                    ino: 9,
+                }),
+                ignored: false,
+                rules: 77,
+                ignore_files: 2,
                 files: vec![
                     record("a", 50, true),
                     record("b", 50, false),
@@ -622,12 +692,20 @@ mod tests {
                 path: b"sub".to_vec(),
                 base: Some(sub),
                 clean: false,
+                stamp: None,
+                ignored: true,
+                rules: 0,
+                ignore_files: 0,
                 files: Vec::new(),
             },
             DirRecord {
                 path: b"sub/deep".to_vec(),
                 base: None,
                 clean: false,
+                stamp: None,
+                ignored: false,
+                rules: 0,
+                ignore_files: 1,
                 files: vec![record("x", 60, true)],
             },
         ]
@@ -652,6 +730,11 @@ mod tests {
             let found = cache.dir(&record.path).unwrap();
             assert!(record.same_as(&found), "{:?}", record.path);
             assert_eq!(found.path(), record.path);
+            assert_eq!(found.stamp(), record.stamp);
+            assert_eq!(
+                (found.ignored(), found.rules(), found.ignore_files()),
+                (record.ignored, record.rules, record.ignore_files)
+            );
         }
         assert!(cache.dir(b"other").is_none());
         let root = cache.dir(b"").unwrap();
@@ -679,7 +762,7 @@ mod tests {
 
         // A record that differs in anything is not the same.
         let mut changed = written[0].clone();
-        changed.clean = false;
+        changed.rules = 78;
         assert!(!changed.same_as(&root));
         let mut changed = written[0].clone();
         changed.files[1].vouches = true;
