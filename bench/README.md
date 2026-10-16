@@ -49,10 +49,10 @@ every round, go to `bench/results/`, which git ignores.
   smallest and the largest ratio of a single round, which shows how noisy
   the machine was; `cpu` is the ratio of CPU time (user and system) instead
   of wall time, which differs when one tool uses more cores than the other.
-- **Same work.** Before timing, each scenario checks that both tools do the
-  same thing: the same files modified, the same number of commits made, the
-  same changesets listed. A failed check is reported as an error, never as
-  a number.
+- **Same work.** Each scenario checks that both tools did the same thing:
+  the same files modified, the same number of commits made, the same
+  changesets listed. A failed check is reported as an error, never as a
+  number.
 - **Git as installed.** Git runs with its defaults, except that automatic
   garbage collection and maintenance are off in the repositories the
   benchmark makes, so that they never land in a measurement, and that the
