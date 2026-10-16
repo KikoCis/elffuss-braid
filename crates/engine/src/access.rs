@@ -9,8 +9,9 @@ use std::rc::Rc;
 
 use braid_format::changeset::{MAX_INLINE_CHANGES_BYTES, decode_change_list};
 use braid_format::{
-    Change, Changes, Changeset, Entry, EntryKind, Kind, Node, NodeCache, ObjectId, Objects,
-    TreeError, build_directory, find_entry, read_directory,
+    Change, Changes, Changeset, Entry, EntryEdit, EntryKind, Kind, Node, NodeCache, ObjectId,
+    Objects, TreeError, Updated, build_directory, check_edits, find_entry, read_directory,
+    update_directory,
 };
 
 use crate::error::{Error, store_error};
@@ -271,6 +272,25 @@ impl<'o, O: Objects> Trees<'o, O> {
             fetch_node(self.objects, &mut failure),
         )
         .map_err(|error| tree_error(dir, failure, error))
+    }
+
+    /// The directory `base` after `edits`, sorted by name: its new root,
+    /// how many entries it has, and the nodes to store. Only the nodes on
+    /// the way to the edited names, and their neighbours where boundaries
+    /// move, are read.
+    pub(crate) fn update(&mut self, base: ObjectId, edits: &[EntryEdit]) -> Result<Updated, Error> {
+        let mut failure = None;
+        update_directory(
+            &mut self.nodes,
+            base,
+            edits,
+            fetch_node(self.objects, &mut failure),
+        )
+        .map_err(|error| match check_edits(edits) {
+            // The edits are checked before any node is read.
+            Err(invalid) => Error::Entries(invalid),
+            Ok(()) => tree_error(base, failure, error),
+        })
     }
 
     /// What is at `path` in the tree `root`.
