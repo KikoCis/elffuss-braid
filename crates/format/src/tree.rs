@@ -674,39 +674,103 @@ fn keep(nodes: &mut Vec<Built>, made: Vec<Made>, holds_entries: bool) -> Vec<Chi
 /// Reads every entry of the directory rooted at `root`, fetching nodes through
 /// `fetch`, and checks that the nodes are exactly the canonical split of those
 /// entries.
+///
+/// The check goes node by node instead of building the directory again. Each
+/// node must hash to its id and be what the reference to it says: its level,
+/// its last name and its number of entries. The entries must ascend from one
+/// leaf to the next, and every node must end where the splitting rule ends
+/// it, and nowhere before, except the last node of each level, which the end
+/// of the directory ends. With a root of two children or more, over more
+/// entries than a flat node holds, that is the canonical split.
 pub fn read_directory(
     root: ObjectId,
     mut fetch: impl FnMut(&ObjectId) -> Option<Vec<u8>>,
 ) -> Result<Vec<Entry>, TreeError> {
-    let mut entries = Vec::new();
-    collect(root, &mut fetch, &mut entries, None)?;
-    if build_directory(entries.clone())?.root() != root {
-        return Err(TreeError::NotCanonical);
-    }
-    Ok(entries)
+    let (level, children) = match fetched(root, &mut fetch)? {
+        Node::Flat(entries) => return Ok(entries),
+        Node::Leaf(_) => return Err(TreeError::NotCanonical),
+        Node::Internal { level, children } => (level, children),
+    };
+    let total = split_total(&children)?;
+    let mut whole = Whole {
+        fetch,
+        splitter: Splitter::new(),
+        last_name: children
+            .last()
+            .map(|child| child.last_name.clone())
+            .unwrap_or_default(),
+        // The counts are checked as the nodes are read: do not trust them
+        // with a large allocation before.
+        entries: Vec::with_capacity(usize::try_from(total).map_or(0, |total| total.min(1 << 16))),
+    };
+    whole.below(level, &children, true)?;
+    Ok(whole.entries)
 }
 
-fn collect(
+/// Fetches the node `id`, checks that its bytes hash to its id, and decodes
+/// it.
+fn fetched(
     id: ObjectId,
     fetch: &mut impl FnMut(&ObjectId) -> Option<Vec<u8>>,
-    entries: &mut Vec<Entry>,
-    expected_level: Option<u8>,
-) -> Result<(), TreeError> {
+) -> Result<Node, TreeError> {
     let bytes = fetch(&id).ok_or(TreeError::MissingNode(id))?;
     if ObjectId::hash(Kind::Tree, &bytes) != id {
         return Err(TreeError::NotCanonical);
     }
-    match (Node::decode(&bytes)?, expected_level) {
-        (Node::Flat(found), None) => entries.extend(found),
-        (Node::Leaf(found), Some(0)) => entries.extend(found),
-        (Node::Internal { level, children }, expected) if expected.is_none_or(|e| e == level) => {
-            for child in children {
-                collect(child.node, fetch, entries, Some(level - 1))?;
+    Node::decode(&bytes)
+}
+
+/// A split directory being read whole, and checked node by node.
+struct Whole<F> {
+    fetch: F,
+    splitter: Splitter,
+    /// The last name of the directory: the last node of every level ends
+    /// with it.
+    last_name: Vec<u8>,
+    entries: Vec<Entry>,
+}
+
+impl<F: FnMut(&ObjectId) -> Option<Vec<u8>>> Whole<F> {
+    /// Checks where an internal node of `level` with `children` ends, then
+    /// reads every node below it, in order.
+    fn below(&mut self, level: u8, children: &[Child], last: bool) -> Result<(), TreeError> {
+        self.cuts(level, children, last)?;
+        for child in children {
+            let node = fetched(child.node, &mut self.fetch)?;
+            check_child(&node, level - 1, child)?;
+            let last = child.last_name == self.last_name;
+            match node {
+                Node::Leaf(entries) => {
+                    self.cuts(0, &entries, last)?;
+                    if let (Some(previous), Some(first)) = (self.entries.last(), entries.first())
+                        && first.name <= previous.name
+                    {
+                        return Err(TreeError::NotCanonical);
+                    }
+                    self.entries.extend(entries);
+                }
+                Node::Internal { level, children } => self.below(level, &children, last)?,
+                Node::Flat(_) => return Err(TreeError::NotCanonical),
             }
         }
-        _ => return Err(TreeError::NotCanonical),
+        Ok(())
     }
-    Ok(())
+
+    /// Checks that a node of `level` that holds `items` ends where the
+    /// splitting rule ends it, and nowhere before. The last node of a level,
+    /// `last`, ends with the directory instead.
+    fn cuts<I: Item>(&mut self, level: u8, items: &[I], last: bool) -> Result<(), TreeError> {
+        for (index, item) in items.iter().enumerate() {
+            let end = index + 1 == items.len();
+            if end && last {
+                break;
+            }
+            if self.splitter.ends(level, item.name(), index + 1) != end {
+                return Err(TreeError::NotCanonical);
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -795,11 +859,7 @@ impl NodeCache {
         if let Some(node) = self.nodes.get(&id) {
             return Ok(Rc::clone(node));
         }
-        let bytes = fetch(&id).ok_or(TreeError::MissingNode(id))?;
-        if ObjectId::hash(Kind::Tree, &bytes) != id {
-            return Err(TreeError::NotCanonical);
-        }
-        let node = Rc::new(Node::decode(&bytes)?);
+        let node = Rc::new(fetched(id, fetch)?);
         self.nodes.insert(id, Rc::clone(&node));
         Ok(node)
     }
@@ -1532,5 +1592,194 @@ mod tests {
         assert!(Node::decode(&[FORMAT, 9]).is_err());
         assert!(Node::decode(&[FORMAT, NODE_LEAF, 0]).is_err());
         assert!(Node::decode(&[FORMAT, NODE_INTERNAL, 0, 0]).is_err());
+    }
+
+    type Store = HashMap<ObjectId, Vec<u8>>;
+
+    /// How `read_directory` checked a directory before it went node by node:
+    /// it read every entry, built the directory again and compared the roots.
+    fn read_by_building_again(root: ObjectId, store: &Store) -> Result<Vec<Entry>, TreeError> {
+        fn collect(
+            id: ObjectId,
+            store: &Store,
+            entries: &mut Vec<Entry>,
+            expected_level: Option<u8>,
+        ) -> Result<(), TreeError> {
+            let bytes = store.get(&id).ok_or(TreeError::MissingNode(id))?;
+            match (Node::decode(bytes)?, expected_level) {
+                (Node::Flat(found), None) => entries.extend(found),
+                (Node::Leaf(found), Some(0)) => entries.extend(found),
+                (Node::Internal { level, children }, expected)
+                    if expected.is_none_or(|e| e == level) =>
+                {
+                    for child in children {
+                        collect(child.node, store, entries, Some(level - 1))?;
+                    }
+                }
+                _ => return Err(TreeError::NotCanonical),
+            }
+            Ok(())
+        }
+        let mut entries = Vec::new();
+        collect(root, store, &mut entries, None)?;
+        if build_directory(entries.clone())?.root() != root {
+            return Err(TreeError::NotCanonical);
+        }
+        Ok(entries)
+    }
+
+    /// A directory always split, its nodes cut where `cut` says, given the
+    /// level, the number of items the node would hold and whether the name
+    /// hashes below the threshold; nodes never grow past the limit.
+    fn cut_with(
+        entries: Vec<Entry>,
+        mut cut: impl FnMut(u8, usize, bool) -> bool,
+    ) -> (ObjectId, Store) {
+        fn level<I: Item>(
+            level: u8,
+            items: Vec<I>,
+            store: &mut Store,
+            cut: &mut impl FnMut(u8, usize, bool) -> bool,
+        ) -> Vec<Child> {
+            let mut splitter = Splitter::new();
+            let mut chunker = Chunker::new(level);
+            for item in items {
+                let count = chunker.next_count();
+                let hit = splitter.hit(level, item.name());
+                let ends = cut(level, count, hit) || count >= MAX_NODE_ENTRIES;
+                chunker.push(item, ends);
+            }
+            chunker
+                .finish()
+                .into_iter()
+                .map(|made| {
+                    store.insert(made.child.node, made.bytes);
+                    made.child
+                })
+                .collect()
+        }
+        let mut store = Store::new();
+        let mut children = level(0, entries, &mut store, &mut cut);
+        let mut at = 1;
+        while children.len() > 1 {
+            children = level(at, children, &mut store, &mut cut);
+            at += 1;
+        }
+        (children[0].node, store)
+    }
+
+    /// Ways to cut the nodes of one level other than by the splitting rule,
+    /// which the others follow.
+    #[derive(Clone, Copy, Debug)]
+    enum Cut {
+        /// The splitting rule everywhere.
+        Rule,
+        /// The `k`th cut of the rule is not made.
+        Skip(usize),
+        /// A cut after the `k`th item of the level, besides the rule's.
+        Extra(usize),
+        /// The `k`th cut of the rule is made one item later.
+        Late(usize),
+        /// Cut wherever a name hashes below the threshold, however few items
+        /// the node holds.
+        NoMinimum,
+        /// Nodes of `k` items.
+        Fixed(usize),
+    }
+
+    fn cutter(target: u8, way: Cut) -> impl FnMut(u8, usize, bool) -> bool {
+        let (mut cuts, mut items, mut late) = (0, 0, false);
+        move |level, count, hit| {
+            let rule = ends(count, || hit);
+            if level != target {
+                return rule;
+            }
+            items += 1;
+            cuts += usize::from(rule);
+            match way {
+                Cut::Rule => rule,
+                Cut::Skip(k) => rule && cuts != k,
+                Cut::Extra(k) => rule || items == k,
+                Cut::Late(k) => {
+                    if std::mem::take(&mut late) {
+                        return true;
+                    }
+                    late = rule && cuts == k;
+                    rule && !late
+                }
+                Cut::NoMinimum => hit,
+                Cut::Fixed(k) => count >= k,
+            }
+        }
+    }
+
+    fn cut() -> impl proptest::strategy::Strategy<Value = Cut> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(Cut::Rule),
+            (1usize..40).prop_map(Cut::Skip),
+            (1usize..4_000).prop_map(Cut::Extra),
+            (1usize..40).prop_map(Cut::Late),
+            Just(Cut::NoMinimum),
+            (1usize..=MAX_NODE_ENTRIES).prop_map(Cut::Fixed),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// Checking node by node accepts and refuses exactly the trees that
+        /// building again and comparing did, whichever way their nodes are cut.
+        #[test]
+        fn reading_checks_what_building_again_checked(
+            count in 900usize..4_000,
+            seed in proptest::prelude::any::<u64>(),
+            target in 0u8..3,
+            way in cut(),
+        ) {
+            let entries: Vec<Entry> = (0..count as u64)
+                .map(|i| {
+                    let name = format!("{:x}-{i}", seed.wrapping_mul(i + 1) % 7919);
+                    (name.clone(), file(&name, "x"))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_values()
+                .collect();
+            let (root, store) = cut_with(entries.clone(), cutter(target, way));
+            let fetch = |id: &ObjectId| store.get(id).cloned();
+            let read = read_directory(root, fetch);
+            proptest::prop_assert_eq!(&read, &read_by_building_again(root, &store));
+            if matches!(way, Cut::Rule) && entries.len() > MAX_FLAT_ENTRIES {
+                proptest::prop_assert_eq!(read, Ok(entries));
+            }
+        }
+    }
+
+    #[test]
+    fn reading_refuses_a_root_with_one_child() {
+        let dir = build_directory(many(3_000, "x")).unwrap();
+        let root = dir.root();
+        let mut store: Store = dir.nodes.into_iter().collect();
+        let Node::Internal { level, children } = Node::decode(&store[&root]).unwrap() else {
+            panic!("split");
+        };
+        let above = Node::Internal {
+            level: level + 1,
+            children: vec![Child {
+                last_name: children.last().unwrap().last_name.clone(),
+                node: root,
+                entry_count: 3_000,
+            }],
+        };
+        store.insert(above.id(), above.encode());
+        let fetch = |id: &ObjectId| store.get(id).cloned();
+        assert_eq!(
+            read_directory(above.id(), fetch),
+            Err(TreeError::NotCanonical)
+        );
+        assert_eq!(
+            read_by_building_again(above.id(), &store),
+            Err(TreeError::NotCanonical)
+        );
     }
 }
