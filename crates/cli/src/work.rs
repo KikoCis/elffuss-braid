@@ -295,8 +295,8 @@ impl Target {
         match braid_repo::locate(&cwd)? {
             Location::Workspace { dir, link } => {
                 let repo = match &cli.repo {
-                    Some(root) => Repo::open(root)?,
-                    None => Repo::open(&link.repository)?,
+                    Some(root) => Repo::open_with(root, cli.store_options())?,
+                    None => Repo::open_with(&link.repository, cli.store_options())?,
                 };
                 Ok(Target {
                     repo,

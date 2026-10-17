@@ -333,9 +333,11 @@ impl Place {
             Err(err) => return Err(err.into()),
         };
         let repo = match (&cli.repo, &location) {
-            (Some(root), _) => Some(Repo::open(root)?),
-            (None, Some(Location::Root(dir))) => Some(Repo::open(dir)?),
-            (None, Some(Location::Workspace { link, .. })) => Some(Repo::open(&link.repository)?),
+            (Some(root), _) => Some(Repo::open_with(root, cli.store_options())?),
+            (None, Some(Location::Root(dir))) => Some(Repo::open_with(dir, cli.store_options())?),
+            (None, Some(Location::Workspace { link, .. })) => {
+                Some(Repo::open_with(&link.repository, cli.store_options())?)
+            }
             (None, None) => None,
         };
         // What the current directory is in counts only when it belongs to

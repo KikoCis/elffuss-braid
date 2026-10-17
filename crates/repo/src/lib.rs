@@ -50,7 +50,7 @@ pub use git::{
 pub use history::{RepoHistory, StoreIndex};
 pub use link::{Location, WORK_DIR, WORKSPACES_DIR, WorkspaceLink, locate};
 pub use remote::Remote;
-pub use sync::{MIRRORS_DIR, SyncOptions, SyncOutcome, SyncReport};
+pub use sync::{MIRRORS_DIR, SyncDirection, SyncOptions, SyncOutcome, SyncReport};
 
 /// Name of the directory that holds a repository's data.
 pub const DIR: &str = ".braid";
@@ -201,12 +201,18 @@ pub struct Repo {
 impl Repo {
     /// Creates a repository in `dir`, which is created if needed.
     pub fn init(dir: &Path) -> Result<Repo, Error> {
+        Repo::init_with(dir, Options::default())
+    }
+
+    /// Creates a repository in `dir` with the store opened with `options`:
+    /// a server passes [`Durability::Full`](braid_store::Durability::Full).
+    pub fn init_with(dir: &Path, options: Options) -> Result<Repo, Error> {
         let store_dir = dir.join(DIR).join(STORE_DIR);
         if store_dir.exists() {
             return Err(Error::AlreadyExists);
         }
         fs::create_dir_all(dir.join(DIR))?;
-        let store = Store::init(&store_dir, Options::default())?;
+        let store = Store::init(&store_dir, options)?;
         Ok(Repo {
             root: dir.to_path_buf(),
             store,
@@ -216,11 +222,16 @@ impl Repo {
 
     /// Opens the repository whose root is `dir`.
     pub fn open(dir: &Path) -> Result<Repo, Error> {
+        Repo::open_with(dir, Options::default())
+    }
+
+    /// Opens the repository whose root is `dir`, its store with `options`.
+    pub fn open_with(dir: &Path, options: Options) -> Result<Repo, Error> {
         let store_dir = dir.join(DIR).join(STORE_DIR);
         if !store_dir.is_dir() {
             return Err(Error::NotFound);
         }
-        let store = Store::open(&store_dir, Options::default())?;
+        let store = Store::open(&store_dir, options)?;
         Ok(Repo {
             root: dir.to_path_buf(),
             store,
@@ -232,9 +243,14 @@ impl Repo {
     /// nearest parent with a `.braid` directory, or the repository named by
     /// the `.braid` file of the workspace that contains `start`.
     pub fn discover(start: &Path) -> Result<Repo, Error> {
+        Repo::discover_with(start, Options::default())
+    }
+
+    /// [`Repo::discover`], with the store opened with `options`.
+    pub fn discover_with(start: &Path, options: Options) -> Result<Repo, Error> {
         match locate(start)? {
-            Location::Root(dir) => Repo::open(&dir),
-            Location::Workspace { link, .. } => Repo::open(&link.repository),
+            Location::Root(dir) => Repo::open_with(&dir, options),
+            Location::Workspace { link, .. } => Repo::open_with(&link.repository, options),
         }
     }
 

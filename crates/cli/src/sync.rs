@@ -7,13 +7,40 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use braid_format::{EntryKind, ObjectId};
-use braid_repo::{Conflict, ConflictKind, HunkSide, SyncOptions, SyncOutcome, SyncReport};
+use braid_repo::{
+    Conflict, ConflictKind, HunkSide, SyncDirection, SyncOptions, SyncOutcome, SyncReport,
+};
 use serde_json::{Value, json};
 
 use crate::{Cli, open_repo, print_json};
 
 /// Exit status when the sync found conflicts.
 const CONFLICTS: u8 = 2;
+
+/// Exit status when the branches are not in the relation `--direction`
+/// requires.
+const DIVERGED: u8 = 3;
+
+/// `--direction`: which way changes may go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Direction {
+    /// Both ways, merging when both sides moved.
+    Both,
+    /// Braid to the remote only.
+    Publish,
+    /// The remote to braid only.
+    Follow,
+}
+
+impl From<Direction> for SyncDirection {
+    fn from(direction: Direction) -> Self {
+        match direction {
+            Direction::Both => SyncDirection::Both,
+            Direction::Publish => SyncDirection::Publish,
+            Direction::Follow => SyncDirection::Follow,
+        }
+    }
+}
 
 /// What the text report says to do about conflicts: the two sides meet in
 /// git, and the guide for agents gives the steps.
@@ -24,22 +51,27 @@ pub(crate) fn git_sync(
     remote: &str,
     branch: &str,
     remote_branch: Option<&str>,
+    direction: Direction,
     dry_run: bool,
 ) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
     let options = SyncOptions {
         remote_branch: remote_branch.map(str::to_owned),
         dry_run,
+        direction: direction.into(),
         ..SyncOptions::default()
     };
     let report = repo.git_sync(remote, branch, &cli.agent, &options)?;
     if cli.json {
-        print_json(&report_json(&report))?;
+        let mut value = report_json(&report);
+        value["direction"] = Value::String(options.direction.code().to_owned());
+        print_json(&value)?;
     } else {
         print_text(&report);
     }
     Ok(match report.outcome {
         SyncOutcome::Conflicts(_) => ExitCode::from(CONFLICTS),
+        SyncOutcome::Diverged { .. } => ExitCode::from(DIVERGED),
         ref outcome if outcome.is_success() => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     })
@@ -84,7 +116,7 @@ fn report_json(report: &SyncReport) -> Value {
         SyncOutcome::RemoteMoved { found } => {
             value["found"] = found.map_or(Value::Null, |oid| Value::String(oid.to_hex()));
         }
-        SyncOutcome::Rejected { reason } => {
+        SyncOutcome::Rejected { reason } | SyncOutcome::Diverged { reason } => {
             value["reason"] = Value::String(reason.clone());
         }
         _ => {}
@@ -233,6 +265,12 @@ fn print_text(report: &SyncReport) {
             if report.after != report.before {
                 eprintln!("{branch} is at the merge {}.", short(report.after));
             }
+        }
+        SyncOutcome::Diverged { reason } => {
+            eprintln!(
+                "braid: error: {reason}: {branch} and {} were left as they were; nothing was recorded, merged or pushed.",
+                report.remote_branch
+            );
         }
         other => println!("{}", other.code()),
     }

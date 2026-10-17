@@ -24,6 +24,7 @@ use braid_store::{FsckReport, Operation, RefUpdate};
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::{Value, json};
+use sync::Direction;
 
 /// Version control for many agents landing changes at once.
 #[derive(Debug, Parser)]
@@ -51,6 +52,18 @@ struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     workspace: Option<String>,
 
+    /// How hard the store pushes writes to stable storage: `ordered` may
+    /// lose the last operations on power loss, never consistency; `full`
+    /// keeps everything a command acknowledged, at some cost.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        env = "BRAID_DURABILITY",
+        default_value_t = DurabilityArg::Ordered
+    )]
+    durability: DurabilityArg,
+
     #[command(subcommand)]
     command: Command,
 
@@ -60,7 +73,27 @@ struct Cli {
     given: String,
 }
 
+/// `--durability`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum DurabilityArg {
+    /// Consistent after a crash; the last operations may be lost.
+    Ordered,
+    /// Everything acknowledged survives a power loss.
+    Full,
+}
+
 impl Cli {
+    /// The store options `--durability` asks for.
+    pub(crate) fn store_options(&self) -> braid_store::Options {
+        braid_store::Options {
+            durability: match self.durability {
+                DurabilityArg::Ordered => braid_store::Durability::Ordered,
+                DurabilityArg::Full => braid_store::Durability::Full,
+            },
+            ..braid_store::Options::default()
+        }
+    }
+
     /// A command for a hint to print: `braid`, the global flags this
     /// command was given (`--repo`, `--agent`, `--workspace`), then `rest`,
     /// so that a hint followed as written acts on the same workspace, for
@@ -311,8 +344,10 @@ enum GitAction {
     /// Keep a braid branch and a branch of a git remote in step: fetch and
     /// import the remote branch, then fast-forward the braid branch, or push
     /// it (merging first when both moved) as a fast-forward with a lease, so
-    /// the remote's history is never rewritten. Exits with 2 on conflicts and
-    /// 1 when the push is refused.
+    /// the remote's history is never rewritten. By default a remote that
+    /// someone else wrote to is merged in; `--direction publish` or `follow`
+    /// stops instead. Exits with 2 on conflicts, 3 when the branches are not
+    /// in the relation `--direction` requires, and 1 when the push is refused.
     Sync {
         /// The git remote: a URL or a path.
         remote: String,
@@ -322,6 +357,13 @@ enum GitAction {
         /// The branch of the remote (default: the braid branch's name).
         #[arg(long, value_name = "NAME")]
         remote_branch: Option<String>,
+        /// Which way changes may go: `both` merges when both sides moved;
+        /// `publish` only pushes, and stops unless the remote branch is the
+        /// braid branch or one of its ancestors; `follow` only takes the
+        /// remote's commits in, and stops unless the braid branch is the
+        /// remote branch or one of its ancestors.
+        #[arg(long, value_enum, default_value_t = Direction::Both)]
+        direction: Direction,
         /// Report what would happen without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -338,17 +380,70 @@ enum OpAction {
     },
 }
 
+/// The exit status of a command whose reader closed standard output early,
+/// as a shell reports a process that SIGPIPE ended: 128 + 13.
+const BROKEN_PIPE: i32 = 141;
+
 fn main() -> ExitCode {
+    quiet_on_broken_pipe();
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     cli.given = given_flags(&cli, &matches);
     match run(&cli) {
         Ok(code) => code,
+        // A reader that stopped early is no failure: say nothing, as git
+        // does. braid writes to no other pipe (git runs with no input), so a
+        // broken pipe is standard output's.
+        Err(err) if broken_pipe(&err) => ExitCode::from(BROKEN_PIPE as u8),
         Err(err) => {
             eprintln!("braid: error: {err:#}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether `err` comes from a write to a reader that went away.
+fn broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|err| err.kind() == io::ErrorKind::BrokenPipe)
+            || cause
+                .downcast_ref::<serde_json::Error>()
+                .is_some_and(|err| err.io_error_kind() == Some(io::ErrorKind::BrokenPipe))
+    })
+}
+
+/// Makes `print!` and `println!` exit quietly, with [`BROKEN_PIPE`], once
+/// the reader of standard output went away (`braid log | head`), instead
+/// of panicking. Standard error is left alone.
+fn quiet_on_broken_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if message.starts_with("failed printing to stdout")
+            && (message.contains("Broken pipe") || message.contains("os error 32"))
+        {
+            std::process::exit(BROKEN_PIPE);
+        }
+        default(info);
+    }));
+}
+
+/// Exits quietly with [`BROKEN_PIPE`] when a write to standard output failed
+/// because its reader went away; any other error is returned.
+fn stdout_written<T>(result: io::Result<T>) -> io::Result<T> {
+    if let Err(err) = &result
+        && err.kind() == io::ErrorKind::BrokenPipe
+    {
+        std::process::exit(BROKEN_PIPE);
+    }
+    result
 }
 
 fn run(cli: &Cli) -> Result<ExitCode> {
@@ -384,9 +479,17 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                     remote,
                     branch,
                     remote_branch,
+                    direction,
                     dry_run,
                 },
-        } => sync::git_sync(cli, remote, branch, remote_branch.as_deref(), *dry_run),
+        } => sync::git_sync(
+            cli,
+            remote,
+            branch,
+            remote_branch.as_deref(),
+            *direction,
+            *dry_run,
+        ),
         Command::Fsck => fsck(cli),
         Command::Stats => stats(cli),
         Command::Workspace { action } => work::workspace(cli, action),
@@ -402,16 +505,20 @@ fn run(cli: &Cli) -> Result<ExitCode> {
 
 fn open_repo(cli: &Cli) -> Result<Repo> {
     let repo = match &cli.repo {
-        Some(dir) => Repo::open(dir),
-        None => Repo::discover(&std::env::current_dir()?),
+        Some(dir) => Repo::open_with(dir, cli.store_options()),
+        None => Repo::discover_with(&std::env::current_dir()?, cli.store_options()),
     };
     Ok(repo?)
 }
 
 fn print_json(value: &Value) -> Result<()> {
+    // Serialized first, so that a closed pipe shows up as an I/O error here
+    // rather than inside serde_json's own error type.
+    let mut text = serde_json::to_vec(value)?;
+    text.push(b'\n');
     let mut out = io::stdout().lock();
-    serde_json::to_writer(&mut out, value)?;
-    writeln!(out)?;
+    stdout_written(out.write_all(&text))?;
+    stdout_written(out.flush())?;
     Ok(())
 }
 
@@ -420,7 +527,7 @@ fn init(cli: &Cli, dir: Option<&Path>) -> Result<ExitCode> {
         Some(dir) => dir.to_path_buf(),
         None => std::env::current_dir()?,
     };
-    let repo = Repo::init(&dir)?;
+    let repo = Repo::init_with(&dir, cli.store_options())?;
     if cli.json {
         print_json(&json!({ "root": repo.root().to_string_lossy() }))?;
     } else {

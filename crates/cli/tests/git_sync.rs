@@ -415,3 +415,100 @@ fn a_remote_branch_by_another_name() {
     assert_eq!(report["remote_branch"], "trunk");
     assert_eq!(world.refs()["work"], report["after"]);
 }
+
+impl World {
+    fn sync_direction(&self, direction: &str) -> (Option<i32>, Value) {
+        self.braid_json(&[
+            "git",
+            "sync",
+            self.remote.to_str().unwrap(),
+            "--direction",
+            direction,
+        ])
+    }
+
+    /// Puts braid ahead of the remote: it imports a commit the remote does
+    /// not have.
+    fn braid_ahead(&self, files: &[(&str, &str)]) {
+        let (upstream, _) = self.commit("upstream", files, "Braid's own");
+        let import = self.braid(&["git", "import", upstream.to_str().unwrap()]);
+        assert!(import.status.success());
+    }
+}
+
+#[test]
+fn publish_stops_when_someone_else_wrote_to_the_remote() {
+    let world = World::new();
+    world.push(&[("a", "1\n"), ("b", "1\n")], "First");
+    world.sync();
+    world.braid_ahead(&[("a", "braid\n")]);
+    let theirs = world.push(&[("b", "theirs\n")], "Pushed past braid");
+
+    let refs = world.refs();
+    let operations = world.operations();
+    for args in [&["--dry-run"][..], &[]] {
+        let mut command = vec!["git", "sync", world.remote.to_str().unwrap()];
+        command.extend(["--direction", "publish"]);
+        command.extend(args);
+        let (code, report) = world.braid_json(&command);
+        assert_eq!(code, Some(3), "{report}");
+        assert_eq!(report["outcome"], "diverged");
+        assert_eq!(report["direction"], "publish");
+        assert!(report["reason"].as_str().unwrap().contains("remote"));
+        assert_eq!(report["pushed"], Value::Null);
+        assert_eq!(report["operations"], Value::Array(Vec::new()));
+    }
+    // Nothing was recorded, merged or pushed.
+    assert_eq!(world.refs(), refs);
+    assert_eq!(world.operations(), operations);
+    assert_eq!(world.remote_head(), theirs);
+}
+
+#[test]
+fn publish_pushes_when_only_braid_moved() {
+    let world = World::new();
+    world.push(&[("a", "1\n")], "First");
+    world.sync();
+    world.braid_ahead(&[("a", "braid\n")]);
+    let (code, report) = world.sync_direction("publish");
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["outcome"], "pushed");
+    assert_eq!(world.remote_head(), report["pushed"].as_str().unwrap());
+    world.assert_forward_only();
+}
+
+#[test]
+fn follow_takes_the_remote_in_and_stops_on_braid_work_or_a_rewind() {
+    let world = World::new();
+    let first = world.push(&[("a", "1\n")], "First");
+    world.sync();
+
+    // Only the remote moved: follow fast-forwards.
+    world.push(&[("a", "2\n")], "Second");
+    let (code, report) = world.sync_direction("follow");
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["outcome"], "fast_forwarded");
+
+    // Braid has a changeset of its own: follow stops and pushes nothing.
+    let head = world.remote_head();
+    world.braid_ahead(&[("b", "braid\n")]);
+    let refs = world.refs();
+    let (code, report) = world.sync_direction("follow");
+    assert_eq!(code, Some(3), "{report}");
+    assert_eq!(report["outcome"], "diverged");
+    assert_eq!(world.refs(), refs);
+    assert_eq!(world.remote_head(), head);
+
+    // The remote went back: follow stops too.
+    let world = World::new();
+    world.push(&[("a", "1\n")], "First");
+    world.push(&[("a", "2\n")], "Second");
+    world.sync();
+    git(
+        &world.remote,
+        &["update-ref", "refs/heads/main", first.as_str()],
+    );
+    let (code, report) = world.sync_direction("follow");
+    assert_eq!(code, Some(3), "{report}");
+    assert_eq!(report["outcome"], "diverged");
+}

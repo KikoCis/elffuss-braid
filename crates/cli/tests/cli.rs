@@ -544,3 +544,118 @@ fn importing_again_never_takes_a_braid_branch_backwards() {
     assert_ne!(refs["refs"]["feature"], imported.as_str());
     assert_eq!(run_json(braid_in(&repo).arg("fsck"))["clean"], true);
 }
+
+/// A reader that stops early, as `braid log | head` does, is no failure:
+/// braid exits quietly with 141, as a shell reports a process that SIGPIPE
+/// ended, in text and in JSON alike.
+#[cfg(unix)]
+#[test]
+fn a_reader_that_stops_early_gets_a_quiet_141() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    git(&["init", "--quiet", "-b", "main", "source"], dir.path());
+    // A history long enough that its log fills any pipe buffer.
+    let mut stream = String::new();
+    for i in 1..=800 {
+        let message = format!("Commit number {i}, with a message long enough to fill the pipe\n");
+        stream.push_str(&format!(
+            "commit refs/heads/main\nmark :{i}\ncommitter A <a@example.org> {} +0000\ndata {}\n{message}",
+            1_700_000_000 + i,
+            message.len()
+        ));
+        if i > 1 {
+            stream.push_str(&format!("from :{}\n", i - 1));
+        }
+        stream.push('\n');
+    }
+    let mut import = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(&source)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    import
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    assert!(import.wait().unwrap().success());
+    let repo = dir.path().join("repo");
+    assert!(braid().arg("init").arg(&repo).status().unwrap().success());
+    assert!(
+        braid()
+            .args(["git", "import"])
+            .arg(&source)
+            .arg("--repo")
+            .arg(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    for json in [false, true] {
+        let mut command = braid();
+        command
+            .args(["log", "main", "-n", "100000", "--repo"])
+            .arg(&repo);
+        if json {
+            command.arg("--json");
+        }
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut start = [0u8; 10];
+        child.stdout.take().unwrap().read_exact(&mut start).unwrap();
+        // The reader goes away here, as head does.
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(141), "json {json}: {output:?}");
+        assert!(output.stderr.is_empty(), "json {json}: {output:?}");
+    }
+}
+
+#[test]
+fn durability_full_opens_and_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let init = braid()
+        .args(["--durability", "full", "init"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "durable\n").unwrap();
+    let created = braid()
+        .env("BRAID_DURABILITY", "full")
+        .env("BRAID_AUTHOR", "Ada <ada@example.org>")
+        .args([
+            "change", "create", "--base", "none", "-m", "First", "--land", "main",
+        ])
+        .arg("--set")
+        .arg(format!("a.txt=@{}", file.display()))
+        .arg("--repo")
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{created:?}");
+    let refused = braid()
+        .args(["--durability", "sometimes", "refs", "--repo"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+}

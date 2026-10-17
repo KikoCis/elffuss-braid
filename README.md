@@ -343,9 +343,18 @@ Repositories come in with their whole history and keep a git mirror.
   remote only ever fast-forwards and its history is never rewritten.
   Conflicts move nothing and exit with status 2.
 
+  By default a sync goes both ways, so a commit that someone else pushed to
+  the remote is merged into braid. `--direction publish` only pushes: it
+  stops, with exit status 3 and outcome `diverged`, unless the remote branch
+  is braid's or one of its ancestors. `--direction follow` only takes the
+  remote's commits in, and stops the same way when braid has changesets of
+  its own or the remote went back. Neither records, merges or pushes
+  anything when it stops.
+
   ```bash
   braid git sync https://github.com/you/project.git --branch main
   braid git sync https://github.com/you/project.git --dry-run --json
+  braid git sync https://github.com/you/project.git --direction publish
   ```
 - Braid contains no code from git itself, which is GPLv2. It reads and writes
   git data with gitoxide (MIT or Apache-2.0); `git sync` also runs the `git`

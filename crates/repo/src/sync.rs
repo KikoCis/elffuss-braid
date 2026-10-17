@@ -34,6 +34,40 @@ pub struct SyncOptions {
     /// Environment variables to set for the git commands, on top of the
     /// process's own.
     pub git_env: Vec<(OsString, OsString)>,
+    /// Which way changes may go.
+    pub direction: SyncDirection,
+}
+
+/// Which way a sync may move changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SyncDirection {
+    /// Both ways: the braid branch takes what the remote has, the remote
+    /// takes what braid has, and when both moved they are merged and the
+    /// merge is pushed. Writes made to the remote by anyone else end up in
+    /// braid.
+    #[default]
+    Both,
+    /// Braid to the remote only: the remote branch must be the braid branch
+    /// or one of its ancestors, or absent. Anything else is
+    /// [`SyncOutcome::Diverged`], and nothing is recorded, merged or pushed.
+    Publish,
+    /// The remote to braid only: the braid branch must be the remote branch
+    /// or one of its ancestors, or absent. Anything else, a remote that went
+    /// back included, is [`SyncOutcome::Diverged`], and nothing is recorded
+    /// or pushed.
+    Follow,
+}
+
+impl SyncDirection {
+    /// The name used on the command line and in reports: `both`, `publish`
+    /// or `follow`.
+    pub fn code(self) -> &'static str {
+        match self {
+            SyncDirection::Both => "both",
+            SyncDirection::Publish => "publish",
+            SyncDirection::Follow => "follow",
+        }
+    }
 }
 
 /// What a sync did, or would do.
@@ -74,12 +108,18 @@ pub enum SyncOutcome {
         /// Git's reason.
         reason: String,
     },
+    /// The branches are not in the relation the [`SyncDirection`] requires.
+    /// Nothing was recorded, merged or pushed.
+    Diverged {
+        /// What was found.
+        reason: String,
+    },
 }
 
 impl SyncOutcome {
     /// A short, stable name for the outcome, for reports and JSON:
     /// `up_to_date`, `created`, `fast_forwarded`, `pushed`, `merged`,
-    /// `conflicts`, `remote_moved` or `rejected`.
+    /// `conflicts`, `remote_moved`, `rejected` or `diverged`.
     pub fn code(&self) -> &'static str {
         match self {
             SyncOutcome::UpToDate => "up_to_date",
@@ -90,17 +130,19 @@ impl SyncOutcome {
             SyncOutcome::Conflicts(_) => "conflicts",
             SyncOutcome::RemoteMoved { .. } => "remote_moved",
             SyncOutcome::Rejected { .. } => "rejected",
+            SyncOutcome::Diverged { .. } => "diverged",
         }
     }
 
     /// Whether the two branches are in step at the end: every outcome but
-    /// conflicts and refused pushes.
+    /// conflicts, refused pushes and divergence.
     pub fn is_success(&self) -> bool {
         !matches!(
             self,
             SyncOutcome::Conflicts(_)
                 | SyncOutcome::RemoteMoved { .. }
                 | SyncOutcome::Rejected { .. }
+                | SyncOutcome::Diverged { .. }
         )
     }
 }
@@ -147,6 +189,7 @@ enum Decision {
         merged_paths: Vec<Vec<u8>>,
     },
     Conflicts(Vec<Conflict>),
+    Diverged(String),
 }
 
 /// The state after fetching and importing.
@@ -212,6 +255,14 @@ impl Repo {
     ///
     ///    The braid branch only ever moves with a compare and swap, in one
     ///    operation with the git map and `remote/<label>/<branch>`.
+    ///
+    ///    [`SyncOptions::direction`] restricts this. With
+    ///    [`SyncDirection::Publish`] only the first and the fourth case go
+    ///    ahead (and creating the remote branch); with
+    ///    [`SyncDirection::Follow`] only the first three. Any other case is
+    ///    [`SyncOutcome::Diverged`]: no merge is made, and no ref, map entry
+    ///    or remote branch moves. The objects of the fetched commits may stay
+    ///    in the store, which only appends.
     /// 4. A push is atomic and leased: `git push --atomic --porcelain
     ///    --force-with-lease=refs/heads/<branch>:<fetched> <remote>
     ///    <commit>:refs/heads/<branch>`, where `<fetched>` is G's commit as
@@ -343,6 +394,8 @@ struct Sync<'r> {
     tracking_ref: String,
     /// The directory of the mirrors, absolute.
     mirrors: PathBuf,
+    /// Which way changes may go.
+    direction: SyncDirection,
 }
 
 impl<'r> Sync<'r> {
@@ -371,6 +424,7 @@ impl<'r> Sync<'r> {
             remote_branch,
             remote,
             agent,
+            direction: options.direction,
         })
     }
 
@@ -481,12 +535,34 @@ impl<'r> Sync<'r> {
         prepared: &Prepared,
     ) -> Result<Decision, Error> {
         let remote = prepared.fetched.map(|(_, changeset)| changeset);
-        Ok(match (prepared.head, remote) {
-            (None, None) => {
-                return Err(Error::NothingToSync {
-                    branch: self.branch.clone(),
-                });
+        if let (None, None) = (prepared.head, remote) {
+            return Err(Error::NothingToSync {
+                branch: self.branch.clone(),
+            });
+        }
+        let diverged = |why: &str| Ok(Decision::Diverged(why.to_owned()));
+        match (self.direction, prepared.head, remote) {
+            (SyncDirection::Both, ..) => {}
+            (SyncDirection::Publish, None, Some(_)) => {
+                return diverged("braid has no such branch, and the remote has one");
             }
+            (SyncDirection::Publish, Some(head), Some(remote))
+                if head != remote && !is_ancestor(objects, remote, head)? =>
+            {
+                return diverged("the remote branch has commits the braid branch does not have");
+            }
+            (SyncDirection::Follow, Some(_), None) => {
+                return diverged("the remote has no such branch, and braid has one");
+            }
+            (SyncDirection::Follow, Some(head), Some(remote))
+                if head != remote && !is_ancestor(objects, head, remote)? =>
+            {
+                return diverged("the braid branch has changesets the remote branch does not have");
+            }
+            _ => {}
+        }
+        Ok(match (prepared.head, remote) {
+            (None, None) => unreachable!("handled above"),
             (None, Some(remote)) => Decision::Create(remote),
             (Some(head), None) => Decision::Push(head),
             (Some(head), Some(remote)) if head == remote => Decision::UpToDate,
@@ -578,6 +654,7 @@ impl<'r> Sync<'r> {
                 SyncOutcome::FastForwarded
             }
             Decision::Conflicts(conflicts) => SyncOutcome::Conflicts(conflicts),
+            Decision::Diverged(reason) => SyncOutcome::Diverged { reason },
             Decision::Push(target) => {
                 let commit = self.export(mirror, map, target)?;
                 match self.push(mirror, commit, fetched)? {
@@ -744,6 +821,7 @@ impl<'r> Sync<'r> {
                 }
             }
             Decision::Conflicts(conflicts) => SyncOutcome::Conflicts(conflicts),
+            Decision::Diverged(reason) => SyncOutcome::Diverged { reason },
         };
         Ok(report)
     }
