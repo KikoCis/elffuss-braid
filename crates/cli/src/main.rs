@@ -240,7 +240,7 @@ enum Command {
     },
     /// Show how the workspace differs from its base and its branch.
     #[command(long_about = work::STATUS_HELP)]
-    Status,
+    Status(work::IdentityArgs),
     /// Record the workspace's changes as a changeset on its base.
     Commit(work::CommitArgs),
     /// Land the workspace's changesets on its branch (exit status 2 on
@@ -390,7 +390,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Fsck => fsck(cli),
         Command::Stats => stats(cli),
         Command::Workspace { action } => work::workspace(cli, action),
-        Command::Status => work::status(cli),
+        Command::Status(args) => work::status(cli, args),
         Command::Commit(args) => work::commit(cli, args),
         Command::Land(args) => work::land(cli, args),
         Command::Update(args) => work::update(cli, args),

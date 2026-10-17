@@ -289,11 +289,14 @@ check that it differs in no other:
 - `braid commit` records the working copy as a changeset on the base. It
   refuses while something blocks it, listing every reason at once: conflict
   markers left in a file, a conflict that is not about content and not marked
-  resolved, a new file waiting for `braid track`. `braid status` lists the
-  same reasons as `blocking`, with `ready_to_commit`; it also counts how far
-  the branch's head is ahead of the workspace along first parents, stopping
-  after 5000 changesets, and lists the changesets that have not landed,
-  including those of a rebase in progress.
+  resolved, a new file waiting for `braid track`. Before any of them it needs
+  someone to sign as, from `--author`, `BRAID_AUTHOR` or `.braid/config`, as
+  `land` and `update` do. `braid status` lists the same reasons as
+  `blocking`, with `ready_to_commit`, and a missing or invalid author first,
+  read the same way; it also counts how far the branch's head is ahead of
+  the workspace along first parents, stopping after 5000 changesets, and
+  lists the changesets that have not landed, including those of a rebase in
+  progress.
 - `braid land` puts the workspace's changesets on its branch in one op log
   transaction: the engine fast-forwards or rebases them onto the head, and the
   branch moves with a compare-and-swap. The working copy then follows, writing
@@ -387,7 +390,8 @@ serves it apart from the code.
   shared checkout and the git remote get it from `braid git sync` and
   `git pull --ff-only`. The section has a session that finishes say so to
   the user, and offer to run them, rather than leave the user looking at
-  files that did not change.
+  files that did not change; where the project has no git remote, it says
+  so, and offers to make a bare one next to the project first.
 
 ## Git bridge
 

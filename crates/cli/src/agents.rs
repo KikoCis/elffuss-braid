@@ -696,19 +696,27 @@ source of truth, and `braid git sync` keeps the git remote in step.
   `braid cat-object <base>:<path> | diff -u - <path>`. To undo it, write
   the base's version back with `braid cat-object <base>:<path> > <path>`,
   or delete a file you added.
-- **Before each commit**, read `braid status`. There is no staging area:
-  `commit` records every change in the workspace, and only `.gitignore` and
-  `.braidignore` apply there, not `.git/info/exclude` or a global excludes
-  file, so list files that must stay local in `.braidignore`. Braid runs no
-  git hooks: run the project's checks yourself before you land.
+- **Before each commit**, read `braid status`: it lists what `commit` would
+  record, and what would stop it. There is no staging area: `commit`
+  records every change in the workspace, or only the paths it is given
+  (`commit -m \"...\" <path>...`), and `land` refuses while anything is left
+  uncommitted. Building or running the project writes files too: those
+  `.gitignore` does not list are new files like any other. Delete them, or
+  list them in `.braidignore`, which must then list itself too, or it is a
+  new file to commit: for Python's `__pycache__/`, run
+  `printf '%s\\n' .braidignore __pycache__/ >> .braidignore` in the
+  workspace's root. Only `.gitignore` and `.braidignore` apply in a
+  workspace, not `.git/info/exclude` or a global excludes file. Braid runs
+  no git hooks: run the project's checks yourself before you land.
 - **Conflicts:** `land` and `update` exit with status 2, the `outcome` in
   their JSON is `conflicts`, and `{branch}` does not move. After `land`, run
   `braid --agent agent-1 update`, which writes conflict markers into the
   files; fix them (`braid resolve <path>` settles conflicts that are not
-  about content), then `commit` (the message is kept) and `land` again. In
-  the JSON, `next` says what to run. Never `commit --force` during a
-  rebase: it would commit the markers. Any other failure exits with status
-  1, and braid prints it as text on standard error, even with `--json`.
+  about content), then `commit`, which keeps the change's message unless
+  `-m` gives another, and `land` again. In the JSON, `next` says what to
+  run. Never `commit --force` during a rebase: it would commit the markers.
+  Any other failure exits with status 1, and braid prints it as text on
+  standard error, even with `--json`.
 - **Before a new task**, `braid --agent agent-1 update` brings your
   workspace onto `{branch}`.
 - **When you finish**, tell the user that what you landed is on braid's
@@ -720,11 +728,25 @@ source of truth, and `braid git sync` keeps the git remote in step.
   git pull --ff-only
   ```
 
-  Offer to run it: when to sync is the user's call. Once everything has
-  landed, `braid workspace remove agent-1`, from the project root, removes
-  your workspace.
+  Offer to run it: when to sync is the user's call. Where
+  `git remote get-url origin` fails, the project has no remote of that
+  name: if `git remote` lists others, ask the user which to sync with, and
+  write its name in place of `origin`; if it lists none, say so, and offer
+  to make one next to the project first, from the project root:
+
+  ```bash
+  git init --bare -b {branch} \"$PWD.git\"
+  git remote add origin \"$PWD.git\"
+  git push -u origin {branch}
+  ```
+
+  Once everything has landed, `braid workspace remove agent-1`, from the
+  project root, removes your workspace.
 - Changesets are signed by `BRAID_AUTHOR` (`\"Name <email>\"`), or else by the
-  `name` and `email` in `.braid/config`.
+  `name` and `email` in `.braid/config`. With neither, `commit`, `land` and
+  `update` fail with \"no author\", and `status` lists it first among what
+  stops a commit: ask the user who signs, and write the answer into
+  `.braid/config` as `name = <name>` and `email = <email>` lines.
 - New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger
   than 1 MiB wait for `braid track <path>`. Never track a secret: move it
   out of the workspace.

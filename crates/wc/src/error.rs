@@ -103,9 +103,20 @@ pub enum Error {
     },
 
     /// The workspace has changes that are not committed.
-    #[error("the workspace has uncommitted changes ({count} paths, starting with {:?}); commit them first", show(.first))]
+    #[error("the workspace has uncommitted changes ({}); commit them first", some_paths(*.count, .first))]
     Uncommitted {
         /// How many paths changed.
+        count: usize,
+        /// The first of them.
+        first: Vec<u8>,
+    },
+
+    /// The workspace holds new files that the secrets guard holds back,
+    /// which removing it would delete. They are not uncommitted changes to
+    /// commit: any of them may be a secret.
+    #[error("{}", held_back(*.count, .first))]
+    HeldBack {
+        /// How many there are.
         count: usize,
         /// The first of them.
         first: Vec<u8>,
@@ -222,6 +233,30 @@ impl Error {
             path,
             source,
         }
+    }
+}
+
+/// `1 path, "a"`, or `3 paths, starting with "a"`.
+fn some_paths(count: usize, first: &[u8]) -> String {
+    match count {
+        1 => format!("1 path, {:?}", show(first)),
+        n => format!("{n} paths, starting with {:?}", show(first)),
+    }
+}
+
+/// Why a workspace that holds files the secrets guard holds back is not
+/// removed, and what to do: never to commit them as they are, since any of
+/// them may be a secret.
+fn held_back(count: usize, first: &[u8]) -> String {
+    let first = show(first);
+    if count == 1 {
+        format!(
+            "the workspace holds a new file the secrets guard holds back, {first:?}, which removing the workspace would delete: move it out of the workspace if it is a secret, or `braid track` and commit it if it is not; --force removes the workspace with it"
+        )
+    } else {
+        format!(
+            "the workspace holds {count} new files the secrets guard holds back, starting with {first:?}, which removing the workspace would delete: move the secrets among them out of the workspace, and `braid track` and commit the files that are not secrets; --force removes the workspace with them"
+        )
     }
 }
 

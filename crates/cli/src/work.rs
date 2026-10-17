@@ -100,11 +100,14 @@ With --json, status prints one object:
                    there are changes, or a rebase to finish, and nothing
                    blocks it
   blocking         why `braid commit` would refuse, each {reason, path,
-                   message}: markers (conflict markers remain in the file),
-                   unresolved (a conflict that is not about content, not
-                   marked resolved with `braid resolve`), both with the
-                   conflict's kind, or needs_track; commit refuses with the
-                   same list, unless --force
+                   message}: author (no one valid to sign changesets, from
+                   --author, BRAID_AUTHOR or .braid/config, which status
+                   reads as commit does; path is null), markers (conflict
+                   markers remain in the file), unresolved (a conflict that
+                   is not about content, not marked resolved with `braid
+                   resolve`), both with the conflict's kind, or needs_track.
+                   Commit refuses for author first, on its own, and for the
+                   others with the same list, unless --force
   rebase           null, or the rebase in progress: change (the changeset
                    being rebased), onto, pending (those waiting after it),
                    and conflicts, each {path, kind, markers, markers_remain,
@@ -194,8 +197,8 @@ pub(crate) enum WorkspaceAction {
     Remove {
         /// The workspace's name.
         name: String,
-        /// Remove it even with uncommitted changes, unlanded changesets or
-        /// a rebase in progress.
+        /// Remove it even with uncommitted changes, new files the secrets
+        /// guard holds back, unlanded changesets or a rebase in progress.
         #[arg(long)]
         force: bool,
     },
@@ -453,6 +456,11 @@ pub(crate) fn workspace(cli: &Cli, action: &WorkspaceAction) -> Result<ExitCode>
                     })
                     .collect();
                 print_json(&Value::Array(items))?;
+            } else if all.is_empty() {
+                println!(
+                    "No workspaces yet: `{}` makes one in .braid/work/<name>.",
+                    cli.hint("workspace add <name>")
+                );
             } else {
                 for (name, state) in &all {
                     println!(
@@ -482,12 +490,20 @@ pub(crate) fn workspace(cli: &Cli, action: &WorkspaceAction) -> Result<ExitCode>
     Ok(ExitCode::SUCCESS)
 }
 
-pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
+pub(crate) fn status(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
     let target = Target::find(cli)?;
     let workspace = target.open()?;
     let report = workspace.status()?;
     let state = &report.state;
     let status = &report.status;
+    // Commit reads who signs before anything else, and refuses without
+    // someone valid; land and update need them too. Status reads them the
+    // same way, from the same flag, environment and config, so that it
+    // lists that refusal exactly when commit would make it.
+    let author = identity(args, &target.repo)
+        .err()
+        .map(|err| format!("{err:#}"));
+    let ready_to_commit = author.is_none() && report.ready_to_commit();
     if cli.json {
         let by_kind = |kind: braid_wc::ChangeKind| -> Vec<String> {
             status
@@ -534,8 +550,12 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
             "deleted": by_kind(braid_wc::ChangeKind::Deleted),
             "typechanged": by_kind(braid_wc::ChangeKind::TypeChanged),
             "needs_track": status.needs_track.iter().map(|p| show(p)).collect::<Vec<_>>(),
-            "ready_to_commit": report.ready_to_commit(),
-            "blocking": report.blocking.iter().map(blocker_json).collect::<Vec<_>>(),
+            "ready_to_commit": ready_to_commit,
+            "blocking": author
+                .iter()
+                .map(|message| json!({ "reason": "author", "path": null, "message": message }))
+                .chain(report.blocking.iter().map(blocker_json))
+                .collect::<Vec<_>>(),
             "rebase": rebase,
         }))?;
         return Ok(ExitCode::SUCCESS);
@@ -612,12 +632,15 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
             writeln!(out, "  {}", show(path))?;
         }
     }
-    if !report.blocking.is_empty() {
+    if author.is_some() || !report.blocking.is_empty() {
         writeln!(out, "Not ready to commit:")?;
+        if let Some(message) = &author {
+            writeln!(out, "  - {message}")?;
+        }
         for blocker in &report.blocking {
             writeln!(out, "  - {blocker}")?;
         }
-    } else if report.ready_to_commit() {
+    } else if ready_to_commit {
         writeln!(out, "Ready to commit.")?;
     }
     Ok(ExitCode::SUCCESS)

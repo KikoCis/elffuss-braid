@@ -818,6 +818,170 @@ fn removing_a_workspace() {
     write(&other, "scratch.txt", "x\n");
     json(&repo.root, &["workspace", "remove", "other", "--force"]);
     assert!(!other.exists());
+
+    // With none left, the list says so in text, and is empty in JSON.
+    let out = braid(&repo.root, &["workspace", "list"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("No workspaces yet: "), "{text}");
+    assert!(text.contains("`braid workspace add <name>`"), "{text}");
+    assert_eq!(
+        json(&repo.root, &["workspace", "list"]),
+        serde_json::json!([])
+    );
+    repo.workspace("again");
+    let out = braid(&repo.root, &["workspace", "list"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("again  main  "), "{text}");
+}
+
+#[test]
+fn removing_a_workspace_never_says_to_commit_a_secret() {
+    let repo = Repo::new();
+    seed(&repo, &[("README.md", "hello\n")]);
+    let ws = repo.workspace("ws");
+    write(&ws, ".env", "TOKEN=secret\n");
+    let refused = fails(&repo.root, &["workspace", "remove", "ws"]);
+    assert!(
+        refused.contains("a new file the secrets guard holds back, \".env\""),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("move it out of the workspace"),
+        "{refused}"
+    );
+    assert!(!refused.contains("commit them first"), "{refused}");
+    // Changes to commit come first, counted on their own.
+    write(&ws, "notes.txt", "notes\n");
+    let refused = fails(&repo.root, &["workspace", "remove", "ws"]);
+    assert!(
+        refused.contains("uncommitted changes (1 path, \"notes.txt\"); commit them first"),
+        "{refused}"
+    );
+    std::fs::remove_file(ws.join("notes.txt")).unwrap();
+    // Moved out, the secret no longer holds the workspace.
+    std::fs::rename(ws.join(".env"), repo.root.parent().unwrap().join(".env")).unwrap();
+    json(&repo.root, &["workspace", "remove", "ws"]);
+    assert!(!ws.exists());
+}
+
+/// Runs braid in `dir` with no author from the environment unless
+/// `author` gives one, and returns its exit status, standard output and
+/// standard error.
+fn signed(dir: &Path, author: Option<&str>, args: &[&str]) -> (i32, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_braid"));
+    command
+        .current_dir(dir)
+        .args(args)
+        .env_remove("BRAID_AUTHOR")
+        .env("BRAID_AGENT", "tester");
+    if let Some(author) = author {
+        command.env("BRAID_AUTHOR", author);
+    }
+    let out = command.output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn status_lists_a_missing_author_exactly_when_commit_refuses_for_it() {
+    const ADA: &str = "Ada <ada@example.org>";
+    const GRACE: &str = "name = Grace\nemail = grace@example.org\n";
+    // What the setup in agents.md writes where git has no identity.
+    const EMPTY: &str = "name = \nemail = \n";
+    // Where the author comes from (BRAID_AUTHOR, --author and
+    // .braid/config), and whether commit has one it can use.
+    let cases = [
+        (None, None, None, false),
+        (Some(ADA), None, None, true),
+        (None, Some(ADA), None, true),
+        (Some("Ada"), None, None, false),
+        (None, Some("Ada <a> b"), None, false),
+        (None, None, Some(GRACE), true),
+        (None, None, Some(EMPTY), false),
+        (None, None, Some("name = Grace\n"), false),
+        (Some("Ada"), None, Some(GRACE), false),
+        (Some(ADA), None, Some(EMPTY), true),
+    ];
+    for (env, flag, config, can_sign) in cases {
+        let case = format!("BRAID_AUTHOR {env:?}, --author {flag:?}, config {config:?}");
+        let repo = Repo::new();
+        seed(&repo, &[("README.md", "hello\n")]);
+        let ws = repo.workspace("ws");
+        if let Some(config) = config {
+            std::fs::write(repo.root.join(".braid/config"), config).unwrap();
+        }
+        let with_flag = |args: &[&str]| -> Vec<String> {
+            let mut all: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            if let Some(flag) = flag {
+                all.extend(["--author".to_owned(), flag.to_owned()]);
+            }
+            all
+        };
+        let run = |args: &[&str]| {
+            let all = with_flag(args);
+            let all: Vec<&str> = all.iter().map(String::as_str).collect();
+            signed(&ws, env, &all)
+        };
+
+        // Clean, then with a change: the author blocks a commit either way.
+        for dirty in [false, true] {
+            if dirty {
+                write(&ws, "notes.txt", "notes\n");
+            }
+            let (code, out, err) = run(&["status", "--json"]);
+            assert_eq!(code, 0, "{case}: {err}");
+            let now: Value = serde_json::from_str(&out).unwrap();
+            let author: Vec<&Value> = now["blocking"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|blocker| blocker["reason"] == "author")
+                .collect();
+            assert_eq!(author.len(), usize::from(!can_sign), "{case}: {out}");
+            assert_eq!(now["ready_to_commit"], dirty && can_sign, "{case}: {out}");
+            let (code, text, _) = run(&["status"]);
+            assert_eq!(code, 0, "{case}");
+            assert_eq!(
+                text.contains("Ready to commit."),
+                dirty && can_sign,
+                "{case}: {text}"
+            );
+            assert_eq!(
+                text.contains("Not ready to commit:"),
+                !can_sign,
+                "{case}: {text}"
+            );
+
+            let (code, _, err) = run(&["commit", "-m", "notes"]);
+            if can_sign {
+                assert!(author.is_empty());
+                if dirty {
+                    assert_eq!(code, 0, "{case}: {err}");
+                } else {
+                    assert_eq!(code, 1, "{case}");
+                    assert_eq!(err, "braid: error: nothing to commit\n", "{case}");
+                }
+            } else {
+                // Commit refuses with the very reason status gave, before
+                // looking for anything to commit.
+                assert_eq!(code, 1, "{case}");
+                let reason = author[0]["message"].as_str().unwrap();
+                assert_eq!(author[0]["path"], Value::Null, "{case}");
+                assert_eq!(err, format!("braid: error: {reason}\n"), "{case}");
+                assert!(text.contains(&format!("  - {reason}\n")), "{case}: {text}");
+                // Landing and updating need someone to sign as too.
+                for command in ["land", "update"] {
+                    let (code, _, refused) = run(&[command]);
+                    assert_eq!(code, 1, "{case}: {command}");
+                    assert_eq!(refused, err, "{case}: {command}");
+                }
+            }
+        }
+    }
 }
 
 #[test]

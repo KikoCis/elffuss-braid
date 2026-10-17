@@ -516,10 +516,11 @@ impl<'r> Workspace<'r> {
     }
 
     /// Removes the workspace named `name`: its directory and its state.
-    /// Refused while it has uncommitted changes, files waiting for `braid
-    /// track`, changesets the branch does not have, or a rebase in progress,
-    /// unless `force`. The directory is removed only if its `.braid` file
-    /// still names this workspace of this repository.
+    /// Refused while it has uncommitted changes ([`Error::Uncommitted`]),
+    /// new files the secrets guard holds back ([`Error::HeldBack`]),
+    /// changesets the branch does not have, or a rebase in progress, unless
+    /// `force`. The directory is removed only if its `.braid` file still
+    /// names this workspace of this repository.
     pub fn remove(repo: &Repo, name: &str, force: bool) -> Result<(), Error> {
         let workspace = Workspace::open(repo, name)?;
         let lock = Lock::acquire(&workspace.state_dir)?;
@@ -532,16 +533,18 @@ impl<'r> Workspace<'r> {
             if owned {
                 let root = Root::open(&state.path)?;
                 let status = workspace.scan_status(&root, &state)?;
-                let dirty: Vec<&Vec<u8>> = status
-                    .changes
-                    .iter()
-                    .map(|change| &change.path)
-                    .chain(&status.needs_track)
-                    .collect();
-                if let Some(first) = dirty.first() {
+                if let Some(first) = status.changes.first() {
                     return Err(Error::Uncommitted {
-                        count: dirty.len(),
-                        first: first.to_vec(),
+                        count: status.changes.len(),
+                        first: first.path.clone(),
+                    });
+                }
+                // Files the guard holds back are not changes to commit:
+                // any of them may be a secret.
+                if let Some(first) = status.needs_track.first() {
+                    return Err(Error::HeldBack {
+                        count: status.needs_track.len(),
+                        first: first.clone(),
                     });
                 }
             }

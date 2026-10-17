@@ -478,6 +478,56 @@ fn refusals() {
     assert_eq!(ws.land(None, "t", &ada()).unwrap().landed, Landed::Nothing);
 }
 
+#[test]
+fn removal_never_says_to_commit_what_the_guard_holds_back() {
+    let f = Fixture::new();
+    let first = f.commit(&[], vec![("README.md", f.file("hello\n"))]);
+    f.set_branch("main", first);
+    let dir = f.path("ws");
+    Workspace::create(&f.repo, "ws", &dir, Some(first), "main").unwrap();
+    fs::write(dir.join(".env"), "TOKEN=secret\n").unwrap();
+
+    // A file the guard holds back is not a change to commit: it may be a
+    // secret, which removing the workspace would delete.
+    let refused = Workspace::remove(&f.repo, "ws", false).unwrap_err();
+    assert!(
+        matches!(&refused, Error::HeldBack { count: 1, first } if first == b".env"),
+        "{refused:?}"
+    );
+    let said = refused.to_string();
+    assert!(
+        said.contains("secrets guard holds back, \".env\""),
+        "{said}"
+    );
+    assert!(said.contains("move it out of the workspace"), "{said}");
+    assert!(!said.contains("commit them"), "{said}");
+    fs::write(dir.join("id_rsa"), "private\n").unwrap();
+    let said = Workspace::remove(&f.repo, "ws", false)
+        .unwrap_err()
+        .to_string();
+    assert!(said.contains("2 new files"), "{said}");
+    assert!(!said.contains("commit them"), "{said}");
+
+    // Changes come first, and only they count as uncommitted.
+    fs::write(dir.join("notes.txt"), "notes\n").unwrap();
+    let refused = Workspace::remove(&f.repo, "ws", false).unwrap_err();
+    assert!(
+        matches!(&refused, Error::Uncommitted { count: 1, first } if first == b"notes.txt"),
+        "{refused:?}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("uncommitted changes (1 path, \"notes.txt\")"),
+        "{refused}"
+    );
+    assert!(dir.join(".env").exists());
+
+    // --force removes the workspace with them.
+    Workspace::remove(&f.repo, "ws", true).unwrap();
+    assert!(!dir.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn a_commit_of_some_paths_reads_only_those() {

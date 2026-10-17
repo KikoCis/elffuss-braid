@@ -113,8 +113,9 @@ Install braid in this project and set it up for agents, following https://braid.
 ```
 
 It installs braid with cargo, tells you what in the project braid does not
-run, such as git hooks, imports the project's git history, and writes the
-rules for agents into the project's `AGENTS.md` with `braid agents init`.
+run, such as git hooks, offers to make a git remote if the project has
+none, imports the project's git history, and writes the rules for agents
+into the project's `AGENTS.md` with `braid agents init`.
 From then on, every agent session works in a braid workspace of its own,
 where git refuses to run, lands through braid, and tells you when what it
 landed is waiting for a sync to the git remote. Git stays the source of
@@ -203,7 +204,8 @@ rebases the change and writes git-style conflict markers. Fix the file, then
 - `braid status --json` says how far the branch is ahead (`behind_by`), which
   changesets have not landed, including one whose rebase is in progress, and
   whether a commit would go through (`ready_to_commit`), with every reason
-  it would not (`blocking`), which `braid commit` refuses with too.
+  it would not (`blocking`), a missing author among them, which
+  `braid commit` refuses with too.
 - Every changeset names the agent that made it, and keeps it when it is
   rebased; `braid log`, `braid show` and `braid op log` show who did what,
   and the op log says what each landing did. Signatures use the local time

@@ -7,8 +7,11 @@
 //! and every braid command they give must exist, with every flag it is
 //! given.
 
-use std::path::Path;
-use std::process::Command;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use serde_json::Value;
 
 const START: &str = "<!-- braid:start -->";
 const END: &str = "<!-- braid:end -->";
@@ -85,19 +88,116 @@ fn section() -> String {
 /// The lines of the ```bash blocks of a Markdown text, without their
 /// indentation.
 fn bash_lines(text: &str) -> Vec<String> {
-    let mut lines = Vec::new();
+    bash_blocks(text).concat()
+}
+
+/// The ```bash blocks of a Markdown text, each as its lines without their
+/// indentation.
+fn bash_blocks(text: &str) -> Vec<Vec<String>> {
+    let mut blocks = Vec::new();
     let mut inside = false;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with("```") {
             inside = !inside && line == "```bash";
+            if inside {
+                blocks.push(Vec::new());
+            }
             continue;
         }
-        if inside {
-            lines.push(line.to_owned());
+        if inside && let Some(block) = blocks.last_mut() {
+            block.push(line.to_owned());
         }
     }
-    lines
+    blocks
+}
+
+/// The ```bash block of `text` with a line that starts with `first`.
+fn block_with(text: &str, first: &str) -> Vec<String> {
+    bash_blocks(text)
+        .into_iter()
+        .find(|block| block.iter().any(|line| line.starts_with(first)))
+        .unwrap_or_else(|| panic!("no block with {first:?}"))
+}
+
+/// Runs `line` in a new POSIX shell in `dir`, as a harness that keeps
+/// nothing between commands runs it: with this build's braid first on
+/// `PATH`, no braid variables, and git reading only `config` (no system
+/// configuration).
+fn shell(dir: &Path, config: &Path, line: &str) -> Output {
+    let bin = Path::new(env!("CARGO_BIN_EXE_braid")).parent().unwrap();
+    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    Command::new("sh")
+        .arg("-c")
+        .arg(line)
+        .current_dir(dir)
+        .env("PATH", path)
+        .env("GIT_CONFIG_GLOBAL", config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("BRAID_AUTHOR")
+        .env_remove("BRAID_AGENT")
+        // The shell sets it from the directory it starts in.
+        .env_remove("PWD")
+        .output()
+        .unwrap()
+}
+
+/// Runs `line` as [`shell`] does, expecting success.
+fn shell_ok(dir: &Path, config: &Path, line: &str) -> String {
+    let out = shell(dir, config, line);
+    assert!(
+        out.status.success(),
+        "{line}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A git project in `dir`, on `main`, with one commit of `notes.txt`, and
+/// a git configuration of its own that gives `identity` as git's user, or
+/// none.
+fn git_project(dir: &Path, identity: Option<(&str, &str)>) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let config = dir.with_extension("gitconfig");
+    let user = identity.map_or_else(String::new, |(name, email)| {
+        format!("[user]\n\tname = {name}\n\temail = {email}\n")
+    });
+    fs::write(&config, user).unwrap();
+    fs::write(dir.join("notes.txt"), "one\ntwo\n").unwrap();
+    for line in [
+        "git init -q -b main",
+        "git add notes.txt",
+        "git -c user.name=Ada -c user.email=ada@example.org commit -q -m First",
+    ] {
+        shell_ok(dir, &config, line);
+    }
+    config
+}
+
+/// The text of the file at `path` in `dir`.
+fn read(dir: &Path, path: &str) -> String {
+    fs::read_to_string(dir.join(path)).unwrap_or_else(|err| panic!("{path}: {err}"))
+}
+
+/// What `braid status --json` says in the workspace at `dir`, with no
+/// author from the environment.
+fn status(dir: &Path) -> Value {
+    let out = Command::new(env!("CARGO_BIN_EXE_braid"))
+        .current_dir(dir)
+        .args(["status", "--json"])
+        .env_remove("BRAID_AUTHOR")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 #[test]
@@ -149,20 +249,48 @@ fn the_guide_installs_the_braid_it_describes() {
     braid(Path::new("."), &["agents", "init", "--help"]);
 }
 
+/// The code spans of a Markdown text outside its fenced blocks, such as
+/// `braid status`, wherever their lines break.
+fn code_spans(text: &str) -> Vec<String> {
+    let mut prose = Vec::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim().starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced {
+            prose.push(line.trim());
+        }
+    }
+    let prose = prose.join(" ");
+    assert!(
+        !prose.contains("``"),
+        "a code span of more than one backtick"
+    );
+    prose
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
 #[test]
 fn every_braid_command_in_the_guides_exists_with_its_flags() {
-    let mut lines: Vec<String> = bash_lines(&part_one());
-    lines.extend(bash_lines(&section()));
-    // A line may run braid after another command: `test -d .braid || braid
-    // init`.
+    let mut lines: Vec<String> = Vec::new();
+    for text in [part_one(), section()] {
+        lines.extend(bash_lines(&text));
+        lines.extend(code_spans(&text));
+    }
+    // A line may run braid after another command, `test -d .braid || braid
+    // init`, or pipe it into one, `braid cat-object <base>:<path> | diff`.
     let commands: Vec<String> = lines
         .iter()
-        .flat_map(|line| line.split("||").flat_map(|part| part.split("&&")))
+        .flat_map(|line| line.split('|').flat_map(|part| part.split("&&")))
         .map(str::trim)
         .filter(|command| command.starts_with("braid "))
         .map(str::to_owned)
         .collect();
-    assert!(commands.len() >= 15, "{commands:?}");
+    assert!(commands.len() >= 40, "{commands:?}");
     let groups = ["agents", "change", "git", "op", "ref", "workspace"];
     for command in &commands {
         let words: Vec<&str> = command
@@ -206,5 +334,162 @@ fn every_braid_command_in_the_guides_exists_with_its_flags() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn the_setup_stops_at_its_check_until_braid_has_a_name_and_an_email() {
+    let setup = block_with(&part_one(), "test -d .braid || braid init");
+    let check = setup
+        .iter()
+        .position(|line| line.starts_with("grep -q '^name = .' .braid/config"))
+        .expect("the setup checks the name and the email it wrote");
+    for identity in [Some(("Ada Lovelace", "ada@example.org")), None] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = fs::canonicalize(temp.path()).unwrap().join("project");
+        let config = git_project(&dir, identity);
+        // Each line in a shell of its own, as written: only the check fails
+        // where git has no identity, and nothing says why but the guide.
+        let run = || -> Vec<Option<i32>> {
+            setup
+                .iter()
+                .map(|line| shell(&dir, &config, line).status.code())
+                .collect()
+        };
+        let failing = |index: usize| Some(i32::from(identity.is_none() && index == check));
+        assert_eq!(run(), (0..setup.len()).map(failing).collect::<Vec<_>>());
+        assert!(read(&dir, "AGENTS.md").contains(START));
+        let commit = block_with(&part_one(), "git add AGENTS.md");
+        let written = read(&dir, ".braid/config");
+        let Some((name, email)) = identity else {
+            assert_eq!(written, "name = \nemail = \n");
+            // Every commit and landing would fail: a session's status says
+            // so first.
+            shell_ok(&dir, &config, "braid workspace add agent-1 --track main");
+            let workspace = dir.join(".braid/work/agent-1");
+            assert_eq!(status(&workspace)["blocking"][0]["reason"], "author");
+            // Fixed as the guide says, the setup runs again from the top
+            // without a failure, and git's commit is signed as braid's
+            // changesets are, not as git would guess.
+            for line in block_with(&part_one(), "git config user.name") {
+                let line = line
+                    .replace("<name>", "Grace Hopper")
+                    .replace("<email>", "grace@example.org");
+                shell_ok(&dir, &config, &line);
+            }
+            assert!(run().iter().all(|code| *code == Some(0)));
+            assert_eq!(
+                read(&dir, ".braid/config"),
+                "name = Grace Hopper\nemail = grace@example.org\n"
+            );
+            assert_eq!(status(&workspace)["blocking"], serde_json::json!([]));
+            for line in &commit {
+                shell_ok(&dir, &config, line);
+            }
+            assert_eq!(
+                shell_ok(&dir, &config, "git log -1 --format='%an <%ae>'"),
+                "Grace Hopper <grace@example.org>\n"
+            );
+            continue;
+        };
+        assert_eq!(written, format!("name = {name}\nemail = {email}\n"));
+        for line in &commit {
+            shell_ok(&dir, &config, line);
+        }
+        // Running it again changes nothing.
+        assert!(run().iter().all(|code| *code == Some(0)));
+        assert_eq!(read(&dir, ".braid/config"), written);
+    }
+}
+
+/// The line the guides give to keep Python's build output out of a
+/// workspace, `.braidignore` included.
+const BRAIDIGNORE: &str = "printf '%s\\n' .braidignore __pycache__/ >> .braidignore";
+
+#[test]
+fn a_session_without_a_remote_makes_one_that_sync_and_clones_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let parent = fs::canonicalize(temp.path()).unwrap();
+    let dir = parent.join("project");
+    let config = git_project(&dir, Some(("Ada Lovelace", "ada@example.org")));
+    for line in block_with(&part_one(), "test -d .braid || braid init") {
+        shell_ok(&dir, &config, &line);
+    }
+    let section = section();
+    let sync = block_with(&section, "braid --agent agent-1 git sync");
+    let recipe = block_with(&section, "git init --bare");
+    // The guide gives the same lines for a project with no remote.
+    let guide = bash_lines(&part_one());
+    for line in &recipe {
+        assert!(guide.contains(line), "the guide has no {line:?}");
+    }
+    for text in [part_one(), section.clone()] {
+        assert!(code_spans(&text).iter().any(|span| span == BRAIDIGNORE));
+    }
+
+    // A session lands a change, with build output kept out of it, and
+    // what is left uncommitted holding the landing back.
+    shell_ok(&dir, &config, "braid workspace add agent-1 --track main");
+    let workspace = dir.join(".braid/work/agent-1");
+    fs::write(workspace.join("app.py"), "print('hi')\n").unwrap();
+    fs::create_dir(workspace.join("__pycache__")).unwrap();
+    fs::write(workspace.join("__pycache__/app.cpython.pyc"), [0u8, 1]).unwrap();
+    let before = status(&workspace)["added"].clone();
+    assert_eq!(
+        before,
+        serde_json::json!(["__pycache__/app.cpython.pyc", "app.py"])
+    );
+    shell_ok(&workspace, &config, BRAIDIGNORE);
+    assert_eq!(status(&workspace)["added"], serde_json::json!(["app.py"]));
+    fs::write(workspace.join("notes.txt"), "one\ntwo, the agent's\n").unwrap();
+    let session = "braid --agent agent-1";
+    shell_ok(
+        &workspace,
+        &config,
+        &format!("{session} commit -m 'Add app.py' app.py"),
+    );
+    let held = shell(&workspace, &config, &format!("{session} land"));
+    assert_eq!(held.status.code(), Some(1));
+    let said = String::from_utf8_lossy(&held.stderr);
+    assert!(
+        said.contains("uncommitted changes (1 path, \"notes.txt\")"),
+        "{said}"
+    );
+    shell_ok(
+        &workspace,
+        &config,
+        &format!("{session} commit -m 'Edit notes'"),
+    );
+    shell_ok(&workspace, &config, &format!("{session} land"));
+
+    // The sync fails without a remote, as the section says; the recipe makes
+    // one next to the project, and the sync then reaches it and the shared
+    // checkout.
+    assert!(!shell(&dir, &config, &sync[0]).status.success());
+    for line in &recipe {
+        let out = shell(&dir, &config, line);
+        assert!(out.status.success(), "{line}: {:?}", out);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(!said.contains("hint:"), "{line}: {said}");
+    }
+    let bare = parent.join("project.git");
+    assert_eq!(
+        shell_ok(&dir, &config, "git remote get-url origin"),
+        format!("{}\n", bare.display())
+    );
+    assert_eq!(
+        shell_ok(&bare, &config, "git symbolic-ref HEAD"),
+        "refs/heads/main\n"
+    );
+    for line in &sync {
+        shell_ok(&dir, &config, line);
+    }
+    assert_eq!(read(&dir, "app.py"), "print('hi')\n");
+    assert_eq!(read(&dir, "notes.txt"), "one\ntwo, the agent's\n");
+    // A clone of the new remote checks out its main.
+    shell_ok(&parent, &config, "git clone -q project.git clone");
+    assert_eq!(read(&parent.join("clone"), "app.py"), "print('hi')\n");
+    for kept_out in ["__pycache__", ".braidignore", ".braid"] {
+        assert!(!parent.join("clone").join(kept_out).exists(), "{kept_out}");
     }
 }

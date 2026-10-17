@@ -59,32 +59,45 @@ braid refs          # in the project root: its branches, once it is set up
 - In a project where braid is not set up, `braid refs` fails with "not
   inside a braid repository". Where it lists the project's branches and
   `AGENTS.md` has a braid section (a `<!-- braid:start -->` line), braid is
-  set up: skip to "Every agent session, from then on".
+  set up: skip to "Every agent session, from then on". It lists braid's own
+  refs too: `braid/git-map`, the project's tags as `tags/<name>`, and once
+  a sync has run, `remote/<label>/<branch>`.
 
 ### Set up a project
 
 First read the project's `AGENTS.md`, `CLAUDE.md` and the like for rules
 about git: branches, pull requests, how to commit. Look too for what braid
 does not run: git hooks (in `.git/hooks`, or where
-`git config core.hooksPath` says), Git LFS (`filter=lfs` in
+`git config core.hooksPath` says; the `*.sample` files git puts in
+`.git/hooks` never run, and do not count), Git LFS (`filter=lfs` in
 `.gitattributes`: braid sees the pointer files, not the content) and a main
-branch that takes changes only through pull requests. Tell the user what
-you found, and if any of it clashes with agents landing on the main
-branch, ask how to go on before you set anything up.
+branch that takes changes only through pull requests. Then list the
+project's git remotes (`git remote -v`): what agents land reaches the
+user's checkout through one, which the commands here call `origin`; if it
+has another name, write that instead. Tell the user what you found, and
+if any of it clashes with agents landing on the main branch, ask how to
+go on before you set anything up. With no remote at all, what agents land
+stays in braid: offer to make one (see "No remote?" below). And if the
+project has no `CLAUDE.md`, ask whether to add one, since Claude Code
+reads `CLAUDE.md` rather than `AGENTS.md`: with a yes, run
+`touch CLAUDE.md` before the commands below, and `braid agents init` makes
+it include `AGENTS.md`.
 
 Then work in the root of the project's git checkout, on its main branch,
-with nothing to commit (`git status`) and nothing new to pull
-(`git pull --ff-only`; skip it when the branch has no upstream). In a
-shallow clone, run `git fetch --unshallow` first: braid imports the whole
-history. The commands say `main`; if the project's main branch has another
-name, such as `master`, write that instead. Every line is safe to run
-again, so after a failure, start again from the top.
+with nothing to commit (`git status` shows no staged or modified files;
+untracked files do not matter) and nothing new to pull
+(`git pull --ff-only`; skip it when the branch has no upstream, which is
+when `git rev-parse --abbrev-ref '@{u}'` fails). In a shallow clone, run
+`git fetch --unshallow` first: braid imports the whole history. The
+commands say `main`; if the project's main branch has another name, such
+as `master`, write that instead. Every line is safe to run again, so after
+a failure, start again from the top.
 
 ```bash
 test -d .braid || braid init     # .braid/: the store and the agents' workspaces
 grep -qsxF .braid "$(git rev-parse --git-path info/exclude)" || echo .braid >> "$(git rev-parse --git-path info/exclude)"
 test -f .braid/config || printf 'name = %s\nemail = %s\n' "$(git config user.name)" "$(git config user.email)" > .braid/config
-touch CLAUDE.md                  # for Claude Code, which reads CLAUDE.md, not AGENTS.md
+grep -q '^name = .' .braid/config && grep -q '^email = .' .braid/config   # fails without a name and an email
 braid git import .               # the project's whole history: every local branch and tag
 braid agents init                # the rules for agents, in AGENTS.md
 ```
@@ -93,16 +106,27 @@ braid agents init                # the rules for agents, in AGENTS.md
   only in this one: braid's directory, and the `.braid` file that marks
   each workspace, so that nothing of braid's is ever committed with git.
 - `.braid/config` names who signs the changesets agents make, here the
-  same person as git's commits. If git has no `user.name` or `user.email`,
-  write them into it by hand; otherwise every session has to set
-  `BRAID_AUTHOR`.
+  same person as git's commits. The line after it fails, with exit status
+  1 and nothing printed, while the file lacks a name or an email, as it
+  does when git has no `user.name` or `user.email`: every commit and
+  landing would then fail with "no author", and the `git commit` below
+  would fail too, or sign with a name and an address that git guesses
+  from the machine. Ask the user for the name and the e-mail address to
+  use. With their answer, set them for this checkout, and let the setup
+  write the file anew:
+
+  ```bash
+  git config user.name "<name>"
+  git config user.email "<email>"
+  rm .braid/config                 # then start again from the top
+  ```
+
 - Most harnesses read `AGENTS.md`. Claude Code reads `CLAUDE.md` instead,
   and Gemini CLI `GEMINI.md`: `braid agents init` adds the line
   `@AGENTS.md` to each of them that exists, so that they read the section
-  too. A `CLAUDE.md` that holds only that line is harmless; leave out the
-  `touch` line if the user does not want one. In Claude Code, each braid
-  command asks for permission unless the project allows it: offer to add
-  `"Bash(braid:*)"` to `permissions.allow` in `.claude/settings.json`.
+  too. In Claude Code, each braid command asks for permission unless the
+  project allows it: offer to add `"Bash(braid:*)"` to `permissions.allow`
+  in `.claude/settings.json`.
 - `braid agents init` writes a section into `AGENTS.md`, creating the file
   if there is none, between a `<!-- braid:start -->` line and a
   `<!-- braid:end -->` line. The section tells every agent session to work
@@ -188,12 +212,21 @@ with the branch it names where the commands here say `main`. In short:
   ```
 
   There is no staging area: `commit` records every change in the
-  workspace, so read `braid status` before each commit. Only `.gitignore`
-  and `.braidignore` apply in a workspace, not `.git/info/exclude` or a
-  global excludes file: list files that must stay local in `.braidignore`.
-  Braid runs no git hooks, so run the project's checks yourself before you
-  land. `land` puts the workspace's changesets on `main`, as a
-  fast-forward or rebased onto whatever landed first.
+  workspace, or only the paths it is given
+  (`braid --agent agent-1 commit -m "..." <path>...`), so read
+  `braid status` before each commit. `land` refuses while anything is left
+  uncommitted ("the workspace has uncommitted changes ...; commit them
+  first"). Building or running the project writes files too: those that
+  `.gitignore` does not list are new files like any other. Delete them, or
+  list them in `.braidignore`, which must then list itself too, or it is a
+  new file to commit: for Python's `__pycache__/`, run
+  `printf '%s\n' .braidignore __pycache__/ >> .braidignore` in the
+  workspace's root. Only `.gitignore` and `.braidignore` apply in a
+  workspace, not `.git/info/exclude` or a global excludes file: anything
+  else that must stay local goes in `.braidignore` too. Braid runs no git
+  hooks, so run the project's checks yourself before you land. `land` puts
+  the workspace's changesets on `main`, as a fast-forward or rebased onto
+  whatever landed first.
 - **Before a new task**, `braid --agent agent-1 update` brings the
   workspace onto `main`. `status --json` says how far behind it is
   (`behind_by`).
@@ -201,7 +234,10 @@ with the branch it names where the commands here say `main`. In short:
   The user's checkout and the git remote get it with `braid git sync`, then
   `git pull --ff-only`, both from the project root (see "Keeping the git
   remote up to date"). The session tells the user so, and offers to run
-  them: when to sync is the user's call.
+  them: when to sync is the user's call. Where `git remote get-url origin`
+  fails, the project has no remote of that name: the session asks the
+  user which of those `git remote` lists to sync with, or, where it lists
+  none, says so and offers to make one first (see "No remote?").
 - **Done**: once everything has landed, `braid workspace remove agent-1`
   from the project root. It refuses while the workspace holds work that
   has not landed.
@@ -210,7 +246,11 @@ with the branch it names where the commands here say `main`. In short:
   standard output, even with `--json`; only `git sync` and `fsck` print
   their report as well when they exit with 1.
 - Changesets are signed by `BRAID_AUTHOR` (`"Name <email>"`), or else by
-  the `name` and `email` in `.braid/config`.
+  the `name` and `email` in `.braid/config`. With neither, `commit`,
+  `land` and `update` fail with "no author", and `braid status` lists it
+  first among what stops a commit: the session asks the user who signs,
+  and writes the answer into `.braid/config` as `name = <name>` and
+  `email = <email>` lines.
 - New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger
   than 1 MiB are held back until `braid track <path>`: `commit` refuses,
   naming them, and `--force` leaves them out. Never `braid track` a secret:
@@ -229,7 +269,7 @@ own change), and `next` says what to run.
 ```bash
 braid --agent agent-1 update      # exit status 2: conflict markers in the files
 # edit the files until no marker is left; `braid status` lists what still blocks
-braid --agent agent-1 commit      # keeps the change's message
+braid --agent agent-1 commit      # keeps the change's message; -m gives another
 braid --agent agent-1 land --json
 ```
 
@@ -292,11 +332,17 @@ git pull --ff-only               # the shared checkout follows
   parents to tell what a workspace has landed, so the workspaces carry on
   from the merge.
 
-No remote? Any bare repository will do. In the shared checkout,
-`git init --bare ../project.git`, then
-`git remote add origin "$(cd .. && pwd)/project.git"` (an absolute path,
-which braid reads the same from any directory) and
-`git push -u origin main`.
+No remote? Any bare repository will do. With the user's yes, these lines,
+run in the shared checkout, make one next to the project, named after it
+(`../<project>.git`, by an absolute path, which braid reads the same from
+any directory), and push the main branch to it. If something has that
+name already, choose another.
+
+```bash
+git init --bare -b main "$PWD.git"
+git remote add origin "$PWD.git"
+git push -u origin main
+```
 
 ### Undoing
 
