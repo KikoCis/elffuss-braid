@@ -3,6 +3,7 @@
 
 //! `braid`, the command-line tool.
 
+mod agents;
 mod history;
 mod sync;
 mod work;
@@ -59,6 +60,11 @@ enum Command {
     Init {
         /// Directory to create it in (default: the current directory).
         dir: Option<PathBuf>,
+    },
+    /// Set a project up for coding agents: the rules in its AGENTS.md.
+    Agents {
+        #[command(subcommand)]
+        action: agents::AgentsAction,
     },
     /// Print the braid blob id of each file ("-" reads standard input).
     HashObject {
@@ -269,6 +275,7 @@ fn main() -> ExitCode {
 fn run(cli: &Cli) -> Result<ExitCode> {
     match &cli.command {
         Command::Init { dir } => init(cli, dir.as_deref()),
+        Command::Agents { action } => agents::agents(cli, action),
         Command::HashObject { write, paths } => hash_object(cli, paths, *write),
         Command::CatObject { revision } => cat_object(cli, revision),
         Command::Refs => refs(cli),

@@ -60,6 +60,13 @@ pub fn braid_ref_for_git(name: &[u8]) -> Option<String> {
     })
 }
 
+/// Whether a braid ref is a branch: a name outside braid's own namespaces
+/// (`braid/`, `git/`, `remote/` and `tags/`), which exports as
+/// `refs/heads/<name>`.
+pub fn is_branch(name: &str) -> bool {
+    !RESERVED.iter().any(|prefix| name.starts_with(prefix))
+}
+
 /// The git ref for a braid ref, or `None` for braid's own refs and for the
 /// refs that record the branches of remotes.
 pub fn git_ref_for_braid(name: &str) -> Option<String> {
@@ -485,5 +492,24 @@ mod tests {
         let remote = remote_ref("origin-0123456789ab", "main");
         assert_eq!(remote, "remote/origin-0123456789ab/main");
         assert_eq!(git_ref_for_braid(&remote), None);
+    }
+
+    #[test]
+    fn branches_are_the_refs_outside_braids_namespaces() {
+        for branch in ["main", "feature/x", "tags", "remotes", "gitlab"] {
+            assert!(is_branch(branch), "{branch}");
+            assert_eq!(
+                git_ref_for_braid(branch),
+                Some(format!("refs/heads/{branch}"))
+            );
+        }
+        for other in [
+            MAP_REF,
+            "tags/v1",
+            "git/refs/notes/commits",
+            "remote/a/main",
+        ] {
+            assert!(!is_branch(other), "{other}");
+        }
     }
 }
