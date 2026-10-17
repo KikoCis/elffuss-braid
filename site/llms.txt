@@ -1,0 +1,21 @@
+# Elffuss Braid
+
+> Version control for repositories where many AI agents land changes at the same time. Written from scratch in Rust, with git at the edges. Pre-alpha, Apache-2.0.
+
+Each agent commits in a workspace of its own over one shared store, and landing on the main branch is one short step that agents take in turn: a fast-forward, or a rebase that merges only the files both sides touched. Conflicts come back as data, with exit status 2, and every command has a JSON form. Braid imports a git repository's whole history bit for bit, and `braid git sync` keeps a git remote such as GitHub in step. It is pre-alpha: keep git as the source of truth.
+
+To set braid up in a project, a coding agent follows agents.md. The prompt to give it: Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md
+
+## Docs
+
+- [Install braid and set it up for agents](https://braid.elffuss.com/agents.md): for coding agents. Installing with cargo, setting up a git project with `braid agents init`, each session's workspace, conflicts, keeping the git remote in step, undoing, and what not to do.
+- [README](https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/README.md): what braid is, the quick start, working with git, status and roadmap, and ratios against git.
+- [Design](https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/docs/design.md): the store, landing, history, workspaces, the git bridge and sync, and how it is tested.
+- [Format v1](https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/docs/spec/format-v1.md): the exact bytes of ids, trees and changesets, with golden vectors.
+
+## Optional
+
+- [AGENTS.md](https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/AGENTS.md): the same guide, and how to work on braid itself.
+- [Contributing](https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/CONTRIBUTING.md): building, testing, and the rules for changes.
+- [Source](https://github.com/KikoCis/elffuss-braid): the repository on GitHub.
+- [Site](https://braid.elffuss.com/): the same in English and Spanish, with three agents landing on one main.

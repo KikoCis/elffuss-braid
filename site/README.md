@@ -10,10 +10,14 @@ build step and no requests to anything but its own files.
 | `site.js` | The language toggle, the copy buttons, the faded edge of a code block that scrolls, which blocks take keyboard focus, and the markers of the ratio table. Without it the page is complete, in English, every block takes focus, and the toggle and the copy buttons stay hidden. |
 | `og.png`, `og/og.svg` | The Open Graph image, 1200 × 630, and its source. |
 | `favicon.svg`, `favicon-32.png`, `apple-touch-icon.png`, `favicon.ico` | The icons: the strands around one crossing of the logo. `favicon.ico` is for the clients that ask for it whatever the page declares. |
+| `agents.md` | The guide for coding agents: installing braid and setting it up in a project. It is part 1 of the repository's `AGENTS.md`, with a title and an introduction of its own, and the prompt under "Ask your agent" points at it. |
+| `llms.txt` | What braid is, in the [llms.txt](https://llmstxt.org) format, with links to `agents.md`, the README and the docs. |
 
 The HTML, the CSS, the JavaScript and the SVGs open with
 `SPDX-License-Identifier: Apache-2.0` and `Copyright (c) 2026 UtopiaIA` in a
-comment, as every source file of the repository does.
+comment, as every source file of the repository does. `agents.md` and
+`llms.txt` are documents that agents read whole, like the repository's
+Markdown, and carry no such comment: an llms.txt starts with its title.
 
 To look at it locally:
 
@@ -36,7 +40,10 @@ In the ratio table, what each row compares is written in both languages;
 its commands and its ratio are not translated.
 
 Every code block keeps its lines and scrolls in its own box, and so does
-the story's `braid blame`, whose columns must line up (`term-cols`). At 480
+the story's `braid blame`, whose columns must line up (`term-cols`). The
+one exception is the prompt under "Ask your agent" (`.code.prompt`), a
+sentence rather than a command, which wraps; it is in the page once per
+language, since the Spanish page asks in Spanish. At 480
 pixels and below, blame leaves its ids out (`span.bl-id`) and its bar note
 says so (`span.bn-ids`); below 360 its type is a little smaller, so every
 line fits a phone whole. The story's `braid op log` (`term-oplog`) never
@@ -99,6 +106,10 @@ stay in English.
   out the op log's times and blame's dates, never paste what `workspace add`
   prints (it names the directory), and change the hero card and the story
   together.
+- The prompt under "Ask your agent" is the same, word for word, in the
+  English page, in the README and in `llms.txt`, and `agents.md` is part 1
+  of `AGENTS.md`: `crates/cli/tests/agents.rs` checks both. Every command
+  `agents.md` gives runs as written.
 - The quick start and the agent's commands under "Many agents on one
   repository" run as one session, top to bottom. `braid undo` comes after the
   agent lands, so it takes that landing back; before it, it would take the
@@ -128,6 +139,11 @@ all of this is true:
    does the link go anywhere: the repository's homepage
    (`gh repo edit KikoCis/elffuss-braid --homepage https://braid.elffuss.com`),
    and posts, whose link previews are fetched once and kept.
+5. `https://braid.elffuss.com/agents.md` answers 200 as
+   `text/markdown; charset=utf-8` and `https://braid.elffuss.com/llms.txt`
+   as `text/plain; charset=utf-8`, so that an agent reads them as text:
+   `curl -sI` shows the type. A server that does not know `.md` may send
+   `application/octet-stream` instead.
 
 ## Images
 
@@ -147,7 +163,8 @@ grep -rnIE --exclude=README.md "/(Users|home)/|[0-9]+(&nbsp;|\s)?(ms|MB|GB|MiB|G
 ```
 
 The only hits it should find are the secrets guard's `1&nbsp;MiB`, in
-English and in Spanish: a threshold of braid's, not a measurement.
+English and in Spanish, and its `1 MiB` in `agents.md`: a threshold of
+braid's, not a measurement.
 
 Every strand on the page is the logo's own curve, from
 `docs/assets/braid.svg`: three strands of `y = 48 + 27 cos(2π (x − c) / 92)`,

@@ -399,6 +399,28 @@ git init --quiet --bare remote.git
 </div>
 </section>
 
+<section id="ask" class="sec" aria-labelledby="ask-title">
+<div class="wrap narrow">
+<div class="sec-head">
+<h2 id="ask-title"><span data-l="en" lang="en">Ask your agent</span><span data-l="es" lang="es">Pídeselo a tu agente</span></h2>
+</div>
+<p data-l="en" lang="en">Braid comes with instructions written for coding agents. In a project that is a git repository, ask yours, whatever harness runs it:</p>
+<p data-l="es" lang="es">Braid trae instrucciones escritas para agentes de programación. En un proyecto que sea un repositorio de git, pídeselo al tuyo, use el arnés que use:</p>
+<div class="code prompt" data-l="en" lang="en">
+<div class="code-bar"><span>prompt</span><button class="copy" type="button" aria-label="Copy the prompt" data-aria-en="Copy the prompt" data-aria-es="Copiar la petición" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="The prompt for your agent" data-aria-en="The prompt for your agent" data-aria-es="La petición para tu agente"><code>Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md</code></pre>
+</div>
+<div class="code prompt" data-l="es" lang="es">
+<div class="code-bar"><span>petición</span><button class="copy" type="button" aria-label="Copiar la petición" data-aria-en="Copy the prompt" data-aria-es="Copiar la petición" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
+<pre tabindex="0" role="region" aria-label="La petición para tu agente" data-aria-en="The prompt for your agent" data-aria-es="La petición para tu agente"><code>Instala braid en este proyecto y configúralo para agentes siguiendo https://braid.elffuss.com/agents.md</code></pre>
+</div>
+<p data-l="en" lang="en">Your agent installs braid with cargo, imports the project's git history, and writes the rules for agents into its <code>AGENTS.md</code> with <code>braid agents init</code>. From then on, every agent session works in a braid workspace of its own and lands through braid, and git stays the source of truth.</p>
+<p data-l="es" lang="es">Tu agente instala braid con cargo, importa la historia de git del proyecto y, con <code>braid agents init</code>, escribe en su <code>AGENTS.md</code> las reglas para los agentes. A partir de ahí, cada sesión trabaja en su propio espacio de trabajo de braid y aterriza a través de braid, y git sigue siendo la fuente de verdad.</p>
+<p class="note" data-l="en" lang="en">The instructions are <a href="agents.md">agents.md</a>, part 1 of the repository's <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a>; there is an <a href="llms.txt">llms.txt</a> too. To do it by hand, start with the quick start below.</p>
+<p class="note" data-l="es" lang="es">Las instrucciones son <a href="agents.md">agents.md</a>, la primera parte del <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a> del repositorio, en inglés; también hay un <a href="llms.txt">llms.txt</a>. Para hacerlo a mano, empieza por los primeros pasos, a continuación.</p>
+</div>
+</section>
+
 <section id="start" class="sec" aria-labelledby="start-title">
 <div class="wrap narrow">
 <div class="sec-head">

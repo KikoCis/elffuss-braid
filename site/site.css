@@ -470,6 +470,9 @@ h1 {
   color: var(--term-text);
   overflow: hidden;
 }
+/* the prompt under "Ask your agent" is a sentence, not a command: it wraps,
+   so that a phone shows all of it */
+.code.prompt pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .code-bar {
   display: flex;
   justify-content: space-between;
