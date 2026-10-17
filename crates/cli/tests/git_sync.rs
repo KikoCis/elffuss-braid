@@ -363,6 +363,13 @@ fn conflicts_exit_with_2_and_change_nothing() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("nothing moved"), "{text}");
     assert!(text.contains("CONTENT       f"), "{text}");
+    // And what to do: the two sides meet in git.
+    assert!(
+        text.ends_with(
+            "Merge them in git and push the merge, then sync again: https://braid.elffuss.com/agents.md shows how, under \"Keeping the git remote up to date\".\n"
+        ),
+        "{text}"
+    );
     world.assert_forward_only();
 }
 

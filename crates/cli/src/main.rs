@@ -310,9 +310,9 @@ enum GitAction {
     },
     /// Keep a braid branch and a branch of a git remote in step: fetch and
     /// import the remote branch, then fast-forward the braid branch, or push
-    /// it (merging first when both moved) as a fast-forward with a lease.
-    /// Never force-pushes. Exits with 2 on conflicts and 1 when the push is
-    /// refused.
+    /// it (merging first when both moved) as a fast-forward with a lease, so
+    /// the remote's history is never rewritten. Exits with 2 on conflicts and
+    /// 1 when the push is refused.
     Sync {
         /// The git remote: a URL or a path.
         remote: String,

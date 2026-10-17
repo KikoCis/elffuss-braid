@@ -405,7 +405,7 @@ git init --quiet --bare remote.git
 <h2 id="ask-title"><span data-l="en" lang="en">Ask your agent</span><span data-l="es" lang="es">Pídeselo a tu agente</span></h2>
 </div>
 <p data-l="en" lang="en">Braid comes with instructions written for coding agents. In a project that is a git repository, ask yours, whatever harness runs it:</p>
-<p data-l="es" lang="es">Braid trae instrucciones escritas para agentes de programación. En un proyecto que sea un repositorio de git, pídeselo al tuyo, use el arnés que use:</p>
+<p data-l="es" lang="es">Braid trae instrucciones escritas para agentes de programación. En un proyecto que sea un repositorio de git, pídeselo al tuyo, sea cual sea la herramienta con la que lo uses:</p>
 <div class="code prompt" data-l="en" lang="en">
 <div class="code-bar"><span>prompt</span><button class="copy" type="button" aria-label="Copy the prompt" data-aria-en="Copy the prompt" data-aria-es="Copiar la petición" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
 <pre tabindex="0" role="region" aria-label="The prompt for your agent" data-aria-en="The prompt for your agent" data-aria-es="La petición para tu agente"><code>Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md (read it whole, with curl -fsSL)</code></pre>
@@ -416,8 +416,8 @@ git init --quiet --bare remote.git
 </div>
 <p data-l="en" lang="en">Your agent installs braid with cargo, tells you what in the project braid does not run, such as git hooks, offers to make a git remote if the project has none, imports the project's git history, and writes the rules for agents into its <code>AGENTS.md</code> with <code>braid agents init</code>. From then on, every agent session works in a braid workspace of its own, where git refuses to run, lands through braid, and tells you when what it landed is waiting for a sync to the git remote. Git stays the source of truth, and in a clone where braid is not set up, agents work with git as before.</p>
 <p data-l="es" lang="es">Tu agente instala braid con cargo, te avisa de lo que braid no ejecuta en el proyecto, como los hooks de git, se ofrece a crearle un remoto de git si no tiene ninguno, importa su historia de git y, con <code>braid agents init</code>, escribe en su <code>AGENTS.md</code> las reglas para los agentes. A partir de ahí, cada sesión trabaja en su propio espacio de trabajo, donde git se niega a funcionar, aterriza sus cambios con braid y te avisa cuando lo que ha aterrizado está pendiente de sincronizar con el remoto de git. Git sigue siendo la fuente de verdad, y en un clon donde braid no está configurado los agentes trabajan con git, como siempre.</p>
-<p class="note" data-l="en" lang="en">The instructions are <a href="agents.md">agents.md</a>, part 1 of the repository's <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a>; there is an <a href="llms.txt">llms.txt</a> too. To do it by hand, follow the same steps in <a href="agents.md">agents.md</a>; the quick start below tries braid on its own repository.</p>
-<p class="note" data-l="es" lang="es">Las instrucciones son <a href="agents.md">agents.md</a>, la primera parte del <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a> del repositorio, en inglés; también hay un <a href="llms.txt">llms.txt</a>. Para hacerlo a mano, sigue los mismos pasos de <a href="agents.md">agents.md</a>; los primeros pasos, justo debajo, prueban braid con su propio repositorio.</p>
+<p class="note" data-l="en" lang="en">The instructions are <a href="agents.md">agents.md</a>, part 1 of the repository's <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a>; there is an <a href="llms.txt">llms.txt</a> too. To do it by hand, follow the same steps in <a href="agents.md">agents.md</a>; <a href="#start">Quick start</a>, just below, tries braid on its own repository.</p>
+<p class="note" data-l="es" lang="es">Las instrucciones son <a href="agents.md">agents.md</a>, la primera parte del <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a> del repositorio, en inglés; también hay un <a href="llms.txt">llms.txt</a>. Para hacerlo a mano, sigue los mismos pasos de <a href="agents.md">agents.md</a>; <a href="#start">«Primeros pasos»</a>, justo debajo, prueba braid con su propio repositorio.</p>
 </div>
 </section>
 
@@ -572,7 +572,7 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 </div>
 <p class="licence" data-l="en" lang="en">Braid contains no code from git (GPLv2). It reads and writes git data with gitoxide (MIT or <span class="nw">Apache-2.0</span>); <code>git sync</code> also runs the git binary as a subprocess, to set up its mirror, fetch and push.</p>
 <p class="licence" data-l="es" lang="es">Braid no contiene código de git (GPLv2). Lee y escribe datos de git con gitoxide (MIT o <span class="nw">Apache-2.0</span>); <code>git sync</code> además ejecuta el binario de git como subproceso, para preparar su espejo, hacer fetch y hacer push.</p>
-<p class="next-link"><a href="#autosync"><span data-l="en" lang="en">Automatic sync with git</span><span data-l="es" lang="es">Sincronización automática con git</span></a></p>
+<p class="next-link"><a href="#autosync"><span data-l="en" lang="en">Coming: automatic sync with git</span><span data-l="es" lang="es">Próximamente: sincronización automática con git</span></a></p>
 </div>
 </section>
 

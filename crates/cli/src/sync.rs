@@ -15,6 +15,10 @@ use crate::{Cli, open_repo, print_json};
 /// Exit status when the sync found conflicts.
 const CONFLICTS: u8 = 2;
 
+/// What the text report says to do about conflicts: the two sides meet in
+/// git, and the guide for agents gives the steps.
+const MERGE_IN_GIT: &str = "Merge them in git and push the merge, then sync again: https://braid.elffuss.com/agents.md shows how, under \"Keeping the git remote up to date\".";
+
 pub(crate) fn git_sync(
     cli: &Cli,
     remote: &str,
@@ -212,6 +216,7 @@ fn print_text(report: &SyncReport) {
                     String::from_utf8_lossy(&conflict.path)
                 );
             }
+            println!("{MERGE_IN_GIT}");
         }
         SyncOutcome::RemoteMoved { found } => {
             eprintln!(

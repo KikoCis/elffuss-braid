@@ -391,7 +391,19 @@ serves it apart from the code.
   `git pull --ff-only`. The section has a session that finishes say so to
   the user, and offer to run them, rather than leave the user looking at
   files that did not change; where the project has no git remote, it says
-  so, and offers to make a bare one next to the project first.
+  so, and offers to make a bare one next to the project first. When the
+  sync stops on conflicts, the section says that the merge is made with
+  git, in the user's checkout, and points to the guide's steps, as the
+  text `git sync` prints does.
+- **Nobody signs by guesswork.** The guide's setup writes `.braid/config`
+  from git's `user.name` and `user.email`, and stops before it imports
+  anything while either is missing, rather than let every commit and
+  landing fail later with "no author". Its own commit runs git with
+  `user.useConfigOnly`, so that git refuses rather than sign with a name
+  and an address made up from the machine's user and host, which the
+  first sync would publish. Its check for a finished setup asks braid's
+  copy of the branch for the section, so that a setup that stopped half
+  way is run again rather than taken for done.
 
 ## Git bridge
 
@@ -407,9 +419,9 @@ serves it apart from the code.
   `remote/<label>/<branch>` for where the branches of git remotes were last
   seen. A git branch named like one of them is imported under its full name,
   below `git/`.
-- Sync fetches and imports first, then pushes with a lease, as a fast-forward.
-  Braid never force-pushes. The push itself runs the `git` binary as a
-  subprocess, since gitoxide does not push yet.
+- Sync fetches and imports first, then pushes with a lease, as a fast-forward:
+  the remote's history is never rewritten. The push itself runs the `git`
+  binary as a subprocess, since gitoxide does not push yet.
 
 ### Sync
 

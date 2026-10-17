@@ -155,7 +155,8 @@ git init --bare /tmp/mirror.git
 braid git export /tmp/mirror.git
 ```
 
-Every operation is in the op log, and any of them can be undone:
+Every operation is in the op log, and the newest can be undone, one at a
+time:
 
 ```bash
 braid op log      # who did what, newest first

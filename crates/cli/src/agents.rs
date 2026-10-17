@@ -707,7 +707,8 @@ source of truth, and `braid git sync` keeps the git remote in step.
   `printf '%s\\n' .braidignore __pycache__/ >> .braidignore` in the
   workspace's root. Only `.gitignore` and `.braidignore` apply in a
   workspace, not `.git/info/exclude` or a global excludes file. Braid runs
-  no git hooks: run the project's checks yourself before you land.
+  no git hooks: before you land, run the project's checks yourself, as
+  this file or `CLAUDE.md` gives them.
 - **Conflicts:** `land` and `update` exit with status 2, the `outcome` in
   their JSON is `conflicts`, and `{branch}` does not move. After `land`, run
   `braid --agent agent-1 update`, which writes conflict markers into the
@@ -728,11 +729,19 @@ source of truth, and `braid git sync` keeps the git remote in step.
   git pull --ff-only
   ```
 
-  Offer to run it: when to sync is the user's call. Where
-  `git remote get-url origin` fails, the project has no remote of that
-  name: if `git remote` lists others, ask the user which to sync with, and
-  write its name in place of `origin`; if it lists none, say so, and offer
-  to make one next to the project first, from the project root:
+  Offer to run it: when to sync is the user's call. If the sync exits
+  with 2 (`conflicts`), braid and the remote changed the same lines, and
+  nothing moved: tell the user, since the merge is made with git, in their
+  checkout, as <https://braid.elffuss.com/agents.md> shows under
+  \"Keeping the git remote up to date\". With `remote_moved` (exit status
+  1), sync again; with `rejected`, ask the user. If `git pull --ff-only`
+  refuses, their checkout has commits of its own, and what to do is their
+  call: `git pull --rebase`, `git push` and a new sync bring them into
+  braid. Where `git remote get-url origin` fails, the project has no
+  remote of that name: if `git remote` lists others, ask the user which to
+  sync with, and write its name in place of `origin`; if it lists none,
+  say so, and offer to make one next to the project first, from the
+  project root:
 
   ```bash
   git init --bare -b {branch} \"$PWD.git\"
@@ -746,7 +755,9 @@ source of truth, and `braid git sync` keeps the git remote in step.
   `name` and `email` in `.braid/config`. With neither, `commit`, `land` and
   `update` fail with \"no author\", and `status` lists it first among what
   stops a commit: ask the user who signs, and write the answer into
-  `.braid/config` as `name = <name>` and `email = <email>` lines.
+  `.braid/config` in the project root, the one file there you may edit, as
+  `name = <name>` and `email = <email>` lines. The merges that `git sync`
+  makes are signed by its `--agent`, with that email.
 - New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger
   than 1 MiB wait for `braid track <path>`. Never track a secret: move it
   out of the workspace.

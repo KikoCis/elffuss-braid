@@ -176,11 +176,11 @@ impl Repo {
     /// Keeps the braid branch `branch` and a branch of the git remote
     /// `remote` in step: fetches and imports the remote branch, then
     /// fast-forwards the braid branch, or pushes it (merging first when both
-    /// moved) as a fast-forward with a lease. Braid never force-pushes.
-    /// Operations are recorded by `agent`, who is also the committer of a
-    /// merge, with the `email` of the repository's [`Config`](crate::Config)
-    /// or `<agent>@example.org`, and whom the merge's
-    /// [`AGENT`] field names.
+    /// moved) as a fast-forward with a lease, so that the remote's history is
+    /// never rewritten. Operations are recorded by `agent`, who is also the
+    /// committer of a merge, with the `email` of the repository's
+    /// [`Config`](crate::Config) or `<agent>@example.org`, and whom the
+    /// merge's [`AGENT`] field names.
     ///
     /// # The mirror
     ///
