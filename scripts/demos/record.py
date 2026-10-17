@@ -156,19 +156,19 @@ def agents_and_conflict():
     check(a.run("for a in a b c; do braid workspace add agent-$a; done"), 0, "workspaces")
     a.note("they edit and commit at the same time: no shared index, no lock")
     check(a.run("echo 'free_over = 50' > shipping.toml && braid commit -m 'Free shipping from 50'",
-                who="agent-a", cwd="shop/agent-a"), 0, "commit a")
+                who="agent-a", cwd="shop/.braid/work/agent-a"), 0, "commit a")
     check(a.run("echo 'Ships in a day.' >> README.md && braid commit -m 'Next-day shipping'",
-                who="agent-b", cwd="shop/agent-b"), 0, "commit b")
+                who="agent-b", cwd="shop/.braid/work/agent-b"), 0, "commit b")
     check(a.run("echo 'free_over = 40' > shipping.toml && braid commit -m 'Free shipping from 40'",
-                who="agent-c", cwd="shop/agent-c"), 0, "commit c")
+                who="agent-c", cwd="shop/.braid/work/agent-c"), 0, "commit c")
     a.note("landing on main is one short step that they take in turn")
-    check(a.run("braid land", who="agent-a", cwd="shop/agent-a"), 0, "land a")
-    check(a.run("braid land", who="agent-b", cwd="shop/agent-b"), 0, "land b")
-    check(a.run("braid land", who="agent-c", cwd="shop/agent-c", hold=3.0), 2, "land c")
+    check(a.run("braid land", who="agent-a", cwd="shop/.braid/work/agent-a"), 0, "land a")
+    check(a.run("braid land", who="agent-b", cwd="shop/.braid/work/agent-b"), 0, "land b")
+    check(a.run("braid land", who="agent-c", cwd="shop/.braid/work/agent-c", hold=3.0), 2, "land c")
     a.save()
 
     # The same repository, picked up where the first recording stops.
-    b = Scene("conflict", root, env, cwd="shop/agent-c")
+    b = Scene("conflict", root, env, cwd="shop/.braid/work/agent-c")
     b.note("agent-c changed the line agent-a landed first: main did not move")
     b.note("the conflict comes back as data, with all three sides")
     check(b.run("braid land --json | jq '.outcome, .next, (.conflicts[0].hunks[0] | map_values(.text))'",
@@ -200,7 +200,7 @@ def git_sync():
     ):
         check(s.quiet(f"braid workspace add {who}"), 0, "workspace")
         check(s.quiet(f"{edit} && braid commit -m '{message}' && braid land",
-                      who=who, cwd=f"shop/{who}"), 0, message)
+                      who=who, cwd=f"shop/.braid/work/{who}"), 0, message)
     check(s.quiet(
         f"""set -e
         {GIT} clone -q github.git laptop && cd laptop
@@ -215,11 +215,32 @@ def git_sync():
     s.save()
 
 
+def agents_init():
+    root, env = directory("setup")
+    s = Scene("agents-init", root, env)
+    seed(s)
+    check(s.quiet(f"{GIT} clone -q github.git shop"), 0, "clone")
+    s.cwd = "shop"
+    s.note('asked to "install braid in this project and set it up for agents",')
+    s.note("an agent follows braid.elffuss.com/agents.md in the project's checkout")
+    check(s.run("braid init"), 0, "init")
+    check(s.run("echo .braid >> .git/info/exclude", hold=0.4), 0, "exclude")
+    check(s.run("braid git import ."), 0, "import")
+    check(s.run("braid agents init"), 0, "agents init")
+    check(s.run("git status --short"), 0, "status")
+    s.note("the rules every later agent session reads, in the project's AGENTS.md")
+    check(s.run("grep '^- [*][*]' AGENTS.md | cut -c1-76", hold=4.0), 0, "rules")
+    s.note("a new session starts in a workspace of its own")
+    check(s.run("braid workspace add agent-1 --track main", hold=3.5), 0, "workspace")
+    s.save()
+
+
 def main():
     os.makedirs(WORK)
     os.makedirs(OUT, exist_ok=True)
     agents_and_conflict()
     git_sync()
+    agents_init()
 
 
 main()

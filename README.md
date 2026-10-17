@@ -125,6 +125,8 @@ site serves as
 [braid.elffuss.com/agents.md](https://braid.elffuss.com/agents.md), next to
 an [llms.txt](https://braid.elffuss.com/llms.txt).
 
+<p align="center"><img src="docs/assets/demo-agents-init.gif" alt="Setting braid up in a project's git checkout: braid init, git told to ignore .braid, braid git import brings in the history, braid agents init writes the braid section into AGENTS.md, the section's rules are listed, and a new session starts in a workspace of its own under .braid/work" width="860"></p>
+
 ## Quick start
 
 Braid stores history, moves it in and out of git bit for bit, and gives each
