@@ -48,7 +48,9 @@ pub enum Error {
     Assemble(#[from] braid_format::ChangesetError),
 
     /// The current directory is not inside a workspace.
-    #[error("not inside a workspace; create one with `braid workspace add <name>`")]
+    #[error(
+        "not inside a workspace: run this in your workspace's directory, or pass --workspace <name> (`braid workspace list` shows them; `braid workspace add <name>` makes one in .braid/work/<name>)"
+    )]
     NotAWorkspace,
 
     /// A workspace name that is not allowed.
@@ -145,7 +147,7 @@ pub enum Error {
     /// The working copy cannot be committed as it is: conflict markers
     /// remain, conflicts are not marked resolved, or new files wait for
     /// `braid track`. Every reason is listed, as `status` lists them.
-    #[error("cannot commit yet:\n{}\nSettle these first, or commit anyway with --force: files waiting for `braid track` stay out.", reasons(.0))]
+    #[error("cannot commit yet:\n{}\n{}", reasons(.0), advice(.0))]
     Blocked(Vec<Blocker>),
 
     /// There is nothing to commit.
@@ -225,6 +227,20 @@ impl Error {
 
 /// How many reasons a refusal lists, at most.
 const REASONS_SHOWN: usize = 20;
+
+/// What to do about a refused commit. `--force` commits past conflicts as
+/// they are, markers and all, so it is offered as a way out only when the
+/// guard alone holds files back.
+fn advice(blockers: &[Blocker]) -> &'static str {
+    if blockers
+        .iter()
+        .any(|blocker| !matches!(blocker, Blocker::NeedsTrack(_)))
+    {
+        "Settle these first. --force would commit the conflicts as they are, markers and all, and leave out the files waiting for `braid track`."
+    } else {
+        "Move a secret out of the workspace, `braid track` a file that is not one, or commit without them with --force."
+    }
+}
 
 fn reasons(blockers: &[Blocker]) -> String {
     let mut shown: Vec<String> = blockers

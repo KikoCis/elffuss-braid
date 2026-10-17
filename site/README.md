@@ -107,9 +107,12 @@ stay in English.
   prints (it names the directory), and change the hero card and the story
   together.
 - The prompt under "Ask your agent" is the same, word for word, in the
-  English page, in the README and in `llms.txt`, and `agents.md` is part 1
-  of `AGENTS.md`: `crates/cli/tests/agents.rs` checks both. Every command
-  `agents.md` gives runs as written.
+  English page, in the README and in `llms.txt`, and so is its Spanish in
+  the Spanish page and in the README's Spanish part. `agents.md` is part 1
+  of `AGENTS.md`, and its install command names the tag of the version in
+  `Cargo.toml`. `crates/cli/tests/guides.rs` checks all of this, and that
+  every braid command `agents.md` gives exists with its flags; every
+  command it gives runs as written.
 - The quick start and the agent's commands under "Many agents on one
   repository" run as one session, top to bottom. `braid undo` comes after the
   agent lands, so it takes that landing back; before it, it would take the
@@ -125,21 +128,27 @@ all of this is true:
    `scripts/privacy-check.sh` passes. The quick start clones and builds it,
    and CI has run on it: the story says CI runs the scene on every push to
    `main`.
-2. Every link into the repository answers from `main`. Check them against
+2. The tag that `agents.md` installs (`--tag v` and the version in
+   `Cargo.toml`) is on GitHub, at a commit of `main` that holds this tree.
+   Push the commits and the tag first and serve the page after, never the
+   other way round: `agents.md` is served apart from the code, and an
+   agent that follows it before the tag is there gets an error from cargo
+   instead of braid.
+3. Every link into the repository answers from `main`. Check them against
    what `main` holds, not against github.com, which answers 200 for any path
    of an empty repository: a file answers 200 at
    `https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/<path>`,
    and a directory (`crates/sim`, `fuzz/fuzz_targets`, `bench`) is listed by
    `gh api 'repos/KikoCis/elffuss-braid/contents/<path>?ref=main'`.
-3. The text matches `main`. The ratios block, for one, lists the work on
+4. The text matches `main`. The ratios block, for one, lists the work on
    speed that came after the commit measured, and that list grows.
-4. `https://braid.elffuss.com/` answers 200 with a certificate for that
+5. `https://braid.elffuss.com/` answers 200 with a certificate for that
    name, `http://braid.elffuss.com/` redirects to it, and
    `https://braid.elffuss.com/og.png` answers 200 as `image/png`. Only then
    does the link go anywhere: the repository's homepage
    (`gh repo edit KikoCis/elffuss-braid --homepage https://braid.elffuss.com`),
    and posts, whose link previews are fetched once and kept.
-5. `https://braid.elffuss.com/agents.md` answers 200 as
+6. `https://braid.elffuss.com/agents.md` answers 200 as
    `text/markdown; charset=utf-8` and `https://braid.elffuss.com/llms.txt`
    as `text/plain; charset=utf-8`, so that an agent reads them as text:
    `curl -sI` shows the type. A server that does not know `.md` may send

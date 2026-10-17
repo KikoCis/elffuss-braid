@@ -5,7 +5,7 @@ contributions right now are reviews of the [design](docs/design.md) and the
 [format](docs/spec/format-v1.md), bug reports, and tests.
 
 Coding agents: part 2 of [AGENTS.md](AGENTS.md) says the same in short,
-with every check CI runs.
+with the checks to run before every commit.
 
 ## Build and test
 

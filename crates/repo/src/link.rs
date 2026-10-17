@@ -27,6 +27,11 @@ use crate::{DIR, Error, STORE_DIR};
 /// workspace.
 pub const WORKSPACES_DIR: &str = "ws";
 
+/// Directory inside `.braid` where workspaces go unless told otherwise:
+/// `.braid/work/<name>`, inside the project, where git ignores them along
+/// with the rest of `.braid`.
+pub const WORK_DIR: &str = "work";
+
 /// The first line of a workspace file.
 const HEADER: &str = "braid-workspace 1";
 

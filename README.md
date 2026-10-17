@@ -95,14 +95,17 @@ Braid comes with instructions written for coding agents. In a project that
 is a git repository, ask your agent, whatever harness runs it:
 
 ```text
-Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md
+Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md (read it whole, with curl -fsSL)
 ```
 
-It installs braid with cargo, imports the project's git history, and writes
-the rules for agents into the project's `AGENTS.md` with
-`braid agents init`. From then on, every agent session works in a braid
-workspace of its own and lands through braid, and git stays the source of
-truth. The instructions are part 1 of [AGENTS.md](AGENTS.md), which the
+It installs braid with cargo, tells you what in the project braid does not
+run, such as git hooks, imports the project's git history, and writes the
+rules for agents into the project's `AGENTS.md` with `braid agents init`.
+From then on, every agent session works in a braid workspace of its own,
+where git refuses to run, lands through braid, and tells you when what it
+landed is waiting for a sync to the git remote. Git stays the source of
+truth, and in a clone where braid is not set up, agents work with git as
+before. The instructions are part 1 of [AGENTS.md](AGENTS.md), which the
 site serves as
 [braid.elffuss.com/agents.md](https://braid.elffuss.com/agents.md), next to
 an [llms.txt](https://braid.elffuss.com/llms.txt).
@@ -160,8 +163,8 @@ onto whatever the others landed first.
 ```bash
 export BRAID_AUTHOR="Ada Lovelace <ada@example.org>"
 export BRAID_AGENT=agent-1           # recorded with everything this agent does
-braid workspace add agent-1          # ./agent-1, tracking main
-cd agent-1
+braid workspace add agent-1          # .braid/work/agent-1, tracking main
+cd .braid/work/agent-1
 echo 'fn main() {}' > main.rs
 braid status
 braid commit -m "Add main.rs"
@@ -200,15 +203,29 @@ rebases the change and writes git-style conflict markers. Fix the file, then
   store: generation numbers and skip pointers for ancestry, changed-path
   filters, and blame records, computed the first time they are needed.
   `braid derive --all` computes them ahead of time, after a large import.
+- A workspace goes in `.braid/work/<name>` unless `workspace add` is given
+  a directory, and tracks a branch the repository has, unless it has none
+  yet; `--new-branch` starts one on purpose. It holds a `.git` file that
+  points nowhere, so that git run inside
+  it stops with "not a git repository" instead of acting on the checkout
+  around it. `braid cat-object <rev>:<path>` prints a file as a changeset
+  has it: `braid cat-object <base>:<path> | diff -u - <path>` shows what an
+  edit in the workspace changed.
+- Hints, and `next` in the JSON, repeat the `--agent`, `--workspace` and
+  `--repo` a command was given, so that an agent that follows them acts as
+  the same session.
 - `braid agents init` writes the rules for agents into a project's
   `AGENTS.md`, in a section between a `<!-- braid:start -->` line and a
   `<!-- braid:end -->` line: each session works in a workspace of its own
-  under `.braid/work/` and lands on the branch the section names. Running it
-  again rewrites the section in place and touches nothing else; markers that
-  do not pair up are refused. It also adds `@AGENTS.md` to a `CLAUDE.md`
-  that does not include it (`--no-claude` leaves it alone). `--dry-run`
-  shows what it would write, and `--json` lists the files created, updated
-  and unchanged.
+  under `.braid/work/` and lands on the branch the section names, one the
+  repository has. Running it again rewrites the section in place and
+  touches nothing else; markers that do not pair up are refused, and
+  marker lines in code blocks are not markers. It also adds `@AGENTS.md` to
+  a `CLAUDE.md` or a `GEMINI.md` that does not include it (`--no-claude` and
+  `--no-gemini` leave them alone). It writes through a link only inside the
+  project, never a read-only file, and replaces no file until every one is
+  ready. `--dry-run` shows what it would write, and `--json` lists the
+  files created, updated and unchanged, and the file each one is.
 
 `braid status --help`, `braid land --help`, `braid update --help` and
 `braid agents init --help` describe every JSON field.
@@ -419,9 +436,13 @@ agente tiene su propio espacio de trabajo y aterriza en `main` en un paso corto.
 Las [fases](#status-and-roadmap) dicen qué llega después y qué pruebas tiene que
 pasar cada una.
 
-Para usarlo en un proyecto, pídeselo a tu agente: «Instala braid en este
-proyecto y configúralo para agentes siguiendo
-https://braid.elffuss.com/agents.md». Lo instala con cargo, importa la
-historia de git del proyecto y, con `braid agents init`, escribe en su
-`AGENTS.md` las reglas para que cada sesión trabaje en su propio espacio de
-trabajo y aterrice a través de braid.
+Para usarlo en un proyecto, pídeselo a tu agente:
+
+```text
+Instala braid en este proyecto y configúralo para agentes siguiendo https://braid.elffuss.com/agents.md (léelo entero, con curl -fsSL)
+```
+
+Lo instala con cargo, te avisa de lo que braid no ejecuta, como los hooks
+de git, importa la historia de git del proyecto y, con `braid agents init`,
+escribe en su `AGENTS.md` las reglas para que cada sesión trabaje en su
+propio espacio de trabajo y aterrice sus cambios con braid.

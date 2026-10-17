@@ -17,11 +17,12 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use braid_format::changeset::decode_change_list;
 use braid_format::{
-    Change, ChangeOp, Changes, Changeset, IdHasher, Kind, ObjectId, Objects, Signature,
+    Change, ChangeOp, Changes, Changeset, EntryKind, IdHasher, Kind, ObjectId, Objects, Signature,
 };
 use braid_repo::Repo;
 use braid_store::{FsckReport, Operation, RefUpdate};
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::{Value, json};
 
 /// Version control for many agents landing changes at once.
@@ -52,6 +53,79 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+
+    /// The global flags given on the command line, as a hint repeats them:
+    /// empty, or each flag and its value followed by a space.
+    #[arg(skip)]
+    given: String,
+}
+
+impl Cli {
+    /// A command for a hint to print: `braid`, the global flags this
+    /// command was given (`--repo`, `--agent`, `--workspace`), then `rest`,
+    /// so that a hint followed as written acts on the same workspace, for
+    /// the same agent.
+    pub(crate) fn hint(&self, rest: &str) -> String {
+        format!("braid {}{rest}", self.given)
+    }
+}
+
+/// The global flags typed on the command line, as [`Cli::given`] holds
+/// them. A value that came from the environment, such as `BRAID_AGENT`, is
+/// left out: the environment that set it sets it again.
+fn given_flags(cli: &Cli, matches: &ArgMatches) -> String {
+    // A global flag is recorded where it was typed, before or after a
+    // subcommand, and copied to the others.
+    let typed = |id: &str| {
+        let mut current = Some(matches);
+        while let Some(found) = current {
+            if found.value_source(id) == Some(ValueSource::CommandLine) {
+                return true;
+            }
+            current = found.subcommand().map(|(_, sub)| sub);
+        }
+        false
+    };
+    let mut given = String::new();
+    let repo = cli.repo.as_ref().map(|repo| repo.to_string_lossy());
+    for (id, value) in [
+        ("repo", repo.as_deref()),
+        ("agent", Some(cli.agent.as_str())),
+        ("workspace", cli.workspace.as_deref()),
+    ] {
+        if let Some(value) = value
+            && typed(id)
+        {
+            given.push_str(&flag(id, value));
+            given.push(' ');
+        }
+    }
+    given
+}
+
+/// `--name value`, quoted for a POSIX shell where it needs to be, or
+/// `--name=value` when the value starts with `-`.
+fn flag(name: &str, value: &str) -> String {
+    let word = shell_word(value);
+    if value.starts_with('-') {
+        format!("--{name}={word}")
+    } else {
+        format!("--{name} {word}")
+    }
+}
+
+/// `text` as one word of a POSIX shell: as it is when that is safe, or
+/// between single quotes.
+pub(crate) fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:@%+=,".contains(&byte));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -75,9 +149,12 @@ enum Command {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
-    /// Write an object's raw payload to standard output.
+    /// Write an object's raw payload to standard output: a file's content,
+    /// for one named REV:PATH.
     CatObject {
-        /// A ref, an object id, or a short id (6 hex digits or more).
+        /// A ref, an object id, a short id (6 hex digits or more), or
+        /// REV:PATH, the file or directory at PATH, from the repository's
+        /// root, in the changeset REV.
         revision: String,
     },
     /// List refs and the objects they point at.
@@ -262,7 +339,9 @@ enum OpAction {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    cli.given = given_flags(&cli, &matches);
     match run(&cli) {
         Ok(code) => code,
         Err(err) => {
@@ -433,9 +512,38 @@ fn hash_blob(mut reader: impl Read) -> io::Result<(ObjectId, u64)> {
     Ok((hasher.finalize(), size))
 }
 
+/// The object a revision names, or for `REV:PATH`, the object at PATH in
+/// the tree of the changeset REV: the blob of a file or symlink, or the tree
+/// of a directory. A revision that resolves as it is wins, so a ref with a
+/// `:` in its name still names that ref.
+fn resolve_object(repo: &Repo, revision: &str) -> Result<ObjectId> {
+    let (rev, path) = match (repo.resolve(revision), revision.split_once(':')) {
+        (Ok(id), _) => return Ok(id),
+        (Err(braid_repo::Error::UnknownRevision(_)), Some(split)) => split,
+        (Err(err), _) => return Err(err.into()),
+    };
+    let root = read_changeset(repo, &resolve_changeset(repo, rev)?)?.root;
+    let path = path.strip_prefix("./").unwrap_or(path).trim_matches('/');
+    if path.is_empty() {
+        return Ok(root);
+    }
+    match braid_engine::entry_at(repo.store(), root, path.as_bytes())? {
+        Some(
+            EntryKind::File { blob, .. }
+            | EntryKind::Executable { blob, .. }
+            | EntryKind::Symlink { blob, .. },
+        ) => Ok(blob),
+        Some(EntryKind::Tree { tree }) => Ok(tree),
+        Some(EntryKind::Gitlink { .. }) => {
+            bail!("{path:?} is a submodule in {rev}: its content is in another repository")
+        }
+        None => bail!("{rev} has no file or directory at {path:?}"),
+    }
+}
+
 fn cat_object(cli: &Cli, revision: &str) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
-    let id = repo.resolve(revision)?;
+    let id = resolve_object(&repo, revision)?;
     if cli.json {
         // The size is in the record's header: nothing needs decoding.
         let Some((kind, size)) = repo.store().stat(&id)? else {

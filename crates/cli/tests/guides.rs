@@ -3,8 +3,9 @@
 
 //! The guides for coding agents: part 1 of AGENTS.md, which the site also
 //! serves as agents.md, and the section `braid agents init` writes. They say
-//! the same things in several places, and every braid command they give must
-//! exist, with every flag it is given.
+//! the same things in several places, they install the braid they describe,
+//! and every braid command they give must exist, with every flag it is
+//! given.
 
 use std::path::Path;
 use std::process::Command;
@@ -12,8 +13,13 @@ use std::process::Command;
 const START: &str = "<!-- braid:start -->";
 const END: &str = "<!-- braid:end -->";
 
-/// The prompt that sends an agent to the guide.
-const PROMPT: &str = "Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md";
+/// The prompt that sends an agent to the guide. It asks for the page whole,
+/// since some harnesses fetch a summary of a page rather than its text.
+const PROMPT: &str = "Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md (read it whole, with curl -fsSL)";
+
+/// The same prompt, as the Spanish page and the README's Spanish part give
+/// it.
+const PROMPT_ES: &str = "Instala braid en este proyecto y configúralo para agentes siguiendo https://braid.elffuss.com/agents.md (léelo entero, con curl -fsSL)";
 
 fn repository_file(path: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -68,7 +74,10 @@ fn part_one() -> String {
 /// The section `braid agents init` writes, as its dry run prints it.
 fn section() -> String {
     let temp = tempfile::tempdir().unwrap();
-    let said = braid(temp.path(), &["agents", "init", "--dry-run"]);
+    let said = braid(
+        temp.path(),
+        &["agents", "init", "--dry-run", "--branch", "main"],
+    );
     let start = said.find(START).expect("the dry run prints the section");
     said[start..].to_owned()
 }
@@ -95,14 +104,10 @@ fn bash_lines(text: &str) -> Vec<String> {
 fn the_guide_for_agents_is_the_same_in_agents_md_and_on_the_site() {
     let agents = repository_file("AGENTS.md");
     let site = repository_file("site/agents.md");
-    // The site serves part 1 of AGENTS.md, from its first subsection on,
-    // one heading level up.
     let first = "### Install";
     let ours = part(&agents, first, Some("\n## 2."), true);
     let theirs = part(&site, &first[1..], None, false);
     assert_eq!(ours.trim_end(), theirs.trim_end());
-    // No line of the guides is a marker, so that `braid agents init` never
-    // takes them for a section.
     for text in [&agents, &site] {
         assert!(
             !text
@@ -110,7 +115,6 @@ fn the_guide_for_agents_is_the_same_in_agents_md_and_on_the_site() {
                 .any(|line| line.trim() == START || line.trim() == END)
         );
     }
-    // CLAUDE.md only includes AGENTS.md.
     assert_eq!(repository_file("CLAUDE.md"), "@AGENTS.md\n");
 }
 
@@ -119,24 +123,48 @@ fn the_prompt_for_agents_is_the_same_everywhere() {
     for path in ["README.md", "site/index.html", "site/llms.txt"] {
         assert!(repository_file(path).contains(PROMPT), "{path}");
     }
-    // It points at the guide, which the site serves.
-    assert!(PROMPT.ends_with("https://braid.elffuss.com/agents.md"));
+    for path in ["README.md", "site/index.html"] {
+        assert!(repository_file(path).contains(PROMPT_ES), "{path}");
+    }
+    assert!(PROMPT.contains(" https://braid.elffuss.com/agents.md "));
     assert!(repository_file("site/llms.txt").contains("(https://braid.elffuss.com/agents.md)"));
 }
 
 #[test]
+fn the_guide_installs_the_braid_it_describes() {
+    // The guide is served apart from the code: it installs a tag, so that
+    // the braid an agent builds is the one the guide was written for, and
+    // the version check names that version.
+    let version = env!("CARGO_PKG_VERSION");
+    let guide = part_one();
+    let install = format!(
+        "cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v{version} elffuss-braid-cli\n"
+    );
+    assert!(guide.contains(&install), "{install}");
+    assert!(guide.contains(&format!("\"braid {version}\", or newer")));
+    let printed = braid(Path::new("."), &["--version"]);
+    assert_eq!(printed, format!("braid {version}\n"));
+    // The guide's version has `agents init`: an older one is what the check
+    // sends back to the install.
+    braid(Path::new("."), &["agents", "init", "--help"]);
+}
+
+#[test]
 fn every_braid_command_in_the_guides_exists_with_its_flags() {
-    let mut commands: Vec<String> = bash_lines(&part_one());
-    commands.extend(bash_lines(&section()));
-    let commands: Vec<String> = commands
-        .into_iter()
-        .filter(|line| line.starts_with("braid "))
+    let mut lines: Vec<String> = bash_lines(&part_one());
+    lines.extend(bash_lines(&section()));
+    // A line may run braid after another command: `test -d .braid || braid
+    // init`.
+    let commands: Vec<String> = lines
+        .iter()
+        .flat_map(|line| line.split("||").flat_map(|part| part.split("&&")))
+        .map(str::trim)
+        .filter(|command| command.starts_with("braid "))
+        .map(str::to_owned)
         .collect();
     assert!(commands.len() >= 15, "{commands:?}");
-    // Subcommands that take a subcommand of their own.
     let groups = ["agents", "change", "git", "op", "ref", "workspace"];
     for command in &commands {
-        // The words of the command, before any comment.
         let words: Vec<&str> = command
             .split(" #")
             .next()
@@ -144,7 +172,6 @@ fn every_braid_command_in_the_guides_exists_with_its_flags() {
             .split_whitespace()
             .skip(1)
             .collect();
-        // Global flags that take a value come before the subcommand.
         let mut rest = words.as_slice();
         while let [flag, _, tail @ ..] = rest {
             if matches!(*flag, "--agent" | "--workspace" | "--repo") {

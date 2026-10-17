@@ -9,7 +9,12 @@
 //!
 //! A workspace is any directory holding a `.braid` file. The file is local
 //! and never tracked; it names the repository and the workspace (see
-//! [`braid_repo::WorkspaceLink`]). The workspace's state lives in the
+//! [`braid_repo::WorkspaceLink`]). Next to it, a `.git` file whose
+//! `gitdir:` line points nowhere ([`GIT_GUARD`]) makes git stop with "not a
+//! git repository" inside the workspace, instead of finding the repository
+//! of a checkout around it and acting on that. The walk skips both. A
+//! workspace goes in `.braid/work/<name>` of the repository unless told
+//! otherwise ([`Workspace::default_dir`]). Its state lives in the
 //! repository, in `.braid/ws/<name>/`:
 //!
 //! ```text
@@ -81,6 +86,6 @@ pub use paths::workspace_path;
 pub use state::{Checkout, Rebase, RecordedConflict, State};
 pub use status::{ChangeKind, GUARD_SIZE, PathChange, Status, is_guarded};
 pub use workspace::{
-    BEHIND_LIMIT, CommitOutcome, CommitRequest, LandReport, Landed, Placed, RebaseProgress,
-    StatusReport, UpdateReport, Updated, Workspace,
+    BEHIND_LIMIT, CommitOutcome, CommitRequest, GIT_GUARD, GIT_GUARD_TEXT, LandReport, Landed,
+    Placed, RebaseProgress, StatusReport, UpdateReport, Updated, Workspace,
 };

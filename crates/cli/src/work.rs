@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use braid_engine::{Conflict, ConflictKind, HunkSide};
 use braid_format::{ChangeOp, EntryKind, ObjectId};
 use braid_repo::{Location, Repo};
+use braid_store::Refs;
 use braid_wc::{
     BEHIND_LIMIT, Blocker, ChangeRequest, CommitRequest, Expect, Identity, LandReport, Landed,
     Placed, RebaseProgress, UpdateReport, Updated, Workspace,
@@ -63,7 +64,8 @@ change create --land prints it as \"land\", without base and updated_paths.
   next           on conflicts, what to run next: braid update after land;
                  braid commit, once the files are fixed, after update; a
                  new change create on the branch after change create;
-                 otherwise null
+                 otherwise null. It repeats the --repo, --agent and
+                 --workspace given on the command line
 
 Ids in JSON are full; text output shows their first 12 hex digits."
     };
@@ -133,6 +135,22 @@ rebase is in progress until `braid commit`.
     report_fields!()
 );
 
+/// The long help of `workspace add`.
+pub(crate) const ADD_HELP: &str = "Create a workspace and write its files: a directory, by default
+.braid/work/<name> in the repository's root, holding a checkout of the
+branch it tracks, a .braid file that names the workspace and the
+repository, and a .git file that points nowhere, so that git run inside
+the workspace stops with \"not a git repository\" instead of acting on a
+checkout around it.
+
+The branch must be one the repository has: a name it does not have is
+refused, since landing would start a new history under that name, with
+none of the repository's. A repository with no branch yet takes any
+name, and --new-branch takes one on purpose; the first landing starts it.
+
+With --json it prints name, path, branch, base (the changeset the working
+copy is at, or null) and files (how many it wrote).";
+
 /// The long help of `change create`.
 pub(crate) const CREATE_HELP: &str = concat!(
     "Make a changeset on a base without a working copy, and optionally land
@@ -147,20 +165,28 @@ landing, or null.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorkspaceAction {
     /// Create a workspace and write its files.
+    #[command(long_about = ADD_HELP)]
     Add {
-        /// The workspace's name: letters, digits, '.', '_' or '-'.
+        /// The workspace's name: 1 to 64 ASCII letters, digits, '.', '_' or
+        /// '-', starting with a letter or a digit.
         name: String,
         /// Its directory, which must not exist or be empty (default:
-        /// ./<name>).
+        /// .braid/work/<name> in the repository's root).
         path: Option<PathBuf>,
         /// The changeset to start at: a ref, an id or a short id (default:
         /// the head of the tracked branch, or nothing if it does not exist
         /// yet).
         #[arg(long, value_name = "REV")]
         at: Option<String>,
-        /// The branch the workspace lands on and updates from.
+        /// The branch the workspace lands on and updates from. It must be
+        /// one the repository has, unless it has none yet or --new-branch
+        /// is given.
         #[arg(long, value_name = "BRANCH", default_value = "main")]
         track: String,
+        /// Track a branch the repository does not have: the workspace's
+        /// first landing starts it.
+        #[arg(long)]
+        new_branch: bool,
     },
     /// List the repository's workspaces.
     List,
@@ -287,6 +313,53 @@ impl Target {
     }
 }
 
+/// The repository's branches, in the order the store keeps its refs: the
+/// refs outside braid's own namespaces.
+pub(crate) fn branches(refs: &Refs) -> Vec<&str> {
+    refs.iter()
+        .map(|(name, _)| name)
+        .filter(|name| braid_repo::is_branch(name))
+        .collect()
+}
+
+/// The first few of `names`, for a message: `a, b, c`, or `a, b, c and 7
+/// more`.
+pub(crate) fn listed(names: &[&str]) -> String {
+    const SHOWN: usize = 10;
+    let mut text = names[..names.len().min(SHOWN)].join(", ");
+    if names.len() > SHOWN {
+        text.push_str(&format!(" and {} more", names.len() - SHOWN));
+    }
+    text
+}
+
+/// Refuses to track `branch` unless it is a branch of the repository, the
+/// repository has no branch yet, or a new branch is asked for. Tracking a
+/// branch that does not exist gives an empty checkout, and its first
+/// landing starts a history of its own under that name: in a project whose
+/// branch is `master`, a `main` beside it with none of its history.
+fn check_tracked(refs: &Refs, branch: &str, new_branch: bool) -> Result<()> {
+    if !braid_repo::is_branch(branch) {
+        bail!(
+            "{branch:?} is in one of braid's own namespaces (braid/, git/, remote/, tags/), not a branch"
+        );
+    }
+    let names = branches(refs);
+    if names.contains(&branch) {
+        return Ok(());
+    }
+    if !braid_git::is_branch_name(branch) {
+        bail!("{branch:?} cannot name a branch");
+    }
+    if new_branch || names.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the repository has no branch {branch:?}; it has {}. Track one of them, or pass --new-branch to start {branch} with this workspace's first landing",
+        listed(&names)
+    )
+}
+
 fn identity(args: &IdentityArgs, repo: &Repo) -> Result<Identity> {
     Ok(Identity::resolve(args.author.as_deref(), repo)?)
 }
@@ -330,15 +403,18 @@ pub(crate) fn workspace(cli: &Cli, action: &WorkspaceAction) -> Result<ExitCode>
             path,
             at,
             track,
+            new_branch,
         } => {
             let repo = open_repo(cli)?;
+            let refs = repo.store().refs()?;
+            check_tracked(&refs, track, *new_branch)?;
             let at = match at {
                 Some(revision) => Some(resolve_changeset(&repo, revision)?),
-                None => repo.store().refs()?.get(track),
+                None => refs.get(track),
             };
             let dir = match path {
                 Some(path) => path.clone(),
-                None => std::env::current_dir()?.join(name),
+                None => Workspace::default_dir(&repo, name),
             };
             let (workspace, files) = Workspace::create(&repo, name, &dir, at, track)?;
             if cli.json {
@@ -487,25 +563,28 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
         };
         writeln!(
             out,
-            "{} is {ahead} ahead, at {}: run `braid update`",
+            "{} is {ahead} ahead, at {}: run `{}`",
             state.branch,
-            short(report.head)
+            short(report.head),
+            cli.hint("update")
         )?;
     }
     if let Some(rebase) = &state.rebase {
         writeln!(
             out,
-            "Rebase of {} in progress onto {}; resolve, then `braid commit`",
+            "Rebase of {} in progress onto {}; resolve, then `{}`",
             rebase.change.short(),
-            rebase.onto.short()
+            rebase.onto.short(),
+            cli.hint("commit")
         )?;
+        let resolve = format!("run `{}` once settled", cli.hint("resolve"));
         for (conflict, remain) in &report.conflicts {
             let note = if conflict.markers {
                 if *remain { "markers remain" } else { "edited" }
             } else if conflict.resolved {
                 "resolved"
             } else {
-                "run `braid resolve` once settled"
+                &resolve
             };
             writeln!(
                 out,
@@ -524,7 +603,11 @@ pub(crate) fn status(cli: &Cli) -> Result<ExitCode> {
         }
     }
     if !status.needs_track.is_empty() {
-        writeln!(out, "New files not committed until `braid track <path>`:")?;
+        writeln!(
+            out,
+            "New files not committed until `{}`:",
+            cli.hint("track <path>")
+        )?;
         for path in &status.needs_track {
             writeln!(out, "  {}", show(path))?;
         }
@@ -602,8 +685,9 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
             RebaseProgress::None => {}
             RebaseProgress::Finished { tip } => {
                 println!(
-                    "Rebase finished at {}; `braid land` when ready",
-                    tip.short()
+                    "Rebase finished at {}; `{}` when ready",
+                    tip.short(),
+                    cli.hint("land")
                 );
             }
             RebaseProgress::Stopped { change, conflicts } => {
@@ -681,7 +765,7 @@ impl<'a> Report<'a> {
             operation: None,
             change,
             conflicts,
-            next: (!conflicts.is_empty()).then(|| "braid commit".to_owned()),
+            next: None,
             workspace: Some((report.base, &report.updated_paths)),
         }
     }
@@ -746,7 +830,7 @@ pub(crate) fn land(cli: &Cli, args: &LandArgs) -> Result<ExitCode> {
     let mut report = Report::landing(&landing);
     report.workspace = Some((workspace.state()?.base, &landing.updated_paths));
     if !report.conflicts.is_empty() {
-        report.next = Some("braid update".to_owned());
+        report.next = Some(cli.hint("update"));
     }
     if cli.json {
         print_json(&report.json())?;
@@ -783,7 +867,10 @@ pub(crate) fn land(cli: &Cli, args: &LandArgs) -> Result<ExitCode> {
                 short(landing.head_before),
             );
             print_conflicts(conflicts);
-            println!("Run `braid update` to bring the conflicts into the working copy.");
+            println!(
+                "Run `{}` to bring the conflicts into the working copy.",
+                cli.hint("update")
+            );
         }
     }
     report.print_updated();
@@ -795,7 +882,10 @@ pub(crate) fn update(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
     let workspace = target.open()?;
     let committer = identity(args, &target.repo)?;
     let updated = workspace.update(&committer)?;
-    let report = Report::update(&updated);
+    let mut report = Report::update(&updated);
+    if !report.conflicts.is_empty() {
+        report.next = Some(cli.hint("commit"));
+    }
     if cli.json {
         print_json(&report.json())?;
         return Ok(report.exit_code());
@@ -822,7 +912,11 @@ pub(crate) fn update(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
                 head.short()
             );
             print_conflicts(conflicts);
-            println!("Fix the files, `braid resolve` the other conflicts, then `braid commit`.");
+            println!(
+                "Fix the files, `{}` the other conflicts, then `{}`.",
+                cli.hint("resolve"),
+                cli.hint("commit")
+            );
         }
     }
     report.print_updated();
@@ -971,7 +1065,10 @@ pub(crate) fn change(cli: &Cli, action: &ChangeAction) -> Result<ExitCode> {
             if !report.conflicts.is_empty() {
                 // The change was built on a base the branch has moved past:
                 // it is made again on the new head.
-                report.next = Some(format!("braid change create --base {}", landing.branch));
+                report.next = Some(cli.hint(&format!(
+                    "change create --base {}",
+                    crate::shell_word(&landing.branch)
+                )));
             }
             report.json()
         }

@@ -19,7 +19,7 @@ use braid_engine::{
     Conflict, EMPTY_TREE, first_parent_chain_contains, read_changes, read_changeset,
 };
 use braid_format::{Change, ChangeOp, Kind, ObjectId, Objects, Signature};
-use braid_repo::{DIR, Repo, WORKSPACES_DIR, WorkspaceLink};
+use braid_repo::{DIR, Repo, WORK_DIR, WORKSPACES_DIR, WorkspaceLink};
 use braid_store::{RefUpdate, Store, TransactError};
 
 use crate::blocker::{Blocker, blockers};
@@ -334,16 +334,32 @@ pub(crate) fn describe_landing(
     format!("{prefix}: {outcome} {moves} ({merged} merged)")
 }
 
+/// The file every workspace holds so that git refuses to work in it.
+pub const GIT_GUARD: &str = ".git";
+
+/// What it says. Git reads the line as the path of a repository, finds
+/// none, and stops with "not a git repository: " and that path, so the text
+/// is written to read well there.
+pub const GIT_GUARD_TEXT: &str =
+    "gitdir: this is a braid workspace, not a git checkout: use braid here\n";
+
 impl<'r> Workspace<'r> {
     /// The directory that holds every workspace's state.
     pub fn states_dir(repo: &Repo) -> PathBuf {
         repo.root().join(DIR).join(WORKSPACES_DIR)
     }
 
+    /// Where the workspace named `name` goes unless told otherwise:
+    /// `.braid/work/<name>` in the repository's root.
+    pub fn default_dir(repo: &Repo, name: &str) -> PathBuf {
+        repo.root().join(DIR).join(WORK_DIR).join(name)
+    }
+
     /// Creates a workspace named `name` in `dir`, which must not exist or be
     /// empty, at the changeset `at` (`None` for the empty tree), tracking
-    /// `branch`. Writes the whole tree. Returns the workspace and how many
-    /// files it wrote. On failure, nothing is left behind.
+    /// `branch`. Writes the `.braid` file that names the workspace, the
+    /// [`GIT_GUARD`] file, and the whole tree. Returns the workspace and how
+    /// many files of the tree it wrote. On failure, nothing is left behind.
     pub fn create(
         repo: &'r Repo,
         name: &str,
@@ -413,6 +429,13 @@ impl<'r> Workspace<'r> {
         fs::File::create_new(&link_path)
             .and_then(|mut file| io::Write::write_all(&mut file, &link.encode()))
             .map_err(Error::io("write", &link_path))?;
+        // Without it, git run in the workspace finds the repository of a
+        // checkout around it, often the shared one the workspace sits in,
+        // and stashes, resets or commits there. The walk skips `.git`.
+        let guard = dir.join(GIT_GUARD);
+        fs::File::create_new(&guard)
+            .and_then(|mut file| io::Write::write_all(&mut file, GIT_GUARD_TEXT.as_bytes()))
+            .map_err(Error::io("write", &guard))?;
 
         let workspace = Workspace {
             repo,

@@ -247,13 +247,27 @@ check that it differs in no other:
 - One workspace per agent, all sharing one store. No staging area: tracked
   files are snapshotted as they are.
 - A workspace is any directory holding a `.braid` *file*, local and never
-  tracked, that names the repository and the workspace. The workspace's state
-  lives in the repository, under `.braid/ws/<name>/`: `state` (the base
-  changeset, the branch it lands on, its directory, the file system's name
-  rules, a rebase in progress), `stat` (the stat cache) and `lock`. Every
-  command that changes a workspace holds its lock, so two processes never
-  change one workspace at once; different workspaces never wait for each
-  other, except for the short transaction in which a landing moves a branch.
+  tracked, that names the repository and the workspace. It goes in
+  `.braid/work/<name>` of the repository unless `workspace add` is given a
+  directory, and it tracks a branch the repository has: a branch that does
+  not exist would give an empty checkout whose first landing starts a new
+  history under that name, so it is refused unless the repository has no
+  branch yet or `--new-branch` asks for it.
+- Every workspace also holds a `.git` *file* whose `gitdir:` line points
+  nowhere. A workspace inside a git checkout, as `.braid/work/` is, would
+  otherwise let git run in it find that checkout's repository, and `git
+  stash` or `git reset --hard` there would act on the shared checkout's
+  files. With the file, git stops with "not a git repository" instead. The
+  walk skips `.git`, as it skips `.braid`, so neither is ever committed.
+  `braid cat-object <base>:<path>` gives what git would have for a review
+  or an undo: the file as the workspace's base has it.
+- The workspace's state lives in the repository, under
+  `.braid/ws/<name>/`: `state` (the base changeset, the branch it lands on,
+  its directory, the file system's name rules, a rebase in progress),
+  `stat` (the stat cache) and `lock`. Every command that changes a
+  workspace holds its lock, so two processes never change one workspace at
+  once; different workspaces never wait for each other, except for the
+  short transaction in which a landing moves a branch.
 - New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger than
   1 MiB need an explicit `braid track`. Until then `braid commit` refuses,
   naming them, and `--force` leaves them out.
@@ -307,35 +321,73 @@ check that it differs in no other:
 ### Instructions for agents
 
 Coding agents learn a project's rules from its `AGENTS.md`, or, for Claude
-Code, from a `CLAUDE.md` that can include it. `braid agents init` writes
-there what an agent needs to work through braid, so that a project set up
-once tells every later session, whatever harness runs it. The guide that
-sets a project up is part 1 of the repository's `AGENTS.md`, which the site
-also serves as `agents.md`.
+Code and Gemini CLI, from a `CLAUDE.md` or a `GEMINI.md` that can include
+it. `braid agents init` writes there what an agent needs to work through
+braid, so that a project set up once tells every later session, whatever
+harness runs it. The guide that sets a project up is part 1 of the
+repository's `AGENTS.md`, which the site also serves as `agents.md`. It
+installs braid from the tag of the version it describes, since the site
+serves it apart from the code.
 
 - **A section of the file, not the file.** The rules sit between a line
   `<!-- braid:start -->` and a line `<!-- braid:end -->`, appended to the
   file the first time and rewritten in place after that. Text outside them
   is never touched, a second run changes nothing, and markers that do not
-  pair up are refused before anything is written. A `CLAUDE.md` that does
-  not include `AGENTS.md` gets the line `@AGENTS.md`, and nothing else.
-  Files are written through a temporary file and a rename; a symbolic link
-  stays one, and the file it points to is the one replaced.
-- **Workspaces under `.braid/work/`.** The section has each session create
-  its workspace at `.braid/work/<name>`: inside the project, where a
-  harness that only lets an agent write in the project can reach it; inside
-  `.braid/`, which the setup has git ignore, so that the shared checkout's
-  git never sees the workspaces; and gone with `.braid/` when braid is
-  taken out.
+  pair up are refused before anything is written. Marker lines inside
+  fenced code blocks are examples, not markers, and a file that ends inside
+  an open block, where the section would read as code, is refused; a byte
+  order mark before the first line stays where it is. A `CLAUDE.md` or a
+  `GEMINI.md` that does not include `AGENTS.md` outside code gets the line
+  `@AGENTS.md`, and nothing else.
+- **Files written whole, or not at all.** Every check comes before any
+  write, and the same checks run with `--dry-run`: a name that is not a
+  regular file, a symbolic link out of the project, where other projects
+  may read the file, a read-only file, and a file with hard links other
+  than the project's guides are refused. Each file is written to a
+  temporary file next to it, all of them before the first is renamed into
+  place, so a failure while writing leaves every file as it was; one with
+  hard links, `CLAUDE.md` and `AGENTS.md` as one file, say, is written in
+  place, so that its names stay one file. A symbolic link stays one: the
+  file it points to is the one written, and the JSON names it.
+- **Only where braid is set up.** The section is committed, so every clone
+  of the project has it, including clones where braid is not set up: CI,
+  other machines, other people's agents. Its first rule says that a
+  checkout without a `.braid` directory does not use braid, and that braid
+  is set up there only when the user asks.
+- **Workspaces under `.braid/work/`.** Each session creates its workspace
+  at `.braid/work/<name>`, where `workspace add` puts it by default: inside
+  the project, where a harness that only lets an agent write in the
+  project can reach it; inside `.braid/`, which the setup has git ignore,
+  so that the shared checkout's git never sees the workspaces; and gone
+  with `.braid/` when braid is taken out. The setup's exclude line is
+  `.braid`, which also covers the `.braid` file of a workspace made
+  anywhere else in the checkout, since that file names the repository by
+  its absolute path. Git does not run in a workspace (see
+  [Workspaces](#workspaces)), and the section says why, and what to use
+  instead.
 - **The branch.** The section names the branch agents land on: the one
-  `--branch` gives; else the one the section already names, so that a
-  later run keeps it; else, inside a workspace, the one it tracks; else
-  `main`, `master` or the repository's only branch. With several branches
-  and neither of those, the command asks for `--branch` rather than guess.
+  `--branch` gives, which the repository must have; else the one the
+  section already names, if the repository has it, so that a later run
+  keeps it; else, inside a workspace, the one it tracks; else `main`,
+  `master` or the repository's only branch. A branch the section names but
+  the repository does not have was named before the project's history came
+  in, or has been removed since: it is chosen again, and the command says
+  so. With several branches and none of those, or with no repository or
+  branch yet, the command asks for `--branch` rather than guess. The name
+  goes into shell commands and is read back from the section, so it takes
+  only characters that need no quoting.
 - **Every command names its agent.** A harness may run each command in a
   new shell, which keeps neither variables nor the current directory, so
-  the section passes `--agent` on every command, and `--workspace` lets
-  them run from the project root.
+  the section passes `--agent` on every command that records an operation
+  or a changeset, sync and undo included, and `--workspace` lets them run
+  from the project root. The hints braid prints, and `next` in its JSON,
+  repeat the `--repo`, `--agent` and `--workspace` typed on the command
+  line, so that a session that follows them stays the same session.
+- **What landed, and where.** A landing moves braid's branch only: the
+  shared checkout and the git remote get it from `braid git sync` and
+  `git pull --ff-only`. The section has a session that finishes say so to
+  the user, and offer to run them, rather than leave the user looking at
+  files that did not change.
 
 ## Git bridge
 

@@ -48,7 +48,7 @@ pub use git::{
     git_ref_for_braid, is_branch, remote_ref,
 };
 pub use history::{RepoHistory, StoreIndex};
-pub use link::{Location, WORKSPACES_DIR, WorkspaceLink, locate};
+pub use link::{Location, WORK_DIR, WORKSPACES_DIR, WorkspaceLink, locate};
 pub use remote::Remote;
 pub use sync::{MIRRORS_DIR, SyncOptions, SyncOutcome, SyncReport};
 
