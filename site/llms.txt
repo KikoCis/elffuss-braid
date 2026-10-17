@@ -4,7 +4,7 @@
 
 Each agent commits in a workspace of its own over one shared store, and landing on the main branch is one short step that agents take in turn: a fast-forward, or a rebase that merges only the files both sides touched. Conflicts come back as data, with exit status 2, and every command has a JSON form. Braid imports a git repository's whole history bit for bit, and `braid git sync` keeps a git remote such as GitHub in step. It is pre-alpha: keep git as the source of truth.
 
-To set braid up in a project, a coding agent follows agents.md. The prompt to give it: Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md (read it whole, with curl -fsSL)
+To set braid up in a project, a coding agent follows agents.md. Setting it up adds to the project's AGENTS.md a section between `<!-- braid:start -->` and `<!-- braid:end -->` with the rules every agent session follows, and the line `@AGENTS.md` to CLAUDE.md and GEMINI.md where they exist; nothing of braid's own goes into git. The prompt to give it: Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md (read it whole, with curl -fsSL)
 
 ## Docs
 

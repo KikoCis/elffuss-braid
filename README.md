@@ -127,6 +127,67 @@ an [llms.txt](https://braid.elffuss.com/llms.txt).
 
 <p align="center"><img src="docs/assets/demo-agents-init.gif" alt="Setting braid up in a project's git checkout: braid init, git told to ignore .braid, braid git import brings in the history, braid agents init writes the braid section into AGENTS.md, the section's rules are listed, and a new session starts in a workspace of its own under .braid/work" width="860"></p>
 
+### Set it up by hand
+
+The same steps, for a git checkout on its main branch with nothing to
+commit, where git has a `user.name` and a `user.email`. [agents.md](https://braid.elffuss.com/agents.md) says what to check
+first (git hooks, submodules, LFS, a branch that takes only pull requests)
+and what to do when a step fails.
+
+```bash
+cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.0.2 elffuss-braid-cli
+braid init                       # .braid/: the store and the agents' workspaces
+mkdir -p "$(git rev-parse --git-path info)"
+echo .braid >> "$(git rev-parse --git-path info/exclude)"   # git ignores braid, in this checkout only
+printf 'name = %s\nemail = %s\n' "$(git config user.name)" "$(git config user.email)" > .braid/config
+braid git import .               # the project's whole history
+touch CLAUDE.md                  # only if agents work here with Claude Code
+braid agents init                # the rules for agents, into AGENTS.md
+git add AGENTS.md CLAUDE.md      # leave CLAUDE.md out if there is none
+git commit -m "Set up braid for agents"
+braid git import .               # braid's main takes that commit
+```
+
+### What goes into your Markdown files
+
+Agents follow braid because the project tells them to, in the files their
+harness reads at the start of every session. `braid agents init` writes
+them, and they are committed with git, so every clone and every new session
+has them:
+
+- **`AGENTS.md`**, which most coding agents read: a section between two
+  marker lines, with the rules every session follows. Running
+  `braid agents init` again, after a braid upgrade for example, rewrites the
+  section in place and never touches the rest of the file. It begins:
+
+  ```markdown
+  <!-- braid:start -->
+  <!-- Written by `braid agents init` (branch: main). Running it
+       again rewrites everything between the braid markers. -->
+  ## Version control with braid
+
+  Agents land their changes on `main` through [braid](https://braid.elffuss.com),
+  each in a braid workspace of its own. Braid is pre-alpha: git stays the
+  source of truth, and `braid git sync` keeps the git remote in step.
+  ```
+
+  The rules, in short: they apply only where the checkout has a `.braid`
+  directory, so a fresh clone or CI works with git as before; never edit
+  files or use git in the project root, which is the user's shared
+  checkout; each session works in a workspace of its own under
+  `.braid/work/`, and commits and lands with braid, naming itself with
+  `--agent`; on a conflict (exit status 2), `braid update`, fix the
+  markers, commit and land again; `braid update` before a new task; and at
+  the end, tell the user and offer `braid git sync` to the git remote.
+- **`CLAUDE.md`** for Claude Code and **`GEMINI.md`** for Gemini CLI: the
+  line `@AGENTS.md`, so that they read the same section. `braid agents init`
+  adds it to each of them that exists.
+- **Nothing of braid's goes into git:** `.braid/`, which the exclude line
+  hides from git, holds the store, the workspaces and `.braid/config`, the
+  name and e-mail address that sign what agents land. In Claude Code, allow
+  braid's commands once with `"Bash(braid:*)"` in `permissions.allow` of
+  `.claude/settings.local.json`, your own settings for this checkout.
+
 ## Quick start
 
 Braid stores history, moves it in and out of git bit for bit, and gives each
