@@ -4,6 +4,9 @@ Thanks for wanting to help. Braid is pre-alpha, so the most useful
 contributions right now are reviews of the [design](docs/design.md) and the
 [format](docs/spec/format-v1.md), bug reports, and tests.
 
+Coding agents: part 2 of [AGENTS.md](AGENTS.md) says the same in short,
+with every check CI runs.
+
 ## Build and test
 
 You need a stable Rust toolchain, 1.89 or newer.

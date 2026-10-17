@@ -22,7 +22,7 @@ so GitHub keeps working.
 
 ---
 
-**In this repository:** [why braid](#why-braid) · [how it works](#how-it-works) · [quick start](#quick-start) · [working with git](#working-with-git) · [design](#design) · [status](#status-and-roadmap) · [what is honest about this](#what-is-honest-about-this) · [measured against git](#measured-against-git) · [credits](#prior-art-and-credits)
+**In this repository:** [why braid](#why-braid) · [how it works](#how-it-works) · [use it from your agent](#use-it-from-your-agent) · [quick start](#quick-start) · [working with git](#working-with-git) · [design](#design) · [status](#status-and-roadmap) · [what is honest about this](#what-is-honest-about-this) · [measured against git](#measured-against-git) · [credits](#prior-art-and-credits)
 
 ---
 
@@ -88,6 +88,24 @@ flowchart LR
 5. **The same API at every tier.** A local store, a per-machine daemon, a
    cache and a server answer the same requests, so a client never cares which
    one it talks to.
+
+## Use it from your agent
+
+Braid comes with instructions written for coding agents. In a project that
+is a git repository, ask your agent, whatever harness runs it:
+
+```text
+Install braid in this project and set it up for agents, following https://braid.elffuss.com/agents.md
+```
+
+It installs braid with cargo, imports the project's git history, and writes
+the rules for agents into the project's `AGENTS.md` with
+`braid agents init`. From then on, every agent session works in a braid
+workspace of its own and lands through braid, and git stays the source of
+truth. The instructions are part 1 of [AGENTS.md](AGENTS.md), which the
+site serves as
+[braid.elffuss.com/agents.md](https://braid.elffuss.com/agents.md), next to
+an [llms.txt](https://braid.elffuss.com/llms.txt).
 
 ## Quick start
 
@@ -182,9 +200,18 @@ rebases the change and writes git-style conflict markers. Fix the file, then
   store: generation numbers and skip pointers for ancestry, changed-path
   filters, and blame records, computed the first time they are needed.
   `braid derive --all` computes them ahead of time, after a large import.
+- `braid agents init` writes the rules for agents into a project's
+  `AGENTS.md`, in a section between a `<!-- braid:start -->` line and a
+  `<!-- braid:end -->` line: each session works in a workspace of its own
+  under `.braid/work/` and lands on the branch the section names. Running it
+  again rewrites the section in place and touches nothing else; markers that
+  do not pair up are refused. It also adds `@AGENTS.md` to a `CLAUDE.md`
+  that does not include it (`--no-claude` leaves it alone). `--dry-run`
+  shows what it would write, and `--json` lists the files created, updated
+  and unchanged.
 
-`braid status --help`, `braid land --help` and `braid update --help` describe
-every JSON field.
+`braid status --help`, `braid land --help`, `braid update --help` and
+`braid agents init --help` describe every JSON field.
 
 An agent that knows exactly what it changes needs no checkout at all, and can
 check that nobody changed the file under it:
@@ -391,3 +418,10 @@ Hoy está en pre-alfa: guarda historia, la mete y saca de git bit a bit, y cada
 agente tiene su propio espacio de trabajo y aterriza en `main` en un paso corto.
 Las [fases](#status-and-roadmap) dicen qué llega después y qué pruebas tiene que
 pasar cada una.
+
+Para usarlo en un proyecto, pídeselo a tu agente: «Instala braid en este
+proyecto y configúralo para agentes siguiendo
+https://braid.elffuss.com/agents.md». Lo instala con cargo, importa la
+historia de git del proyecto y, con `braid agents init`, escribe en su
+`AGENTS.md` las reglas para que cada sesión trabaje en su propio espacio de
+trabajo y aterrice a través de braid.

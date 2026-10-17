@@ -18,8 +18,9 @@ the reasons behind it. The byte-level format is in
   nothing is ever rewritten in place.
 - **Git at the edges.** Existing repositories come in with their full history,
   and GitHub or Gitea keep working as mirrors.
-- **Built for agents.** Every command has a JSON form, and a change can be
-  created through the API without a working copy.
+- **Built for agents.** Every command has a JSON form, a change can be
+  created through the API without a working copy, and `braid agents init`
+  tells a project's agents, in its `AGENTS.md`, how to work through braid.
 
 ## Non-goals
 
@@ -302,6 +303,39 @@ check that it differs in no other:
   [jiff](https://github.com/BurntSushi/jiff) reads from `TZ` or the system's
   setting without calling into the C library; when it cannot be determined,
   the offset is zero.
+
+### Instructions for agents
+
+Coding agents learn a project's rules from its `AGENTS.md`, or, for Claude
+Code, from a `CLAUDE.md` that can include it. `braid agents init` writes
+there what an agent needs to work through braid, so that a project set up
+once tells every later session, whatever harness runs it. The guide that
+sets a project up is part 1 of the repository's `AGENTS.md`, which the site
+also serves as `agents.md`.
+
+- **A section of the file, not the file.** The rules sit between a line
+  `<!-- braid:start -->` and a line `<!-- braid:end -->`, appended to the
+  file the first time and rewritten in place after that. Text outside them
+  is never touched, a second run changes nothing, and markers that do not
+  pair up are refused before anything is written. A `CLAUDE.md` that does
+  not include `AGENTS.md` gets the line `@AGENTS.md`, and nothing else.
+  Files are written through a temporary file and a rename; a symbolic link
+  stays one, and the file it points to is the one replaced.
+- **Workspaces under `.braid/work/`.** The section has each session create
+  its workspace at `.braid/work/<name>`: inside the project, where a
+  harness that only lets an agent write in the project can reach it; inside
+  `.braid/`, which the setup has git ignore, so that the shared checkout's
+  git never sees the workspaces; and gone with `.braid/` when braid is
+  taken out.
+- **The branch.** The section names the branch agents land on: the one
+  `--branch` gives; else the one the section already names, so that a
+  later run keeps it; else, inside a workspace, the one it tracks; else
+  `main`, `master` or the repository's only branch. With several branches
+  and neither of those, the command asks for `--branch` rather than guess.
+- **Every command names its agent.** A harness may run each command in a
+  new shell, which keeps neither variables nor the current directory, so
+  the section passes `--agent` on every command, and `--workspace` lets
+  them run from the project root.
 
 ## Git bridge
 
