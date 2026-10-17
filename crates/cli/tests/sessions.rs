@@ -136,8 +136,9 @@ fn a_workspace_goes_in_braid_work_and_git_refuses_to_work_in_it() {
         let out = git(&workspace, args);
         assert!(!out.status.success(), "git {args:?} worked in a workspace");
         let err = String::from_utf8_lossy(&out.stderr);
+        // Only the refusal is the same in every git: older versions repeat
+        // the guard's text, which names braid, and newer ones say "(null)".
         assert!(err.contains("not a git repository"), "git {args:?}: {err}");
-        assert!(err.contains("braid workspace"), "git {args:?}: {err}");
     }
     assert_eq!(
         fs::read_to_string(dir.join("notes.txt")).unwrap(),

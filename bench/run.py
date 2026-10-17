@@ -776,7 +776,10 @@ def scenario_import(ctx):
             fsck = tools.braid_run(repo, "fsck", "--json", capture=True).json()
             if not fsck["clean"]:
                 raise Failure(f"braid fsck after the import: {fsck['problems'][:3]}")
-            files = count_files(ws) - 1  # less the workspace's .braid file
+            # less the workspace's own .braid file and its .git guard
+            files = count_files(ws) - sum(
+                os.path.lexists(os.path.join(ws, name)) for name in (".braid", ".git")
+            )
             if files != info["files"]:
                 raise Failure(f"the workspace has {files} files, git's tree {info['files']}")
             configure_git(tools, made["git-bare"])
