@@ -18,7 +18,9 @@ paths = "\n".join(
     f'<path class="s {cls}" d="{d}" mask="url(#cut{n})" pathLength="1"/>' for d, cls, n in strands
 )
 
-out = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" width="320" height="96" role="img" aria-label="Three strands braided together">
+out = f"""<!-- SPDX-License-Identifier: Apache-2.0
+     Copyright (c) 2026 UtopiaIA -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" width="320" height="96" role="img" aria-label="Three strands braided together">
 <title>elffuss-braid</title>
 <style>
 .s {{ fill: none; stroke-width: 9.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1 2; stroke-dashoffset: 0; }}

@@ -221,8 +221,8 @@ def agents_init():
     seed(s)
     check(s.quiet(f"{GIT} clone -q github.git shop"), 0, "clone")
     s.cwd = "shop"
-    s.note('asked to "install braid in this project and set it up for agents",')
-    s.note("an agent follows braid.elffuss.com/agents.md in the project's checkout")
+    s.note("what setting braid up comes down to, in a project's git checkout")
+    s.note("(braid.elffuss.com/agents.md gives an agent the full steps)")
     check(s.run("braid init"), 0, "init")
     check(s.run("echo .braid >> .git/info/exclude", hold=0.4), 0, "exclude")
     check(s.run("braid git import ."), 0, "import")
