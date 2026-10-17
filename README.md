@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/braid.svg" alt="Three strands braided together" width="320">
+<img src="docs/assets/braid-animated.svg" alt="Three strands braided together" width="320">
 
 # ✳ Elffuss Braid
 
@@ -11,12 +11,26 @@ change touches, not what the repository weighs. Agents commit in parallel, and
 landing on `main` is one short step they take in turn. Git stays at the edges,
 so GitHub keeps working.
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.89%2B-8272ff?style=flat-square)](https://www.rust-lang.org)
-[![Status](https://img.shields.io/badge/status-pre--alpha-54dcc6?style=flat-square)](#status-and-roadmap)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square&logo=apache&logoColor=white)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
+[![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-8272ff?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-54dcc6?style=flat-square)](#status-and-roadmap)
+[![Format v1: frozen](https://img.shields.io/badge/format%20v1-frozen-c8a06a?style=flat-square)](docs/spec/format-v1.md)
+
+[![Website](https://img.shields.io/badge/web-braid.elffuss.com-54dcc6?style=flat-square)](https://braid.elffuss.com)
+[![Hugging Face Space](https://img.shields.io/badge/space-elffuss--braid-c8a06a?style=flat-square&logo=huggingface&logoColor=white)](https://huggingface.co/spaces/KikoCis/elffuss-braid)
+[![For agents: AGENTS.md](https://img.shields.io/badge/for%20agents-AGENTS.md-8272ff?style=flat-square)](AGENTS.md)
+[![llms.txt](https://img.shields.io/badge/llms.txt-braid.elffuss.com-54dcc6?style=flat-square)](https://braid.elffuss.com/llms.txt)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-c8a06a?style=flat-square)](CONTRIBUTING.md)
+[![Last commit](https://img.shields.io/github/last-commit/KikoCis/elffuss-braid?style=flat-square&color=8272ff)](https://github.com/KikoCis/elffuss-braid/commits/main)
 
 [elffuss.com](https://elffuss.com) · [Code](https://code.elffuss.com) · [Claw](https://claw.elffuss.com) · [Translator](https://translator.elffuss.com) · [Copilot](https://copilot.elffuss.com) · [Blog](https://elffuss.com/blog/) · [Hugging Face](https://huggingface.co/KikoCis) · [Dev log](https://bitacora.utopiaia.com/)
+
+<br>
+
+<img src="docs/assets/demo-agents.gif" alt="Three agents commit at the same time, each in its own workspace, and land on main in turn: the first is a fast-forward, the second is rebased onto it, and the third changed the same line as the first, so main does not move and braid reports the conflict with exit status 2" width="860">
+
+<sub>The real CLI, recorded by <a href="scripts/demos/render.sh"><code>scripts/demos/render.sh</code></a>: three agents, one <code>main</code>.</sub>
 
 </div>
 
@@ -180,6 +194,8 @@ rebases the change and writes git-style conflict markers. Fix the file, then
 `braid commit` (the change keeps its message unless `-m` gives another) and
 `braid land`.
 
+<p align="center"><img src="docs/assets/demo-conflict.gif" alt="The third agent asks for the conflict as JSON and gets the base, branch and workspace text of the line; braid update writes conflict markers into the file; the agent settles the line, commits and lands, and braid log shows the three agents' changesets on main" width="860"></p>
+
 - `land` and `update` report the same fields: where each changeset went
   (`landed`, from its id to the one that holds it now), the paths merged, the
   paths of the working copy they wrote or removed, and for a landing its op
@@ -245,6 +261,8 @@ refuses while they wait, naming them, and `--force` leaves them out.
 ## Working with git
 
 Repositories come in with their whole history and keep a git mirror.
+
+<p align="center"><img src="docs/assets/demo-git-sync.gif" alt="braid git sync takes a branch of a git repository with its history; after agents land two changes in braid and a person pushes one to the git repository, the next sync merges both and pushes a fast-forward, and git log shows the original commits with their ids unchanged" width="860"></p>
 
 - `braid git import` reads a git repository through
   [gitoxide](https://github.com/GitoxideLabs/gitoxide). Each commit is exported
