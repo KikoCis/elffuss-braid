@@ -11,8 +11,8 @@ agents take in turn: no fetch, rebase and push loop. Git stays at the edges:
 braid imports a project's whole history from git, and sends what lands back
 to the project's git remote.
 
-**Braid is pre-alpha.** Keep git as the source of truth: the project's git
-remote holds everything that matters, and nothing lives only in braid.
+**Keep git as the source of truth:** the project's git remote holds
+everything that matters, and nothing lives only in braid.
 
 ## 1. Installing braid and setting it up in a project
 
@@ -33,7 +33,7 @@ Braid builds from source with cargo. It needs:
   or to run the command themselves.
 
 ```bash
-cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.0.2 elffuss-braid-cli
+cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.0 elffuss-braid-cli
 ```
 
 It compiles braid and its dependencies from source, which takes a while:
@@ -50,7 +50,7 @@ command again replaces an older braid with this version.
 In the project root, on its main branch:
 
 ```bash
-braid --version     # "braid 0.0.2", or newer, once it is installed
+braid --version     # "braid 0.1.0", or newer, once it is installed
 braid cat-object "$(git branch --show-current):AGENTS.md" | grep -q '^<!-- braid:start -->' && grep -q '^name = .' .braid/config && grep -q '^email = .' .braid/config && echo "braid is set up here"
 ```
 
@@ -379,6 +379,15 @@ git remote add origin "$PWD.git"
 git push -u origin "$(git branch --show-current)"
 ```
 
+### Across machines: BraidHub
+
+Braid's store lives in one checkout. For agents on several machines, a
+repository can live on [BraidHub](https://braidhub.elffuss.com), a braid
+server where people and agents sign in with GitHub and land on the same
+main branch, and which can keep a GitHub repository as its mirror. Its own
+guide for agents, <https://braidhub.elffuss.com/agents.md>, says how to sign
+in, publish a project, clone one, and when to ask the user first.
+
 ### Undoing
 
 - `braid op log` lists every operation (imports, landings, syncs), newest
@@ -434,8 +443,9 @@ pins the toolchain to 1.99.0.
 | `crates/repo` | A repository on disk: discovery, names, git import, export and sync. |
 | `crates/wc` | Workspaces: checkouts, status, commit, land and update. |
 | `crates/cli` | The `braid` command; `braid agents init` is `crates/cli/src/agents.rs`. |
+| `crates/hubproto` | The BraidHub protocol the client speaks: names, tokens, scopes, the object stream and the JSON bodies; `docs/hub.md` is its prose. |
 | `crates/sim` | Deterministic simulation of many agents landing at once. |
-| `docs/` | The design and the format specification. |
+| `docs/` | The design, the format specification and the hub's protocol (`docs/hub.md`, `docs/hub-agents.md`). |
 | `site/` | braid.elffuss.com, in English and Spanish; `site/agents.md` is part 1 of this file. |
 
 ### Build and test
@@ -457,6 +467,7 @@ cargo fmt --all
 cargo +1.99.0 clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo deny check
 cargo +1.89 check --workspace --all-targets
 cargo +1.99.0 check -p elffuss-braid-format -p elffuss-braid-engine --target wasm32-unknown-unknown --locked

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for wanting to help. Braid is pre-alpha, so the most useful
+Thanks for wanting to help. Braid is at version 0.1, so the most useful
 contributions right now are reviews of the [design](docs/design.md) and the
 [format](docs/spec/format-v1.md), bug reports, and tests.
 

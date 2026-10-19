@@ -255,10 +255,37 @@ main:focus { outline: none; }
 @media (forced-colors: active) {
   .lang button[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
 }
+/* sign up: a compact primary button next to the language toggle, from 480px
+   up; narrower, the brand and the toggle fill the row, and the hero's button
+   comes first under the header, with what it does */
+.head-row > .btn-head {
+  min-height: 34px;
+  margin-left: auto;
+  padding: 5px 14px;
+  font-size: .86rem;
+  white-space: nowrap;
+}
+@media (min-width: 480px) {
+  .head-row > .lang { margin-left: 0; }
+}
+@media (max-width: 479px) {
+  .head-row > .btn-head { display: none; }
+}
+/* the narrowest phones keep the brand and the toggle on one row */
+@media (max-width: 359px) {
+  .head-row { column-gap: 12px; }
+  .brand .mark { width: 50px; }
+}
 
+/* from 1180px the header is one row: the brand, the section links, the
+   sign-up button and the toggle. The links are closer together there, so
+   that the row holds them in Spanish too */
 @media (min-width: 1180px) {
+  .head-row { column-gap: 12px; }
   .nav { order: 0; width: auto; margin-left: auto; }
   .nav ul { margin: 0; }
+  .nav a { padding-inline: 5px; font-size: .86rem; }
+  .head-row > .btn-head { margin-left: 0; }
   .head-row > .lang { margin-left: 0; }
 }
 
@@ -327,6 +354,10 @@ h1 {
 .btn:hover { border-color: var(--text-dim); }
 .btn-primary { background: var(--btn-bg); color: var(--btn-ink); border-color: transparent; }
 .btn-primary:hover { border-color: transparent; filter: brightness(1.06); }
+/* the hero's sign-up button, with one line under it that says what happens */
+.signup { margin-top: 26px; }
+.signup-note { margin-top: 10px; max-width: 48ch; font-size: .9rem; line-height: 1.55; color: var(--text-dim); }
+.signup + .cta { margin-top: 18px; }
 .fine { margin-top: 18px; font-size: .9rem; color: var(--text-dim); }
 .hero-card figcaption {
   margin-top: 10px;
@@ -740,6 +771,9 @@ details.run .code { margin: 12px; }
 .licence { margin-top: 6px; max-width: 72ch; }
 .next-link { margin-top: 14px; }
 .next-link a { color: var(--text); font-weight: 600; }
+/* BraidHub: the sign-up button, and the link to the hub beside it */
+.hub-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-top: 22px; }
+.hub-cta .next-link { margin-top: 0; }
 
 /* ------------------------------------------------------------- measured */
 .method { display: grid; gap: 6px; max-width: 76ch; padding-left: 1.1em; color: var(--text-dim); }

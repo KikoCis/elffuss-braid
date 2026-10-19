@@ -181,6 +181,14 @@ pub enum Error {
         id: ObjectId,
     },
 
+    /// A walk would list more objects than its caller allows (see
+    /// [`Reach::max_objects`](crate::Reach::max_objects)).
+    #[error("the walk reaches more than {limit} objects")]
+    TooManyObjects {
+        /// The most objects the walk could list.
+        limit: usize,
+    },
+
     /// Two changesets to merge have several best common ancestors, as after
     /// criss-cross merges, with different trees: the merge would depend on
     /// which one it started from.

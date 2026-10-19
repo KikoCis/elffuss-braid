@@ -164,6 +164,10 @@ pub enum Landed {
         /// The conflicts.
         conflicts: Vec<Conflict>,
     },
+    /// A fast-forward-only landing found the stack not built on the head;
+    /// the branch did not move. Only [`land_stack`](crate::land_stack)
+    /// refuses.
+    Refused,
 }
 
 /// One changeset of a workspace, and the changeset that holds it now.
@@ -234,6 +238,21 @@ pub struct UpdateReport {
     /// The paths of the working copy that the update wrote or removed,
     /// sorted.
     pub updated_paths: Vec<Vec<u8>>,
+}
+
+/// What a workspace would land, from [`Workspace::stack`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stack {
+    /// The branch it would land on.
+    pub branch: String,
+    /// The branch's head in this repository, if the branch exists.
+    pub head: Option<ObjectId>,
+    /// The workspace's base: the last of `changes`, or where it stands
+    /// when it has none.
+    pub base: Option<ObjectId>,
+    /// The workspace's own changesets that the head does not have, oldest
+    /// first.
+    pub changes: Vec<ObjectId>,
 }
 
 /// What `update` did.
@@ -1233,6 +1252,63 @@ impl<'r> Workspace<'r> {
         self.write(root, state, &plan, from, to)
     }
 
+    /// What [`Workspace::land`] would land on `onto` (the workspace's
+    /// branch by default), without landing it: the workspace's own
+    /// changesets that the branch's head does not have. Refused, as a
+    /// landing is, with uncommitted changes or a rebase in progress. A
+    /// repository linked to a hub lands these there, then calls
+    /// [`Workspace::adopt`].
+    pub fn stack(&self, onto: Option<&str>) -> Result<Stack, Error> {
+        let (_lock, state, root) = self.begin()?;
+        if state.rebase.is_some() {
+            return Err(Error::RebaseInProgress);
+        }
+        self.require_clean(&root, &state)?;
+        let branch = onto.unwrap_or(&state.branch).to_owned();
+        let store = self.store();
+        let head = store.refs()?.get(&branch);
+        let changes = find_stack(store, head, state.base, state.upstream)?;
+        Ok(Stack {
+            branch,
+            head,
+            base: state.base,
+            changes,
+        })
+    }
+
+    /// Moves the workspace onto `head` once its changesets have landed
+    /// somewhere else, such as on a hub, and `head` holds them: the working
+    /// copy goes from the base's tree to `head`'s, writing only the
+    /// difference, and `head` becomes the base and the upstream, as after a
+    /// local landing. `base` is the base [`Workspace::stack`] reported:
+    /// when the workspace has moved since, nothing changes and the answer
+    /// is [`Error::BaseMoved`]. Refused with a rebase in progress, and with
+    /// uncommitted changes unless the workspace is at `head` already (a
+    /// fast-forward), where no file is written. Returns the paths written
+    /// or removed.
+    pub fn adopt(&self, base: Option<ObjectId>, head: ObjectId) -> Result<Vec<Vec<u8>>, Error> {
+        let (_lock, mut state, root) = self.begin()?;
+        if state.rebase.is_some() {
+            return Err(Error::RebaseInProgress);
+        }
+        if state.base != base {
+            return Err(Error::BaseMoved {
+                expected: base,
+                found: state.base,
+            });
+        }
+        if state.base == Some(head) {
+            if state.upstream != Some(head) {
+                state.upstream = Some(head);
+                state.save(&self.state_dir)?;
+            }
+            return Ok(Vec::new());
+        }
+        self.require_clean(&root, &state)?;
+        let base_root = root_of(self.store(), state.base)?;
+        self.move_to(&root, &mut state, base_root, head)
+    }
+
     /// Brings the workspace onto the current head of its branch. Without
     /// changesets of its own, it moves to the head. With some, they are
     /// rebased onto the head with the engine, without moving the branch;
@@ -1468,7 +1544,7 @@ fn markers_remain(root: &Root, path: &[u8]) -> Result<bool, Error> {
 }
 
 /// Changesets that went nowhere.
-fn unplaced(stack: &[ObjectId]) -> Vec<Placed> {
+pub(crate) fn unplaced(stack: &[ObjectId]) -> Vec<Placed> {
     stack
         .iter()
         .map(|&from| Placed { from, to: None })

@@ -219,6 +219,40 @@ pub enum Error {
     /// An object of the wrong kind where a changeset was expected.
     #[error("{0} is not a changeset")]
     NotAChangeset(ObjectId),
+
+    /// A stack to land holds no changeset.
+    #[error("there is nothing to land: the stack is empty")]
+    EmptyStack,
+
+    /// A stack to land whose changesets do not follow each other.
+    #[error(
+        "not a stack: changeset {index} of it does not have the one before it as its first parent"
+    )]
+    NotAStack {
+        /// The position of the first changeset that does not follow.
+        index: usize,
+    },
+
+    /// The workspace's base changed while its changesets were landing
+    /// somewhere else.
+    #[error(
+        "the workspace moved while its changes were landing (its base was {}, it is {}); run `braid update`",
+        short(.expected),
+        short(.found)
+    )]
+    BaseMoved {
+        /// The base when the stack was taken.
+        expected: Option<ObjectId>,
+        /// The base now.
+        found: Option<ObjectId>,
+    },
+}
+
+fn short(id: &Option<ObjectId>) -> String {
+    match id {
+        Some(id) => id.short(),
+        None => "nothing".to_owned(),
+    }
 }
 
 impl Error {

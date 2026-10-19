@@ -14,13 +14,14 @@ so GitHub keeps working.
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square&logo=apache&logoColor=white)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-8272ff?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-54dcc6?style=flat-square)](#status-and-roadmap)
+[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-54dcc6?style=flat-square)](#status-and-roadmap)
 [![Format v1: frozen](https://img.shields.io/badge/format%20v1-frozen-c8a06a?style=flat-square)](docs/spec/format-v1.md)
 
 [![Website](https://img.shields.io/badge/web-braid.elffuss.com-54dcc6?style=flat-square)](https://braid.elffuss.com)
 [![Hugging Face Space](https://img.shields.io/badge/space-elffuss--braid-c8a06a?style=flat-square&logo=huggingface&logoColor=white)](https://huggingface.co/spaces/KikoCis/elffuss-braid)
 [![For agents: AGENTS.md](https://img.shields.io/badge/for%20agents-AGENTS.md-8272ff?style=flat-square)](AGENTS.md)
 [![llms.txt](https://img.shields.io/badge/llms.txt-braid.elffuss.com-54dcc6?style=flat-square)](https://braid.elffuss.com/llms.txt)
+[![BraidHub](https://img.shields.io/badge/hub-braidhub.elffuss.com-8272ff?style=flat-square)](https://braidhub.elffuss.com)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-c8a06a?style=flat-square)](CONTRIBUTING.md)
 [![Last commit](https://img.shields.io/github/last-commit/KikoCis/elffuss-braid?style=flat-square&color=8272ff)](https://github.com/KikoCis/elffuss-braid/commits/main)
 
@@ -36,7 +37,7 @@ so GitHub keeps working.
 
 ---
 
-**In this repository:** [why braid](#why-braid) · [how it works](#how-it-works) · [use it from your agent](#use-it-from-your-agent) · [quick start](#quick-start) · [working with git](#working-with-git) · [design](#design) · [status](#status-and-roadmap) · [what is honest about this](#what-is-honest-about-this) · [measured against git](#measured-against-git) · [credits](#prior-art-and-credits)
+**In this repository:** [why braid](#why-braid) · [how it works](#how-it-works) · [use it from your agent](#use-it-from-your-agent) · [quick start](#quick-start) · [working with git](#working-with-git) · [BraidHub](#braidhub) · [design](#design) · [status](#status-and-roadmap) · [what is honest about this](#what-is-honest-about-this) · [measured against git](#measured-against-git) · [credits](#prior-art-and-credits)
 
 ---
 
@@ -81,7 +82,7 @@ flowchart LR
         ST[("shared store<br/>immutable objects + op log")]
     end
     ST -- "land: one short step, taken in turn" --> MAIN(["main"])
-    ST <-- "objects by id" --> SRV["braid server (optional)"]
+    ST <-- "objects by id" --> SRV["BraidHub (optional)"]
     ST <-- "import / export" --> GIT["git bridge"]
     GIT <--> GH["GitHub · Gitea"]
 ```
@@ -101,7 +102,8 @@ flowchart LR
    operation so it can be undone.
 5. **The same API at every tier.** A local store, a per-machine daemon, a
    cache and a server answer the same requests, so a client never cares which
-   one it talks to.
+   one it talks to. The server has its first version, BraidHub; the caches
+   and the daemon are planned (milestones 6 and 7).
 
 ## Use it from your agent
 
@@ -135,7 +137,7 @@ first (git hooks, submodules, LFS, a branch that takes only pull requests)
 and what to do when a step fails.
 
 ```bash
-cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.0.2 elffuss-braid-cli
+cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.0 elffuss-braid-cli
 braid init                       # .braid/: the store and the agents' workspaces
 mkdir -p "$(git rev-parse --git-path info)"
 echo .braid >> "$(git rev-parse --git-path info/exclude)"   # git ignores braid, in this checkout only
@@ -167,8 +169,8 @@ has them:
   ## Version control with braid
 
   Agents land their changes on `main` through [braid](https://braid.elffuss.com),
-  each in a braid workspace of its own. Braid is pre-alpha: git stays the
-  source of truth, and `braid git sync` keeps the git remote in step.
+  each in a braid workspace of its own. Git stays the source of truth, and
+  `braid git sync` keeps the git remote in step.
   ```
 
   The rules, in short: they apply only where the checkout has a `.braid`
@@ -360,6 +362,49 @@ Repositories come in with their whole history and keep a git mirror.
   git data with gitoxide (MIT or Apache-2.0); `git sync` also runs the `git`
   binary as a subprocess, to set up its mirror, fetch and push.
 
+## BraidHub
+
+[BraidHub](https://braidhub.elffuss.com) keeps repositories that agents on
+any machine land on. People and agents sign in with GitHub; a repository is
+private unless its owner makes it public; and each one can keep a GitHub
+repository as its mirror: every landing on its default branch is pushed
+there as a fast-forward, so the people who work with git keep doing so.
+[The protocol](docs/hub.md) braid speaks with it is documented. Signing up
+takes one click: <https://braidhub.elffuss.com/login> signs you in with
+GitHub and makes your account.
+
+```bash
+braid login                      # GitHub's device flow: open the link anywhere, enter the code
+braid hub publish                # create the repository on the hub, upload every branch and tag
+braid hub clone you/project      # on another machine: a linked copy, with a workspace on main
+cd project/.braid/work/main
+braid commit -m "Fix the parser"
+braid land                       # lands on the hub, then moves the workspace onto the new head
+```
+
+Coding agents have [their own guide](https://braidhub.elffuss.com/agents.md)
+([docs/hub-agents.md](docs/hub-agents.md)): sign in once per machine, ask
+the user once whether to publish the new projects they start
+(`braid hub autopublish on|off` keeps the answer), and work from the hub
+from then on.
+
+- In a repository linked to a hub (by `.braid/hub`), `braid land` fetches,
+  uploads what the hub lacks, lands there and fetches again, with the output
+  and exit statuses of a local landing. `braid update` fetches first, and
+  `braid change create --land` lands on the hub too. `--local`, or
+  `BRAID_HUB=off`, keeps them in the local repository.
+- `braid hub fetch` brings the hub's branches and tags in, moving local
+  branches forward and keeping back one with changesets the hub lacks;
+  `braid hub status` compares each branch with the hub's.
+- `braid hub publish --mirror https://github.com/you/project.git` keeps that
+  GitHub repository as the mirror, once you grant the hub access to your
+  repositories on its website; `braid hub status` shows how the mirror is
+  doing, including when someone pushed to it directly.
+- `braid login` saves the token in `~/.config/braid/hub.json`, which only
+  you can read; agents and CI can set `BRAID_TOKEN` instead. The token only
+  ever travels in a header, over `https://`. `braid hub whoami` says who is
+  signed in, and `braid logout` revokes the token on the hub.
+
 ## Design
 
 - [Design overview](docs/design.md): store, landing, workspaces, the git
@@ -377,7 +422,7 @@ Repositories come in with their whole history and keep a git mirror.
 | 3 | History and the git bridge: import, export, `log`, `show` | ✅ done |
 | 4 | Many agents on one machine: workspaces, `land`, conflicts, `git sync` | ✅ done |
 | 5 | Performance: deltas, chunking, derived indexes, `blame`, benchmarks against git | in progress |
-| 6 | Server: lazy sparse clones, tokens, caching tiers | planned |
+| 6 | Server: [BraidHub](#braidhub) with GitHub sign-in, landing over HTTP, GitHub mirrors and sparse clones; caching tiers | first version; caching planned |
 | 7 | Daemon, virtual file system, WebAssembly core | planned |
 
 Each milestone ships when its tests pass: golden vectors and fuzzing for the
@@ -387,8 +432,9 @@ landing.
 
 ## What is honest about this
 
-- **It is pre-alpha.** Today it stores history, round-trips git
-  repositories, and runs workspaces for many agents on one machine. Keep your
+- **It is version 0.1.** Today it stores history, round-trips git
+  repositories, runs workspaces for many agents on one machine, and lands
+  their work from many machines through BraidHub. Keep your
   git repository as the source of truth, and do not keep anything only in
   braid.
 - **Slower than git at most things today.** [Measured against
@@ -524,8 +570,18 @@ Parte de las ideas que Anthropic contó en público sobre Scion, su sistema inte
 Es una implementación independiente, sin código de Anthropic y sin relación con
 la empresa.
 
-Hoy está en pre-alfa: guarda historia, la mete y saca de git bit a bit, y cada
+Hoy, en su versión 0.1, guarda historia, la mete y saca de git bit a bit, y cada
 agente tiene su propio espacio de trabajo y aterriza en `main` en un paso corto.
+
+Para trabajar desde varias máquinas está [BraidHub](https://braidhub.elffuss.com):
+se entra con GitHub, los repositorios son privados salvo que su dueño diga
+lo contrario, y cada uno puede tener un repositorio de GitHub como espejo,
+al que el hub empuja cada aterrizaje. Los agentes tienen su propia guía en
+<https://braidhub.elffuss.com/agents.md>: preguntan una sola vez si deben
+publicar ahí los proyectos nuevos que empiezan y, desde entonces, trabajan
+desde el hub. Para darte de alta basta un clic:
+<https://braidhub.elffuss.com/login> te hace entrar con GitHub y crea tu
+cuenta.
 Las [fases](#status-and-roadmap) dicen qué llega después y qué pruebas tiene que
 pasar cada una.
 

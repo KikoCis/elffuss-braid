@@ -5,6 +5,7 @@
 
 mod agents;
 mod history;
+mod hub;
 mod sync;
 mod work;
 
@@ -260,6 +261,17 @@ enum Command {
         #[command(subcommand)]
         action: GitAction,
     },
+    /// Sign in to a hub, with GitHub's device flow.
+    #[command(long_about = hub::LOGIN_HELP)]
+    Login(hub::LoginArgs),
+    /// Sign out of a hub: revoke the saved token, and delete it here.
+    #[command(long_about = hub::LOGOUT_HELP)]
+    Logout(hub::LoginArgs),
+    /// Put the repository on a hub, clone one, fetch from it, and compare.
+    Hub {
+        #[command(subcommand)]
+        action: hub::HubAction,
+    },
     /// Check every record, index, op log entry and ref of the store.
     Fsck,
     /// Show what the store holds: objects by kind and by codec, with their
@@ -283,7 +295,7 @@ enum Command {
     /// Bring the workspace onto its branch's head, rebasing its own
     /// changesets (exit status 2 on conflicts).
     #[command(long_about = work::UPDATE_HELP)]
-    Update(work::IdentityArgs),
+    Update(work::UpdateArgs),
     /// Mark conflicts of a rebase in progress resolved.
     Resolve {
         /// Paths whose conflicts are settled.
@@ -490,6 +502,9 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             *direction,
             *dry_run,
         ),
+        Command::Login(args) => hub::login(cli, args),
+        Command::Logout(args) => hub::logout(cli, args),
+        Command::Hub { action } => hub::hub(cli, action),
         Command::Fsck => fsck(cli),
         Command::Stats => stats(cli),
         Command::Workspace { action } => work::workspace(cli, action),
@@ -1403,6 +1418,172 @@ mod tests {
     fn the_status_help_states_the_walk_limit() {
         let limit = format!("more than {}", braid_wc::BEHIND_LIMIT);
         assert!(work::STATUS_HELP.contains(&limit));
+    }
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).unwrap_or_else(|err| panic!("{args:?}: {err}"))
+    }
+
+    /// The long help of the subcommand at `path`.
+    fn long_help(path: &[&str]) -> String {
+        let mut command = Cli::command();
+        command.build();
+        let mut current = &mut command;
+        for name in path {
+            current = current
+                .find_subcommand_mut(name)
+                .unwrap_or_else(|| panic!("no subcommand {name}"));
+        }
+        current.render_long_help().to_string()
+    }
+
+    #[test]
+    fn the_command_line_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn hub_commands_parse() {
+        match parse(&[
+            "braid", "hub", "clone", "ada/demo", "dir", "--paths", "src", "docs",
+        ])
+        .command
+        {
+            Command::Hub {
+                action: hub::HubAction::Clone(args),
+            } => {
+                assert_eq!(args.source, "ada/demo");
+                assert_eq!(args.dir, Some(PathBuf::from("dir")));
+                assert_eq!(args.paths, ["src", "docs"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&[
+            "braid",
+            "hub",
+            "publish",
+            "demo",
+            "--public",
+            "--description",
+            "A demo",
+            "--mirror",
+            "https://github.com/ada/demo.git",
+        ])
+        .command
+        {
+            Command::Hub {
+                action: hub::HubAction::Publish(args),
+            } => {
+                assert_eq!(args.name.as_deref(), Some("demo"));
+                assert!(args.public);
+                assert_eq!(args.description.as_deref(), Some("A demo"));
+                assert_eq!(
+                    args.mirror.as_deref(),
+                    Some("https://github.com/ada/demo.git")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["braid", "login", "--hub", "https://hub.example.org"]).command {
+            Command::Login(args) => {
+                assert_eq!(args.hub.as_deref(), Some("https://hub.example.org"))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse(&["braid", "logout"]).command,
+            Command::Logout(hub::LoginArgs { hub: None })
+        ));
+        assert!(matches!(
+            parse(&["braid", "--json", "hub", "fetch"]).command,
+            Command::Hub {
+                action: hub::HubAction::Fetch
+            }
+        ));
+        assert!(parse(&["braid", "hub", "status", "--json"]).json);
+        match parse(&["braid", "land", "--local", "--onto", "main"]).command {
+            Command::Land(args) => assert!(args.local),
+            other => panic!("{other:?}"),
+        }
+        match parse(&["braid", "update", "--local"]).command {
+            Command::Update(args) => assert!(args.local),
+            other => panic!("{other:?}"),
+        }
+        match parse(&["braid", "update"]).command {
+            Command::Update(args) => assert!(!args.local),
+            other => panic!("{other:?}"),
+        }
+        match parse(&[
+            "braid", "change", "create", "--base", "main", "-m", "x", "--land", "main", "--local",
+        ])
+        .command
+        {
+            Command::Change {
+                action: work::ChangeAction::Create(args),
+            } => {
+                assert_eq!(args.land.as_deref(), Some("main"));
+                assert!(args.local);
+            }
+            other => panic!("{other:?}"),
+        }
+        for bad in [
+            &["braid", "hub", "clone"][..],
+            &["braid", "hub", "clone", "a/b", "--paths"],
+            &["braid", "hub", "publish", "a", "b"],
+            &["braid", "login", "--hub"],
+            &["braid", "hub"],
+        ] {
+            assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn help_texts_cover_the_hub() {
+        let top = Cli::command().render_help().to_string();
+        for name in ["login", "logout", "hub"] {
+            assert!(top.contains(&format!("  {name} ")), "{name}: {top}");
+        }
+        for path in [&["land"][..], &["update"], &["change", "create"]] {
+            let text = long_help(path);
+            assert!(text.contains("linked to a hub"), "{path:?}: {text}");
+            assert!(text.contains("BRAID_HUB=off"), "{path:?}: {text}");
+            assert!(text.contains("--local"), "{path:?}: {text}");
+        }
+        assert!(long_help(&["land"]).contains("the hub's)"));
+        let login = long_help(&["login"]);
+        for needed in [
+            "device flow",
+            "BRAID_TOKEN",
+            "BRAID_HUB_URL",
+            "hub.json",
+            "--hub",
+        ] {
+            assert!(login.contains(needed), "{needed}: {login}");
+        }
+        assert!(long_help(&["logout"]).contains("revoke"));
+        let publish = long_help(&["hub", "publish"]);
+        for needed in [
+            "NAME",
+            "--public",
+            "--mirror",
+            "256 MiB",
+            "annotated tag",
+            ".braid/hub",
+        ] {
+            assert!(publish.contains(needed), "{needed}: {publish}");
+        }
+        let clone = long_help(&["hub", "clone"]);
+        for needed in ["OWNER/NAME", "--paths", ".braid/work", "--workspace"] {
+            assert!(clone.contains(needed), "{needed}: {clone}");
+        }
+        let fetch = long_help(&["hub", "fetch"]);
+        for needed in ["first-parent chain", "remote/hub/", "ahead or diverged"] {
+            assert!(fetch.contains(needed), "{needed}: {fetch}");
+        }
+        let status = long_help(&["hub", "status"]);
+        for needed in ["same", "behind", "ahead", "diverged"] {
+            assert!(status.contains(needed), "{needed}: {status}");
+        }
     }
 
     #[test]

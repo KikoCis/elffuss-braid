@@ -768,7 +768,11 @@ fn check_labels(agent: &str, description: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn check_ref_name(name: &str) -> Result<(), Error> {
+/// Checks a ref name against the op log's rules: not empty, at most 4,096
+/// bytes, no NUL. [`Store::transact`] refuses any other name with
+/// [`Error::InvalidRefName`]; this lets a caller, such as a server checking
+/// a request, refuse it before.
+pub fn check_ref_name(name: &str) -> Result<(), Error> {
     let reason = if name.is_empty() {
         "empty"
     } else if name.len() > MAX_REF_NAME {

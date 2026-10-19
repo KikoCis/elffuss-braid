@@ -21,8 +21,21 @@ use crate::repo::GitRepo;
 ///
 /// What came from git goes back byte for byte: a changeset with a git origin
 /// is exported as its original commit, after checking that the tree and the
-/// parents the commit names are the ones the map links to the changeset; a
-/// git tree that is not canonical as its raw bytes; a tag as its raw bytes.
+/// parents the commit names are the changeset's (see below); a git tree that
+/// is not canonical as its raw bytes; a tag as its raw bytes.
+///
+/// The tree a commit from git names must be the changeset's root: the one
+/// the map links to it, or, when the map does not know that git tree, the
+/// canonical tree of the root as computed here. Each parent it names must
+/// be the changeset's parent at the same place: as the map links them, or,
+/// when the map does not know that commit, the commit computed here for the
+/// parent changeset. So history imported from git exports to its original
+/// commits through an exporter whose map knows nothing of it, such as a
+/// server's, which receives the changesets and their git origins but not the
+/// map of the repository that imported them. Any difference is
+/// [`Error::OriginMismatch`]. A commit whose tree is not canonical (one that
+/// only its raw bytes reproduce, which only the importing repository's map
+/// holds) cannot be checked that way, and is an `OriginMismatch` too.
 ///
 /// Everything else is generated deterministically from braid content alone:
 /// a tree with canonical modes and git's entry order, a commit with `tree`,
@@ -135,8 +148,10 @@ impl<'a, O: Objects> Exporter<'a, O> {
         self.commit_of(changeset, &decoded)
     }
 
-    /// The git id of a changeset's commit. Ancestors that were not imported
-    /// from git are exported first, parents before children.
+    /// The git id of a changeset's commit. Ancestors whose commits are not
+    /// known yet are exported first, parents before children: a generated
+    /// commit names its parents' commits, and a commit from git is checked
+    /// against them.
     pub fn commit_id(&mut self, changeset: &ObjectId) -> Result<GitOid, Error> {
         if let Some(oid) = self.known_commit(changeset) {
             return Ok(oid);
@@ -146,16 +161,11 @@ impl<'a, O: Objects> Exporter<'a, O> {
             if self.known_commit(&id).is_some() {
                 continue;
             }
-            // A commit from git names its parents itself; a generated one
-            // needs theirs first.
-            let waiting = match decoded.git_origin {
-                Some(_) => None,
-                None => decoded
-                    .parents
-                    .iter()
-                    .find(|parent| self.known_commit(parent).is_none())
-                    .copied(),
-            };
+            let waiting = decoded
+                .parents
+                .iter()
+                .find(|parent| self.known_commit(parent).is_none())
+                .copied();
             match waiting {
                 Some(parent) => {
                     let parent_changeset = fetch::changeset(self.objects, &parent)?;
@@ -214,9 +224,10 @@ impl<'a, O: Objects> Exporter<'a, O> {
     }
 
     /// The original commit of a changeset imported from git, after checking
-    /// that what it names agrees with the changeset and the map.
+    /// that what it names agrees with the changeset: with the map where it
+    /// knows, and with what this exporter computes where it does not.
     fn origin_commit(
-        &self,
+        &mut self,
         id: &ObjectId,
         changeset: &Changeset,
         origin: &ObjectId,
@@ -237,10 +248,19 @@ impl<'a, O: Objects> Exporter<'a, O> {
                 )));
             }
             None => {
-                return Err(mismatch(format!(
-                    "its commit names tree {}, which the map does not know",
-                    fields.tree
-                )));
+                let computed = self.tree_id(&changeset.root)?;
+                if computed != fields.tree {
+                    return Err(mismatch(format!(
+                        "its commit names tree {}, but its root {} exports as tree {computed}{}",
+                        fields.tree,
+                        changeset.root,
+                        if self.map.git_tree(&changeset.root).is_some() {
+                            ""
+                        } else {
+                            " (a git tree that is not canonical can be checked only with the map of the repository that imported it)"
+                        }
+                    )));
+                }
             }
         }
         if fields.parents.len() != changeset.parents.len() {
@@ -251,10 +271,21 @@ impl<'a, O: Objects> Exporter<'a, O> {
             )));
         }
         for (index, (git, braid)) in fields.parents.iter().zip(&changeset.parents).enumerate() {
-            if self.map.changeset(git) != Some(*braid) {
-                return Err(mismatch(format!(
-                    "parent {index} of its commit is {git}, which the map does not link to {braid}"
-                )));
+            match self.map.changeset(git) {
+                Some(known) if known == *braid => {}
+                Some(known) => {
+                    return Err(mismatch(format!(
+                        "parent {index} of its commit is {git}, which the map links to {known}, not to {braid}"
+                    )));
+                }
+                None => {
+                    let computed = self.commit_id(braid)?;
+                    if computed != *git {
+                        return Err(mismatch(format!(
+                            "parent {index} of its commit is {git}, but its parent {braid} exports as commit {computed}"
+                        )));
+                    }
+                }
             }
         }
         let oid = GitOid::for_object(GitKind::Commit, &bytes)?;

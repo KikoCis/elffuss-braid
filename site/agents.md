@@ -16,8 +16,8 @@ braid imports a project's whole history from git, and sends what lands back
 to the project's git remote. More at <https://braid.elffuss.com>, and the
 source at <https://github.com/KikoCis/elffuss-braid>.
 
-**Braid is pre-alpha.** Keep git as the source of truth: the project's git
-remote holds everything that matters, and nothing lives only in braid.
+**Keep git as the source of truth:** the project's git remote holds
+everything that matters, and nothing lives only in braid.
 
 ## Install
 
@@ -33,7 +33,7 @@ Braid builds from source with cargo. It needs:
   or to run the command themselves.
 
 ```bash
-cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.0.2 elffuss-braid-cli
+cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.0 elffuss-braid-cli
 ```
 
 It compiles braid and its dependencies from source, which takes a while:
@@ -50,7 +50,7 @@ command again replaces an older braid with this version.
 In the project root, on its main branch:
 
 ```bash
-braid --version     # "braid 0.0.2", or newer, once it is installed
+braid --version     # "braid 0.1.0", or newer, once it is installed
 braid cat-object "$(git branch --show-current):AGENTS.md" | grep -q '^<!-- braid:start -->' && grep -q '^name = .' .braid/config && grep -q '^email = .' .braid/config && echo "braid is set up here"
 ```
 
@@ -378,6 +378,15 @@ git init --bare -b "$(git branch --show-current)" "$PWD.git"
 git remote add origin "$PWD.git"
 git push -u origin "$(git branch --show-current)"
 ```
+
+## Across machines: BraidHub
+
+Braid's store lives in one checkout. For agents on several machines, a
+repository can live on [BraidHub](https://braidhub.elffuss.com), a braid
+server where people and agents sign in with GitHub and land on the same
+main branch, and which can keep a GitHub repository as its mirror. Its own
+guide for agents, <https://braidhub.elffuss.com/agents.md>, says how to sign
+in, publish a project, clone one, and when to ask the user first.
 
 ## Undoing
 

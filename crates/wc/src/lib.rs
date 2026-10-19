@@ -40,7 +40,11 @@
 //! - [`Workspace::update`] brings the workspace onto the branch's head,
 //!   rebasing its own changesets; conflicts are written with markers.
 //! - [`create_change`] and [`land_change`] make and land a changeset
-//!   without any working copy.
+//!   without any working copy; [`land_stack`] lands a stack of them made
+//!   elsewhere, as a hub does.
+//! - [`Workspace::stack`] and [`Workspace::adopt`] split a landing in two,
+//!   for a repository whose branches live on a hub: what to land there,
+//!   and moving onto the head that holds it afterwards.
 //!
 //! # Safety of checkouts
 //!
@@ -72,6 +76,7 @@ mod paths;
 mod rebase;
 mod safe;
 mod scan;
+mod stack;
 mod state;
 mod status;
 mod tree;
@@ -83,9 +88,10 @@ pub use error::Error;
 pub use fsprobe::FileSystem;
 pub use identity::Identity;
 pub use paths::workspace_path;
+pub use stack::{StackMode, land_stack};
 pub use state::{Checkout, Rebase, RecordedConflict, State};
 pub use status::{ChangeKind, GUARD_SIZE, PathChange, Status, is_guarded};
 pub use workspace::{
     BEHIND_LIMIT, CommitOutcome, CommitRequest, GIT_GUARD, GIT_GUARD_TEXT, LandReport, Landed,
-    Placed, RebaseProgress, StatusReport, UpdateReport, Updated, Workspace,
+    Placed, RebaseProgress, Stack, StatusReport, UpdateReport, Updated, Workspace,
 };

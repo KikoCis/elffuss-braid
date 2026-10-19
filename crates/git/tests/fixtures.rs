@@ -14,7 +14,7 @@ use braid_format::{
     MemoryObjects, ObjectId, Objects, Signature, build_directory, read_directory,
 };
 use braid_git::{
-    Error, GitKind, GitMap, GitOid, ImportOptions, RefTarget, RefUpdate, RoundTripReport,
+    Error, Exporter, GitKind, GitMap, GitOid, ImportOptions, RefTarget, RefUpdate, RoundTripReport,
     export_commit, export_object, import, import_parallel, verify_round_trip, write_to_repo,
     write_to_repo_recording,
 };
@@ -1393,6 +1393,153 @@ fn a_changeset_that_disagrees_with_its_origin_is_not_exported() {
         export_commit(&objects, &map, &genuine_id).unwrap().0,
         oid(&second)
     );
+}
+
+/// A history with a merge, an annotated tag, an executable, a symlink and a
+/// path that is not ASCII: every commit, oldest first.
+fn varied_history(repo: &mut Repo) -> Vec<String> {
+    let base = vec![
+        file("README.md", "# demo\n"),
+        file("src/ñandú.rs", "fn ñandú() {}\n"),
+        exec("bin/run", "#!/bin/sh\necho run\n"),
+        link("latest", "README.md"),
+    ];
+    let first = repo.snapshot("main", &base, "first");
+    repo.set_ref("refs/heads/feature", &first);
+    let mut on_feature = base.clone();
+    on_feature.push(file("docs/guía.md", "una guía\n"));
+    let feature = repo.snapshot("feature", &on_feature, "a guide");
+    let mut on_main = base.clone();
+    on_main[0] = file("README.md", "# demo, again\n");
+    let second = repo.snapshot("main", &on_main, "main moves on");
+    let mut merged = on_main.clone();
+    merged.push(file("docs/guía.md", "una guía\n"));
+    let merge = repo.merge("main", &["feature"], &merged, "merge the guide");
+    repo.annotated_tag("v1", &merge, "release 1");
+    merged[2] = file("bin/run", "#!/bin/sh\necho run, no longer executable\n");
+    let last = repo.snapshot("main", &merged, "after the tag");
+    vec![first, feature, second, merge, last]
+}
+
+#[test]
+fn imported_history_exports_to_its_commits_without_the_map() {
+    let mut repo = Repo::new();
+    let commits = varied_history(&mut repo);
+    let objects = MemoryObjects::new();
+    let mut map = GitMap::new();
+    import_all(&repo, &objects, &mut map);
+    let changesets: Vec<ObjectId> = commits
+        .iter()
+        .map(|commit| map.changeset(&oid(commit)).unwrap())
+        .collect();
+
+    // What a server holds: the changesets and their git origins, and a map
+    // that knows nothing of them.
+    let empty = GitMap::new();
+    let head = *changesets.last().unwrap();
+    let mut exporter = Exporter::new(&objects, &empty);
+    assert_eq!(
+        exporter.commit_id(&head).unwrap(),
+        oid(commits.last().unwrap())
+    );
+    for (commit, changeset) in commits.iter().zip(&changesets) {
+        assert_eq!(exporter.commit_id(changeset).unwrap(), oid(commit));
+        assert_eq!(
+            exporter.object(&oid(commit)).unwrap(),
+            (
+                GitKind::Commit,
+                repo.git_bytes(&["cat-file", "commit", commit])
+            )
+        );
+        // One at a time, through exporters of their own, too.
+        assert_eq!(
+            export_commit(&objects, &empty, changeset).unwrap().0,
+            oid(commit)
+        );
+    }
+    // The trees, the blobs and the commits it computed are what the import
+    // linked them to: recording them gives the importing map's pairings.
+    let mut learned = GitMap::new();
+    learned.record(&exporter.pairings());
+    for (commit, changeset) in commits.iter().zip(&changesets) {
+        assert_eq!(learned.changeset(&oid(commit)), Some(*changeset));
+        let root = decode(&objects, changeset).root;
+        let tree = repo.git(&["rev-parse", &format!("{commit}^{{tree}}")]);
+        assert_eq!(learned.tree(&oid(&tree)), Some(root));
+    }
+    // A later export starts from what was recorded.
+    let mut again = Exporter::new(&objects, &learned);
+    assert_eq!(
+        again.commit_id(&head).unwrap(),
+        oid(commits.last().unwrap())
+    );
+    assert!(again.pairings().commits().is_empty());
+}
+
+#[test]
+fn without_the_map_an_origin_must_name_the_root_and_the_parents() {
+    let mut repo = Repo::new();
+    let first = repo.snapshot("main", &[file("a", "1")], "one");
+    let second = repo.snapshot("main", &[file("a", "2")], "two");
+    repo.set_ref("refs/heads/other", &first);
+    let other = repo.snapshot("other", &[file("a", "1"), file("b", "b")], "elsewhere");
+    let objects = MemoryObjects::new();
+    let mut map = GitMap::new();
+    import_all(&repo, &objects, &mut map);
+    let genuine = changeset(&objects, &map, &second);
+    let first_changeset = changeset(&objects, &map, &first);
+    let other_id = map.changeset(&oid(&other)).unwrap();
+
+    // Another tree than the commit's, another parent at its place, and a
+    // parent too few.
+    let mut wrong_root = genuine.clone();
+    wrong_root.root = first_changeset.root;
+    let mut wrong_parent = genuine.clone();
+    wrong_parent.parents = vec![other_id];
+    let mut no_parent = genuine.clone();
+    no_parent.parents = Vec::new();
+    let empty = GitMap::new();
+    for (forged, what) in [
+        (wrong_root, "names tree"),
+        (wrong_parent, "parent 0"),
+        (no_parent, "parents"),
+    ] {
+        let id = objects.put(Kind::Changeset, &forged.encode()).unwrap();
+        let err = export_commit(&objects, &empty, &id).unwrap_err();
+        assert!(
+            matches!(&err, Error::OriginMismatch { detail, .. } if detail.contains(what)),
+            "{err}"
+        );
+        // The map refuses them too.
+        assert!(matches!(
+            export_commit(&objects, &map, &id),
+            Err(Error::OriginMismatch { .. })
+        ));
+    }
+    let genuine_id = map.changeset(&oid(&second)).unwrap();
+    assert_eq!(
+        export_commit(&objects, &empty, &genuine_id).unwrap().0,
+        oid(&second)
+    );
+}
+
+#[test]
+fn without_the_map_a_tree_that_is_not_canonical_cannot_be_checked() {
+    let mut repo = Repo::new();
+    let x = repo.blob(b"x\n");
+    let odd = repo.literally("tree", &raw_tree(&[("100664", b"group-writable", &x)]));
+    let root = repo.mktree(&[("40000", "tree", &odd, b"odd")]);
+    let commit = repo.commit(&root, &[], "an odd tree");
+    repo.set_ref("refs/heads/main", &commit);
+    let objects = MemoryObjects::new();
+    let mut map = GitMap::new();
+    import_all(&repo, &objects, &mut map);
+    let id = map.changeset(&oid(&commit)).unwrap();
+    // With the map that imported it, the commit comes back; without it, its
+    // tree is not the canonical one, and nothing tells the two apart.
+    assert_eq!(export_commit(&objects, &map, &id).unwrap().0, oid(&commit));
+    let err = export_commit(&objects, &GitMap::new(), &id).unwrap_err();
+    assert!(matches!(err, Error::OriginMismatch { .. }), "{err}");
 }
 
 /// The git id of the empty tree.

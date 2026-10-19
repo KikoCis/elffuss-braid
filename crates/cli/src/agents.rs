@@ -654,8 +654,8 @@ pub(crate) fn section(branch: &str) -> String {
 ## Version control with braid
 
 Agents land their changes on `{branch}` through [braid](https://braid.elffuss.com),
-each in a braid workspace of its own. Braid is pre-alpha: git stays the
-source of truth, and `braid git sync` keeps the git remote in step.
+each in a braid workspace of its own. Git stays the source of truth, and
+`braid git sync` keeps the git remote in step.
 
 - **Only where braid is set up:** in a checkout whose root has a `.braid`
   directory. Without one (a fresh clone, CI, another machine), skip this
@@ -722,6 +722,16 @@ source of truth, and `braid git sync` keeps the git remote in step.
   standard error, even with `--json`.
 - **Before a new task**, `braid --agent agent-1 update` brings your
   workspace onto `{branch}`.
+- **On a hub:** when `braid hub status` names a hub (the repository was
+  published on [BraidHub](https://braidhub.elffuss.com) or cloned from it;
+  elsewhere it says the repository is not linked), `land` and `update` go
+  through the hub, where agents on other machines land too, and answer as
+  they do here. When it names a mirror of `{branch}` on GitHub, the hub
+  sends what lands there itself: skip the `git sync` below, and the user's
+  checkout gets it with `git pull --ff-only`. Without the network,
+  `land --local` and `update --local` work in this repository only. New
+  projects you start for the user go on BraidHub only as
+  <https://braidhub.elffuss.com/agents.md> says.
 - **When you finish**, tell the user that what you landed is on braid's
   `{branch}` only: their checkout and the git remote get it once someone
   runs this from the project root.

@@ -69,6 +69,7 @@ mod history;
 mod land;
 mod merge;
 mod path;
+mod reach;
 mod tree_merge;
 
 #[cfg(test)]
@@ -91,4 +92,5 @@ pub use history::{DeriveReport, History};
 pub use land::{AGENT, Conflict, ConflictKind, LandOutcome, REBASED_FROM, land};
 pub use merge::{BINARY_SNIFF_BYTES, ConflictHunk, HunkSide, MergeResult, is_binary, merge3};
 pub use path::MAX_PATH_DEPTH;
+pub use reach::{Reach, Reached, reachable};
 pub use tree_merge::{MergeOutcome, merge};

@@ -279,6 +279,17 @@ to. Replacement objects and grafts are ignored, and objects are read raw:
 no filters, no line-ending conversion, no LFS. Shallow and SHA-256
 repositories are refused for now.
 
+**Commits imported from git.** A changeset with a git origin is exported as
+those bytes, after checking that the commit names the changeset's root and its
+parents, in order. The tree it names must be the one the map links to the root
+or, where the map does not know that tree, the canonical tree of the root; each
+parent must be the commit the map links to the parent changeset or, where the
+map does not know it, the commit that changeset exports to. So a repository
+that received the changesets without the map that imported them, such as a
+server, exports them to their original commits too, except where a git tree is
+not canonical: only the importing repository's map holds its raw bytes, and
+such a commit cannot be exported elsewhere.
+
 **Commits made in braid.** A changeset without a git origin is exported as
 `tree`, one `parent` per parent, `author` and `committer` written as
 `Name <email> seconds ±HHMM`, then one header per extra in order, a value with

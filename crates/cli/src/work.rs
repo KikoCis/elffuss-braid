@@ -15,6 +15,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use braid_engine::{Conflict, ConflictKind, HunkSide};
 use braid_format::{ChangeOp, EntryKind, ObjectId};
+use braid_hubproto::api::LandResponse;
 use braid_repo::{Location, Repo};
 use braid_store::Refs;
 use braid_wc::{
@@ -24,6 +25,7 @@ use braid_wc::{
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 
+use crate::hub::{self, land::HubLanding};
 use crate::{Cli, change_json, open_repo, print_json, resolve_changeset};
 
 /// Exit status of a command that stopped on conflicts.
@@ -49,7 +51,8 @@ change create --land prints it as \"land\", without base and updated_paths.
                  when it did not move: its changes were there already, or
                  a conflict stopped it or one before it
   merged_paths   paths both sides changed, merged line by line
-  operation      the op log operation that moved the branch, or null
+  operation      the op log operation that moved the branch, or null (in
+                 a repository linked to a hub, the hub's)
   updated_paths  paths of the working copy written or removed, sorted
   change         the changeset that conflicts, or null
   conflicts      one per conflict: path; kind, one of CONTENT,
@@ -123,6 +126,13 @@ The working copy then follows the landed tree. On conflicts the branch does
 not move and the exit status is 2; `braid update` brings the conflicts into
 the working copy.
 
+In a repository linked to a hub (`braid hub publish`, `braid hub clone`),
+land lands on the hub: it fetches, uploads what the hub lacks of the
+workspace's changesets, with any changesets of the local branch below them
+that the hub does not have yet, asks the hub to land them, fetches again,
+and moves the workspace onto the new head. The output and the exit statuses
+are those of a local landing. --local, or BRAID_HUB=off, lands here.
+
 ",
     report_fields!()
 );
@@ -133,6 +143,10 @@ pub(crate) const UPDATE_HELP: &str = concat!(
 without moving the branch. On conflicts the exit status is 2: the working
 copy gets the head's tree with the clean paths and conflict markers, and a
 rebase is in progress until `braid commit`.
+
+In a repository linked to a hub, update fetches from the hub first, so the
+head is the hub's. --local, or BRAID_HUB=off, updates from the local branch
+as it is.
 
 ",
     report_fields!()
@@ -161,6 +175,9 @@ it (exit status 2 on conflicts). Prints JSON whether or not --json is
 given: change, the new changeset's id; base; and land, the report of the
 landing, or null.
 
+In a repository linked to a hub, --land uploads the changeset and lands it
+on the hub, then fetches. --local, or BRAID_HUB=off, lands here.
+
 ",
     report_fields!()
 );
@@ -174,7 +191,7 @@ pub(crate) enum WorkspaceAction {
         /// '-', starting with a letter or a digit.
         name: String,
         /// Its directory, which must not exist or be empty (default:
-        /// .braid/work/<name> in the repository's root).
+        /// `.braid/work/<name>` in the repository's root).
         path: Option<PathBuf>,
         /// The changeset to start at: a ref, an id or a short id (default:
         /// the head of the tracked branch, or nothing if it does not exist
@@ -206,7 +223,7 @@ pub(crate) enum WorkspaceAction {
 
 #[derive(Debug, Args)]
 pub(crate) struct IdentityArgs {
-    /// Who records changesets, as "Name <email>" (default: BRAID_AUTHOR,
+    /// Who records changesets, as `"Name <email>"` (default: BRAID_AUTHOR,
     /// then name and email in .braid/config).
     #[arg(long, env = "BRAID_AUTHOR", value_name = "IDENTITY")]
     author: Option<String>,
@@ -235,6 +252,19 @@ pub(crate) struct LandArgs {
     onto: Option<String>,
     #[command(flatten)]
     identity: IdentityArgs,
+    /// Land in this repository even if it is linked to a hub.
+    #[arg(long)]
+    pub(crate) local: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UpdateArgs {
+    #[command(flatten)]
+    identity: IdentityArgs,
+    /// Update from the local branch without fetching from the hub the
+    /// repository is linked to.
+    #[arg(long)]
+    pub(crate) local: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -267,9 +297,12 @@ pub(crate) struct CreateArgs {
     message: String,
     /// Land the changeset on this branch.
     #[arg(long, value_name = "BRANCH")]
-    land: Option<String>,
+    pub(crate) land: Option<String>,
     #[command(flatten)]
     identity: IdentityArgs,
+    /// Land in this repository even if it is linked to a hub.
+    #[arg(long)]
+    pub(crate) local: bool,
 }
 
 /// The repository and the workspace a command acts on.
@@ -382,20 +415,24 @@ fn show(path: &[u8]) -> String {
     String::from_utf8_lossy(path).into_owned()
 }
 
-/// `1 path`, `3 paths`.
-fn count(n: usize, noun: &str) -> String {
-    if n == 1 {
+/// `1 path`, `3 paths`; a noun ending in `ch` takes `es`.
+pub(crate) fn count<N>(n: N, noun: &str) -> String
+where
+    N: Copy + PartialEq + From<u8> + std::fmt::Display,
+{
+    let plural = if noun.ends_with("ch") { "es" } else { "s" };
+    if n == N::from(1) {
         format!("1 {noun}")
     } else {
-        format!("{n} {noun}s")
+        format!("{n} {noun}{plural}")
     }
 }
 
-fn hex(id: Option<ObjectId>) -> Value {
+pub(crate) fn hex(id: Option<ObjectId>) -> Value {
     id.map_or(Value::Null, |id| Value::String(id.to_hex()))
 }
 
-fn short(id: Option<ObjectId>) -> String {
+pub(crate) fn short(id: Option<ObjectId>) -> String {
     id.map_or_else(|| "(none)".to_owned(), |id| id.short())
 }
 
@@ -715,7 +752,7 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
             }
             RebaseProgress::Stopped { change, conflicts } => {
                 println!("The next changeset, {}, conflicts too:", change.short());
-                print_conflicts(conflicts);
+                print_conflicts(&conflicts.iter().map(conflict_json).collect::<Vec<_>>());
             }
         }
     }
@@ -727,48 +764,101 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
 }
 
 /// What `land`, `update` and `change create --land` report, in one shape:
-/// the fields their long help lists.
-struct Report<'a> {
-    branch: &'a str,
-    outcome: &'static str,
+/// the fields their long help lists. A landing on a hub fills it from the
+/// hub's answer, so that it prints exactly what a local landing does.
+struct Report {
+    branch: String,
+    outcome: String,
     head_before: Option<ObjectId>,
     head: Option<ObjectId>,
-    placed: &'a [Placed],
-    merged_paths: &'a [Vec<u8>],
+    placed: Vec<Placed>,
+    merged_paths: Vec<String>,
     operation: Option<u64>,
     change: Option<ObjectId>,
-    conflicts: &'a [Conflict],
+    /// Each conflict as data (see [`conflict_json`]).
+    conflicts: Vec<Value>,
     next: Option<String>,
     /// For a workspace: its base afterwards, and the paths of its working
     /// copy written or removed.
-    workspace: Option<(Option<ObjectId>, &'a [Vec<u8>])>,
+    workspace: Option<(Option<ObjectId>, Vec<String>)>,
 }
 
-impl<'a> Report<'a> {
-    fn landing(report: &'a LandReport) -> Report<'a> {
+impl Report {
+    fn landing(report: &LandReport) -> Report {
         let (outcome, change, conflicts): (_, _, &[Conflict]) = match &report.landed {
             Landed::Nothing => ("nothing", None, &[]),
             Landed::FastForward(_) => ("fast-forward", None, &[]),
             Landed::Rebased(_) => ("rebased", None, &[]),
             Landed::AlreadyApplied => ("already-applied", None, &[]),
             Landed::Conflicts { change, conflicts } => ("conflicts", Some(*change), conflicts),
+            Landed::Refused => ("refused", None, &[]),
         };
         Report {
-            branch: &report.branch,
-            outcome,
+            branch: report.branch.clone(),
+            outcome: outcome.to_owned(),
             head_before: report.head_before,
             head: report.head(),
-            placed: &report.placed,
-            merged_paths: &report.merged_paths,
+            placed: report.placed.clone(),
+            merged_paths: report.merged_paths.iter().map(|p| show(p)).collect(),
             operation: report.operation,
             change,
-            conflicts,
+            conflicts: conflicts.iter().map(conflict_json).collect(),
             next: None,
             workspace: None,
         }
     }
 
-    fn update(report: &'a UpdateReport) -> Report<'a> {
+    /// A landing as the hub answered it.
+    fn hub(response: &LandResponse) -> Report {
+        Report {
+            branch: response.reference.clone(),
+            outcome: response.outcome.clone(),
+            head_before: response.head_before,
+            head: response.head,
+            placed: response
+                .landed
+                .iter()
+                .map(|placed| Placed {
+                    from: placed.from,
+                    to: placed.to,
+                })
+                .collect(),
+            merged_paths: response.merged_paths.clone(),
+            operation: response.operation,
+            change: response.change,
+            conflicts: response.conflicts.clone(),
+            next: None,
+            workspace: None,
+        }
+    }
+
+    /// A workspace's landing on a hub.
+    fn hub_landing(landing: &HubLanding) -> Report {
+        let mut report = match &landing.response {
+            Some(response) => Report::hub(response),
+            // Nothing went to the hub: its branch stays where it was.
+            None => Report {
+                branch: landing.branch.clone(),
+                outcome: "nothing".to_owned(),
+                head_before: landing.head,
+                head: landing.head,
+                placed: Vec::new(),
+                merged_paths: Vec::new(),
+                operation: None,
+                change: None,
+                conflicts: Vec::new(),
+                next: None,
+                workspace: None,
+            },
+        };
+        report.workspace = Some((
+            landing.base,
+            landing.updated_paths.iter().map(|p| show(p)).collect(),
+        ));
+        report
+    }
+
+    fn update(report: &UpdateReport) -> Report {
         let (outcome, change, conflicts): (_, _, &[Conflict]) = match &report.updated {
             Updated::UpToDate => ("up-to-date", None, &[]),
             Updated::Moved { .. } => ("moved", None, &[]),
@@ -778,19 +868,26 @@ impl<'a> Report<'a> {
             } => ("conflicts", Some(*change), conflicts),
         };
         Report {
-            branch: &report.branch,
-            outcome,
+            branch: report.branch.clone(),
+            outcome: outcome.to_owned(),
             // An update reads the head and never moves it.
             head_before: report.head,
             head: report.head,
-            placed: &report.placed,
-            merged_paths: &report.merged_paths,
+            placed: report.placed.clone(),
+            merged_paths: report.merged_paths.iter().map(|p| show(p)).collect(),
             operation: None,
             change,
-            conflicts,
+            conflicts: conflicts.iter().map(conflict_json).collect(),
             next: None,
-            workspace: Some((report.base, &report.updated_paths)),
+            workspace: Some((
+                report.base,
+                report.updated_paths.iter().map(|p| show(p)).collect(),
+            )),
         }
+    }
+
+    fn conflicted(&self) -> bool {
+        self.outcome == "conflicts" || !self.conflicts.is_empty()
     }
 
     fn json(&self) -> Value {
@@ -803,24 +900,24 @@ impl<'a> Report<'a> {
                 "from": placed.from.to_hex(),
                 "to": hex(placed.to),
             })).collect::<Vec<_>>(),
-            "merged_paths": self.merged_paths.iter().map(|p| show(p)).collect::<Vec<_>>(),
+            "merged_paths": self.merged_paths,
             "operation": self.operation,
             "change": hex(self.change),
-            "conflicts": self.conflicts.iter().map(conflict_json).collect::<Vec<_>>(),
+            "conflicts": self.conflicts,
             "next": self.next,
         });
-        if let Some((base, updated)) = self.workspace {
-            value["base"] = hex(base);
-            value["updated_paths"] = updated.iter().map(|p| Value::String(show(p))).collect();
+        if let Some((base, updated)) = &self.workspace {
+            value["base"] = hex(*base);
+            value["updated_paths"] = updated.iter().map(|p| Value::String(p.clone())).collect();
         }
         value
     }
 
     fn exit_code(&self) -> ExitCode {
-        if self.conflicts.is_empty() {
-            ExitCode::SUCCESS
-        } else {
+        if self.conflicted() {
             ExitCode::from(CONFLICTS)
+        } else {
+            ExitCode::SUCCESS
         }
     }
 
@@ -834,7 +931,7 @@ impl<'a> Report<'a> {
 
     /// Says how many paths of the working copy changed, if any did.
     fn print_updated(&self) {
-        if let Some((_, updated)) = self.workspace
+        if let Some((_, updated)) = &self.workspace
             && !updated.is_empty()
         {
             println!(
@@ -843,70 +940,104 @@ impl<'a> Report<'a> {
             );
         }
     }
+
+    /// Prints a landing as text.
+    fn print_landing(&self, cli: &Cli) {
+        let branch = &self.branch;
+        let several = self.placed.len() > 1;
+        match self.outcome.as_str() {
+            "nothing" => println!("Nothing to land on {branch}"),
+            "fast-forward" if several => println!(
+                "Landed {} on {branch} (fast-forward), up to {}",
+                count(self.placed.len(), "changeset"),
+                short(self.head)
+            ),
+            "fast-forward" => println!("Landed {} on {branch} (fast-forward)", short(self.head)),
+            "rebased" if several => println!(
+                "Landed {} on {branch}, rebased onto {}; the last is {}{}",
+                count(self.placed.len(), "changeset"),
+                short(self.head_before),
+                short(self.head),
+                self.merged()
+            ),
+            "rebased" => println!(
+                "Landed on {branch} as {}, rebased onto {}{}",
+                short(self.head),
+                short(self.head_before),
+                self.merged()
+            ),
+            "already-applied" => println!("{branch} already has these changes"),
+            "refused" => println!("{branch} refused the landing: it is not a fast-forward"),
+            "conflicts" => {
+                println!(
+                    "{} conflicts with {branch} at {}; {branch} did not move:",
+                    short(self.change),
+                    short(self.head_before),
+                );
+                print_conflicts(&self.conflicts);
+                println!(
+                    "Run `{}` to bring the conflicts into the working copy.",
+                    cli.hint("update")
+                );
+            }
+            other => println!("The landing on {branch} ended with {other}"),
+        }
+        self.print_updated();
+    }
 }
 
 pub(crate) fn land(cli: &Cli, args: &LandArgs) -> Result<ExitCode> {
     let target = Target::find(cli)?;
     let workspace = target.open()?;
     let committer = identity(&args.identity, &target.repo)?;
-    let landing = workspace.land(args.onto.as_deref(), &cli.agent, &committer)?;
-    let mut report = Report::landing(&landing);
-    report.workspace = Some((workspace.state()?.base, &landing.updated_paths));
-    if !report.conflicts.is_empty() {
+    let mut report = match hub::linked(&target.repo, args.local)? {
+        Some(link) => {
+            let hub = hub::connect(&link)?;
+            let remote = hub.repo(link.repo.clone());
+            let landing = hub::land::land_workspace(
+                &target.repo,
+                &workspace,
+                &remote,
+                &link,
+                args.onto.as_deref(),
+                &cli.agent,
+            )?;
+            Report::hub_landing(&landing)
+        }
+        None => {
+            let landing = workspace.land(args.onto.as_deref(), &cli.agent, &committer)?;
+            let mut report = Report::landing(&landing);
+            report.workspace = Some((
+                workspace.state()?.base,
+                landing.updated_paths.iter().map(|p| show(p)).collect(),
+            ));
+            report
+        }
+    };
+    if report.conflicted() {
         report.next = Some(cli.hint("update"));
     }
     if cli.json {
         print_json(&report.json())?;
-        return Ok(report.exit_code());
+    } else {
+        report.print_landing(cli);
     }
-    let branch = &landing.branch;
-    let several = landing.placed.len() > 1;
-    match &landing.landed {
-        Landed::Nothing => println!("Nothing to land on {branch}"),
-        Landed::FastForward(id) if several => println!(
-            "Landed {} on {branch} (fast-forward), up to {}",
-            count(landing.placed.len(), "changeset"),
-            id.short()
-        ),
-        Landed::FastForward(id) => println!("Landed {} on {branch} (fast-forward)", id.short()),
-        Landed::Rebased(id) if several => println!(
-            "Landed {} on {branch}, rebased onto {}; the last is {}{}",
-            count(landing.placed.len(), "changeset"),
-            short(landing.head_before),
-            id.short(),
-            report.merged()
-        ),
-        Landed::Rebased(id) => println!(
-            "Landed on {branch} as {}, rebased onto {}{}",
-            id.short(),
-            short(landing.head_before),
-            report.merged()
-        ),
-        Landed::AlreadyApplied => println!("{branch} already has these changes"),
-        Landed::Conflicts { change, conflicts } => {
-            println!(
-                "{} conflicts with {branch} at {}; {branch} did not move:",
-                change.short(),
-                short(landing.head_before),
-            );
-            print_conflicts(conflicts);
-            println!(
-                "Run `{}` to bring the conflicts into the working copy.",
-                cli.hint("update")
-            );
-        }
-    }
-    report.print_updated();
     Ok(report.exit_code())
 }
 
-pub(crate) fn update(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
+pub(crate) fn update(cli: &Cli, args: &UpdateArgs) -> Result<ExitCode> {
     let target = Target::find(cli)?;
     let workspace = target.open()?;
-    let committer = identity(args, &target.repo)?;
+    let committer = identity(&args.identity, &target.repo)?;
+    if let Some(link) = hub::linked(&target.repo, args.local)? {
+        let hub = hub::connect(&link)?;
+        let remote = hub.repo(link.repo.clone());
+        hub::fetch::fetch(&target.repo, &remote, &link, &cli.agent, None)
+            .context("cannot fetch from the hub before updating (--local updates from the local branch as it is)")?;
+    }
     let updated = workspace.update(&committer)?;
     let mut report = Report::update(&updated);
-    if !report.conflicts.is_empty() {
+    if report.conflicted() {
         report.next = Some(cli.hint("commit"));
     }
     if cli.json {
@@ -924,17 +1055,13 @@ pub(crate) fn update(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
                 report.merged()
             );
         }
-        Updated::Conflicts {
-            head,
-            change,
-            conflicts,
-        } => {
+        Updated::Conflicts { head, change, .. } => {
             println!(
                 "{} conflicts with {}; the working copy has the merge so far:",
                 change.short(),
                 head.short()
             );
-            print_conflicts(conflicts);
+            print_conflicts(&report.conflicts);
             println!(
                 "Fix the files, `{}` the other conflicts, then `{}`.",
                 cli.hint("resolve"),
@@ -1067,30 +1194,35 @@ pub(crate) fn change(cli: &Cli, action: &ChangeAction) -> Result<ExitCode> {
         agent: cli.agent.clone(),
     };
     let change = braid_wc::create_change(repo.store(), &request)?;
-    let landing = match &args.land {
-        Some(branch) => Some(braid_wc::land_change(
-            repo.store(),
-            branch,
-            change,
-            &cli.agent,
-            &author,
-        )?),
+    let report = match &args.land {
+        Some(branch) => Some(match hub::linked(&repo, args.local)? {
+            Some(link) => {
+                let hub = hub::connect(&link)?;
+                let remote = hub.repo(link.repo.clone());
+                let response =
+                    hub::land::land_change(&repo, &remote, &link, branch, change, &cli.agent)?;
+                Report::hub(&response)
+            }
+            None => Report::landing(&braid_wc::land_change(
+                repo.store(),
+                branch,
+                change,
+                &cli.agent,
+                &author,
+            )?),
+        }),
         None => None,
     };
-    let conflicted = matches!(
-        landing.as_ref().map(|report| &report.landed),
-        Some(Landed::Conflicts { .. })
-    );
+    let conflicted = report.as_ref().is_some_and(Report::conflicted);
     // Always JSON: this command is for agents, which want the ids.
-    let land = match &landing {
-        Some(landing) => {
-            let mut report = Report::landing(landing);
-            if !report.conflicts.is_empty() {
+    let land = match report {
+        Some(mut report) => {
+            if report.conflicted() {
                 // The change was built on a base the branch has moved past:
                 // it is made again on the new head.
                 report.next = Some(cli.hint(&format!(
                     "change create --base {}",
-                    crate::shell_word(&landing.branch)
+                    crate::shell_word(&report.branch)
                 )));
             }
             report.json()
@@ -1178,22 +1310,22 @@ pub(crate) fn conflict_json(conflict: &Conflict) -> Value {
     value
 }
 
-fn print_conflicts(conflicts: &[Conflict]) {
+/// Prints conflicts as data ([`conflict_json`], or a hub's answer, which
+/// has the same shape), one line each: the kind, the path, and the regions
+/// of a content conflict, the directory removed, or the path collided with.
+fn print_conflicts(conflicts: &[Value]) {
     for conflict in conflicts {
-        let detail = match &conflict.kind {
-            ConflictKind::Content { hunks } if !hunks.is_empty() => {
-                format!("  ({})", count(hunks.len(), "region"))
-            }
-            ConflictKind::DirectoryRemoved { directory } => {
-                format!("  (directory {} removed)", show(directory))
-            }
-            ConflictKind::Case { existing } => format!("  (collides with {})", show(existing)),
-            _ => String::new(),
+        let text = |key: &str| conflict[key].as_str().unwrap_or("");
+        let regions = conflict["hunks"].as_array().map_or(0, Vec::len);
+        let detail = if regions > 0 {
+            format!("  ({})", count(regions, "region"))
+        } else if let Some(directory) = conflict["directory"].as_str() {
+            format!("  (directory {directory} removed)")
+        } else if let Some(existing) = conflict["existing"].as_str() {
+            format!("  (collides with {existing})")
+        } else {
+            String::new()
         };
-        println!(
-            "  {:<13} {}{detail}",
-            conflict.kind.code(),
-            show(&conflict.path)
-        );
+        println!("  {:<13} {}{detail}", text("kind"), text("path"));
     }
 }

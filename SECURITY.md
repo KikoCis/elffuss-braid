@@ -18,7 +18,7 @@ unless you prefer otherwise.
 
 ## Supported versions
 
-Braid is pre-alpha. Fixes go to the `main` branch only.
+Fixes go to the latest release and the `main` branch.
 
 ## Scope
 

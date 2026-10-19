@@ -190,6 +190,28 @@ impl Repo {
         self.git_map_at(self.store.refs()?.get(MAP_REF))
     }
 
+    /// Adds to the stored git map every entry of `map` that it lacks, as one
+    /// operation by `agent` that moves [`MAP_REF`], and returns it, or `None`
+    /// when the stored map holds them all. Where the two disagree, what the
+    /// stored map knows wins (see [`GitMap::absorb`]).
+    ///
+    /// This is how a server that computes the commits of its changesets with
+    /// an [`Exporter`](braid_git::Exporter), without writing them into a git
+    /// repository, keeps what it computed: exports are deterministic, so the
+    /// pairings stay true, and the next export starts from them.
+    pub fn git_record(&self, map: &GitMap, agent: &str) -> Result<Option<Operation>, Error> {
+        let mut working = self.working_map(self.store.refs()?.get(MAP_REF))?;
+        let added = working.map.absorb(map);
+        if !working.changed() {
+            return Ok(None);
+        }
+        let description = format!(
+            "git map: {} commits, {} trees and {} blobs recorded",
+            added.commits, added.trees, added.blobs
+        );
+        self.save_with_map(agent, &description, &mut working, &[])
+    }
+
     /// The git map stored as `id`, or the empty map.
     fn git_map_at(&self, id: Option<ObjectId>) -> Result<GitMap, Error> {
         let Some(id) = id else {
@@ -492,6 +514,50 @@ mod tests {
         let remote = remote_ref("origin-0123456789ab", "main");
         assert_eq!(remote, "remote/origin-0123456789ab/main");
         assert_eq!(git_ref_for_braid(&remote), None);
+    }
+
+    #[test]
+    fn what_an_export_computed_is_recorded_once() {
+        use braid_format::{Change, ChangeOp, Signature};
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repo::init(dir.path()).unwrap();
+        let blob = repo.store().put(Kind::Blob, b"hello\n").unwrap();
+        let signature = Signature {
+            name: b"Ada".to_vec(),
+            email: b"ada@example.org".to_vec(),
+            seconds: 1_700_000_000,
+            offset_minutes: 0,
+        };
+        let changeset = braid_engine::commit(
+            repo.store(),
+            Vec::new(),
+            vec![Change {
+                path: b"hello.txt".to_vec(),
+                op: ChangeOp::File { blob, size: 6 },
+            }],
+            signature.clone(),
+            signature,
+            b"hello\n".to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        repo.store().sync().unwrap();
+
+        // Computed in memory, without a git repository.
+        let mut map = repo.git_map().unwrap();
+        let mut exporter = braid_git::Exporter::new(repo.store(), &map);
+        let commit = exporter.commit_id(&changeset).unwrap();
+        let pairings = exporter.pairings();
+        map.record(&pairings);
+
+        let operation = repo.git_record(&map, "hub").unwrap().unwrap();
+        assert_eq!(operation.agent, "hub");
+        let stored = repo.git_map().unwrap();
+        assert_eq!(stored.commit(&changeset), Some(commit));
+        assert_eq!(stored.changeset(&commit), Some(changeset));
+        // Nothing new: nothing recorded.
+        assert!(repo.git_record(&map, "hub").unwrap().is_none());
     }
 
     #[test]

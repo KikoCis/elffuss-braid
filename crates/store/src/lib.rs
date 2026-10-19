@@ -289,7 +289,7 @@ pub use chunks::CHUNKED_MIN;
 pub use derived::{DERIVED_DIR, DerivedIndexFile};
 pub use error::{Error, TransactError};
 pub use fsck::{FsckReport, Problem};
-pub use oplog::{Operation, RefUpdate, Refs};
+pub use oplog::{Operation, RefUpdate, Refs, check_ref_name};
 pub use stats::{CodecStats, KindStats, Stats};
 
 use error::io_error;

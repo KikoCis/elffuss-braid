@@ -17,12 +17,20 @@ path = "src/main.rs"
 braid-engine.workspace = true
 braid-format.workspace = true
 braid-git.workspace = true
+braid-hubproto.workspace = true
 braid-repo.workspace = true
 braid-store.workspace = true
 braid-wc.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# The hub client: blocking HTTP over rustls with the ring provider, which
+# is passed explicitly, and the operating system's root certificates.
+# webpki-roots (CDLA-Permissive-2.0) and aws-lc stay out.
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true
