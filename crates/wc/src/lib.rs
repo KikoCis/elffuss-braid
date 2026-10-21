@@ -43,6 +43,8 @@
 //!   without any working copy; [`create_revert`] makes one that undoes
 //!   another; [`land_stack`] lands a stack of them made elsewhere, as a hub
 //!   does.
+//! - [`materialize`] writes a changeset's files into a plain directory,
+//!   with the same safe checkout, for a command that only needs the files.
 //! - [`Workspace::stack`] and [`Workspace::adopt`] split a landing in two,
 //!   for a repository whose branches live on a hub: what to land there,
 //!   and moving onto the head that holds it afterwards.
@@ -73,6 +75,7 @@ mod fsprobe;
 mod identity;
 mod ignores;
 mod markers;
+mod materialize;
 mod paths;
 mod rebase;
 mod safe;
@@ -88,6 +91,7 @@ pub use change::{ChangeRequest, Expect, RevertRequest, create_change, create_rev
 pub use error::Error;
 pub use fsprobe::FileSystem;
 pub use identity::Identity;
+pub use materialize::materialize;
 pub use paths::workspace_path;
 pub use stack::{StackMode, land_stack};
 pub use state::{Checkout, Rebase, RecordedConflict, State};
