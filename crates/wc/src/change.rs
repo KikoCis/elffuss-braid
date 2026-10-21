@@ -133,9 +133,10 @@ pub fn create_change(store: &Store, request: &ChangeRequest) -> Result<ObjectId,
 pub struct RevertRequest {
     /// The changeset to undo.
     pub culprit: ObjectId,
-    /// Whether a merge may be reverted. Its revert undoes what it brought
-    /// in against its first parent.
-    pub allow_merge: bool,
+    /// Whether the changeset is a merge to revert against its first parent:
+    /// the revert undoes what the merge brought in. A merge is refused
+    /// without it, and anything but a merge with it.
+    pub mainline: bool,
     /// The author, who also commits it.
     pub author: Identity,
     /// The label of the agent making it, recorded as its
@@ -155,14 +156,16 @@ pub struct RevertRequest {
 /// conflict.
 ///
 /// A changeset without parents, one that changes nothing, and a merge
-/// unless [`RevertRequest::allow_merge`] says so, are refused.
+/// unless [`RevertRequest::mainline`] says so, are refused, as is
+/// [`RevertRequest::mainline`] for a changeset that is not a merge.
 pub fn create_revert(store: &Store, request: &RevertRequest) -> Result<ObjectId, Error> {
     let culprit = request.culprit;
     let changeset = read_changeset(store, culprit)?;
     let parent = match changeset.parents.as_slice() {
         [] => return Err(Error::RevertRoot(culprit)),
+        [_] if request.mainline => return Err(Error::NotAMerge(culprit)),
         [parent] => *parent,
-        [parent, ..] if request.allow_merge => *parent,
+        [parent, ..] if request.mainline => *parent,
         parents => {
             return Err(Error::RevertMerge {
                 changeset: culprit,

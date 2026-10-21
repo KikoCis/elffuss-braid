@@ -208,6 +208,95 @@ fn what_cannot_be_reverted_is_refused() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+#[test]
+fn a_revert_lands_only_on_a_branch() {
+    let r = Repo::new();
+    r.land(&[("a", "1\n")], "Seed");
+    let culprit = r.land(&[("a", "2\n")], "Change");
+    // A ref of braid's own, as verify's green ref is, is no branch.
+    run(&r.dir, &["ref", "set", "braid/green/main", &culprit], 0);
+    let out = braid(
+        &r.dir,
+        &["revert", &culprit, "--branch", "braid/green/main"],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("braid's own namespaces"), "{err}");
+    let refs = run(&r.dir, &["refs"], 0);
+    assert_eq!(refs["refs"]["braid/green/main"], culprit.as_str());
+    assert_eq!(r.head().unwrap(), culprit);
+}
+
+/// Git without the user's or the system's configuration.
+const GIT_ENV: [(&str, &str); 6] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_AUTHOR_NAME", "Ada Lovelace"),
+    ("GIT_AUTHOR_EMAIL", "ada@example.org"),
+    ("GIT_COMMITTER_NAME", "Ada Lovelace"),
+    ("GIT_COMMITTER_EMAIL", "ada@example.org"),
+];
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .envs(GIT_ENV)
+        .output()
+        .expect("git must be installed to run this test");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_merge_is_reverted_against_its_first_parent_with_mainline_1() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let project = base.join("project");
+    std::fs::create_dir(&project).unwrap();
+    git(&project, &["init", "-q", "-b", "main"]);
+    std::fs::write(project.join("a"), "a\n").unwrap();
+    git(&project, &["add", "a"]);
+    git(&project, &["commit", "-q", "-m", "Seed"]);
+    git(&project, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(project.join("side"), "s\n").unwrap();
+    git(&project, &["add", "side"]);
+    git(&project, &["commit", "-q", "-m", "Side"]);
+    git(&project, &["checkout", "-q", "main"]);
+    std::fs::write(project.join("main"), "m\n").unwrap();
+    git(&project, &["add", "main"]);
+    git(&project, &["commit", "-q", "-m", "Main"]);
+    git(
+        &project,
+        &["merge", "-q", "--no-ff", "-m", "Merge side", "side"],
+    );
+
+    let dir = base.join("repo");
+    run(&base, &["init", dir.to_str().unwrap()], 0);
+    run(&dir, &["git", "import", project.to_str().unwrap()], 0);
+    let merge = id(&run(&dir, &["show", "main"], 0)["id"]);
+    let parent = id(&run(&dir, &["show", "main"], 0)["parents"][0]);
+
+    // Refused without --mainline, and --mainline on a changeset that is not
+    // a merge.
+    let out = braid(&dir, &["revert", &merge]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--mainline 1"));
+    let out = braid(&dir, &["revert", &parent, "--mainline", "1"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not a merge"));
+
+    let out = run(&dir, &["revert", &merge, "--mainline", "1"], 0);
+    assert_eq!(out["land"]["outcome"], "fast-forward");
+    let back = run(&dir, &["diff", &parent, "main"], 0);
+    assert_eq!(back["changes"], serde_json::json!([]));
+    let gone = braid(&dir, &["cat-object", "main:side"]);
+    assert!(!gone.status.success());
+}
+
 #[cfg(unix)]
 #[test]
 fn a_revert_puts_back_modes_and_removes_what_was_added() {
@@ -241,4 +330,20 @@ fn a_revert_puts_back_modes_and_removes_what_was_added() {
             ("run.sh".to_owned(), "file".to_owned()),
         ]
     );
+}
+
+#[test]
+fn a_revert_the_branch_has_already_says_nothing_landed() {
+    let r = Repo::new();
+    r.land(&[("a", "1\n"), ("b", "b\n")], "Seed");
+    let culprit = r.land(&[("a", "2\n")], "Change");
+    let undone = r.land(&[("a", "1\n")], "Undo by hand");
+    let out = run(&r.dir, &["revert", &culprit], 0);
+    assert_eq!(out["land"]["outcome"], "already-applied");
+    let text = braid(&r.dir, &["revert", &culprit]);
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("nothing landed"), "{text}");
+    assert!(!text.contains("Reverted"), "{text}");
+    assert_eq!(r.head().unwrap(), undone);
 }

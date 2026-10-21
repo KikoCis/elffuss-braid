@@ -605,7 +605,7 @@ impl Pass<'_> {
             self.repo.store(),
             &RevertRequest {
                 culprit,
-                allow_merge: false,
+                mainline: false,
                 author: author.clone(),
                 agent: AGENT.to_owned(),
             },
@@ -656,9 +656,6 @@ impl Pass<'_> {
 pub(crate) fn verify(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
     let repo = open_repo(cli)?;
     let branch = branch_or_main(&repo, args.branch.as_deref())?;
-    if !braid_repo::is_branch(&branch) {
-        bail!("{branch:?} is in one of braid's own namespaces, not a branch");
-    }
     let link = hub::linked(&repo, args.local)?;
     if let Some(link) = &link
         && !args.dry_run

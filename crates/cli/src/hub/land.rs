@@ -705,7 +705,7 @@ mod tests {
             s.local.repo.store(),
             &braid_wc::RevertRequest {
                 culprit,
-                allow_merge: false,
+                mainline: false,
                 author: ada(),
                 agent: "verifier".to_owned(),
             },

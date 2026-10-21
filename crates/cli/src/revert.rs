@@ -32,7 +32,9 @@ landing stops with conflicts, the branch does not move and the exit status
 is 2: undo the change by hand in a workspace instead.
 
 A changeset without parents cannot be reverted, nor a merge unless
---mainline 1 says to undo what it brought in against its first parent.
+--mainline 1 says to undo what it brought in against its first parent;
+--mainline is refused for a changeset that is not a merge. --branch must
+name a branch, not a ref in one of braid's own namespaces.
 --no-land only makes the changeset and prints its id. In a repository
 linked to a hub, the revert lands on the hub, then fetches; --local, or
 BRAID_HUB=off, lands here.
@@ -64,12 +66,19 @@ pub(crate) struct RevertArgs {
 }
 
 /// The branch a command acts on: the one given, or else the repository's
-/// main branch: `main`, `master`, or its only branch.
+/// main branch: `main`, `master`, or its only branch. A name in one of
+/// braid's own namespaces, such as a green ref, is refused.
 pub(crate) fn branch_or_main(repo: &Repo, given: Option<&str>) -> Result<String> {
-    match given {
-        Some(branch) => Ok(branch.to_owned()),
-        None => crate::agents::main_branch(&branches(&repo.store().refs()?)),
+    let branch = match given {
+        Some(branch) => branch.to_owned(),
+        None => crate::agents::main_branch(&branches(&repo.store().refs()?))?,
+    };
+    if !braid_repo::is_branch(&branch) {
+        bail!(
+            "{branch:?} is in one of braid's own namespaces (braid/, git/, remote/, tags/), not a branch"
+        );
     }
+    Ok(branch)
 }
 
 /// Refuses to revert `culprit` on `branch` unless it is on the branch's
@@ -133,7 +142,7 @@ pub(crate) fn revert(cli: &Cli, args: &RevertArgs) -> Result<ExitCode> {
         repo.store(),
         &RevertRequest {
             culprit,
-            allow_merge: args.mainline.is_some(),
+            mainline: args.mainline.is_some(),
             author: author.clone(),
             agent: cli.agent.clone(),
         },
@@ -174,6 +183,10 @@ pub(crate) fn revert(cli: &Cli, args: &RevertArgs) -> Result<ExitCode> {
             print_conflicts(&report.conflicts);
             println!("Undo the change by hand in a workspace instead.");
         }
+        Some(report) if report.outcome == "already-applied" => println!(
+            "{branch} has what the revert of {} would change already: nothing landed",
+            culprit.short()
+        ),
         Some(report) => {
             println!("Reverted {} with {}", culprit.short(), change.short());
             report.print_landing(cli);

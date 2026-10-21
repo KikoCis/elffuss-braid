@@ -250,6 +250,10 @@ pub enum Error {
         parents: usize,
     },
 
+    /// `--mainline` was given for a changeset that is not a merge.
+    #[error("changeset {} is not a merge: --mainline is only for reverting a merge", .0.short())]
+    NotAMerge(ObjectId),
+
     /// The changeset changes no file, so its revert would change none.
     #[error("changeset {} changes no file against its first parent: there is nothing to revert", .0.short())]
     NothingToRevert(ObjectId),

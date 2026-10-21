@@ -12,12 +12,12 @@ use braid_format::{ChangeOp, GitId, ObjectId};
 use braid_wc::{Error, Landed, RevertRequest, create_revert, land_change};
 use common::{Fixture, ada};
 
-fn revert(f: &Fixture, culprit: ObjectId, allow_merge: bool) -> Result<ObjectId, Error> {
+fn revert(f: &Fixture, culprit: ObjectId, mainline: bool) -> Result<ObjectId, Error> {
     create_revert(
         f.repo.store(),
         &RevertRequest {
             culprit,
-            allow_merge,
+            mainline,
             author: ada(),
             agent: "reverter".to_owned(),
         },
@@ -185,4 +185,9 @@ fn roots_empty_changes_and_merges_are_refused() {
     // parent.
     let id = revert(&f, merge, true).unwrap();
     assert_eq!(root(&f, id), root(&f, base));
+    // And a changeset that is not a merge is no mainline's.
+    assert!(matches!(
+        revert(&f, side, true),
+        Err(Error::NotAMerge(id)) if id == side
+    ));
 }
