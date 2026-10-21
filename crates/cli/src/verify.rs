@@ -48,6 +48,9 @@ use crate::{Cli, open_repo, print_json, resolve_changeset};
 /// and the reverts it makes and lands.
 pub(crate) const AGENT: &str = "braid-verify";
 
+/// What braid says when someone else acts as [`AGENT`].
+pub(crate) const AGENT_WARNING: &str = "the agent braid-verify (--agent or BRAID_AGENT) is the name braid verify records its own work under: verify takes a revert made under that name for one of its own, never reverts it, and counts it against --max-reverts-per-hour";
+
 /// The hidden subcommand that watches a test run for braid going away.
 pub(crate) const WATCHDOG: &str = "__verify-watchdog";
 

@@ -744,3 +744,16 @@ fn the_watchdog_stops_the_group_and_removes_the_copy_unless_told_done() {
     test.wait().unwrap();
     std::fs::remove_dir_all(&kept).unwrap();
 }
+
+#[test]
+fn acting_as_braid_verify_is_warned_about() {
+    let r = Repo::new();
+    let warned = |args: &[&str], envs: &[(&str, &str)]| {
+        let out = braid_with(&r.dir, args, envs);
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8_lossy(&out.stderr).contains("warning: the agent braid-verify")
+    };
+    assert!(warned(&["--agent", "braid-verify", "refs"], &[]));
+    assert!(warned(&["refs"], &[("BRAID_AGENT", "braid-verify")]));
+    assert!(!warned(&["refs"], &[]));
+}

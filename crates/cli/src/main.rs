@@ -476,6 +476,14 @@ fn stdout_written<T>(result: io::Result<T>) -> io::Result<T> {
 }
 
 fn run(cli: &Cli) -> Result<ExitCode> {
+    if cli.agent == verify::AGENT
+        && !matches!(
+            cli.command,
+            Command::Verify(_) | Command::VerifyWatchdog { .. }
+        )
+    {
+        eprintln!("braid: warning: {}", verify::AGENT_WARNING);
+    }
     match &cli.command {
         Command::Init { dir } => init(cli, dir.as_deref()),
         Command::Agents { action } => agents::agents(cli, action),
