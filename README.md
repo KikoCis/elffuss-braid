@@ -350,10 +350,11 @@ Revert: dbc25836e20d
   (10 minutes by default), the group is killed, with whatever it started
   that is still in it; a process that left the group, as a daemon does, is
   not. A watchdog process, started before the command, kills the group and
-  removes the copy if braid is killed or exits while the tests run, and
-  when the watchdog cannot start, or stops, the run fails rather than go
-  on unwatched. On other systems (Windows is not verified) only the
-  command itself is killed, and nothing watches braid.
+  removes the copy if braid is killed or exits while the tests run. When
+  the watchdog cannot start, or stops, verify ends there with an error
+  (exit status 1) rather than go on unwatched, and runs no more tests. On
+  other systems (Windows is not verified) only the command itself is
+  killed, and nothing watches braid.
 - **In a container,** run braid under an init such as
   [tini](https://github.com/krallin/tini) (`docker run --init`), not as
   PID 1: PID 1 gets no default handling of signals, and has to reap the

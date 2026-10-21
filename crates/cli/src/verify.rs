@@ -115,12 +115,13 @@ On Unix the command runs in a process group of its own: when it exits or
 times out, the group is killed, and so are processes it started that are
 still in it (one that left the group, as a daemon does, is not). A watchdog
 process, started before the command, kills the group and removes the
-directory if braid is killed or exits while the tests run; when the
-watchdog cannot start, or stops, the run fails. Elsewhere (Windows is not
-verified) only the command itself is killed, and nothing watches braid. In
-a container, run braid under an init such as tini (docker run --init), not
-as PID 1, which gets no default signal handling and must reap the
-processes others leave behind.
+directory if braid is killed or exits while the tests run. When the
+watchdog cannot start, or stops, verify does not go on unwatched: it ends
+there with an error, exit status 1, and runs no more tests. Elsewhere
+(Windows is not verified) only the command itself is killed, and nothing
+watches braid. In a container, run braid under an init such as tini
+(docker run --init), not as PID 1, which gets no default signal handling
+and must reap the processes others leave behind.
 
   - The head is the green changeset already: pass, and nothing runs.
   - The tests pass: the green ref moves to the head, in an operation of
@@ -531,7 +532,7 @@ impl Tester<'_> {
     /// Waits for the command, at most until the timeout, then kills its
     /// group: whatever it left running, or all of it on a timeout. Should
     /// the watchdog stop meanwhile, or the wait fail, the group is killed
-    /// too, and the run fails.
+    /// too, and verify ends with an error.
     fn wait(&self, child: &mut Child, watchdog: &mut Watchdog) -> Result<RunEnd> {
         let deadline = Instant::now() + self.timeout;
         loop {
