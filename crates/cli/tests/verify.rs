@@ -757,3 +757,97 @@ fn acting_as_braid_verify_is_warned_about() {
     assert!(warned(&["refs"], &[("BRAID_AGENT", "braid-verify")]));
     assert!(!warned(&["refs"], &[]));
 }
+
+/// Git without the user's or the system's configuration.
+const GIT_ENV: [(&str, &str); 6] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_AUTHOR_NAME", "Ada Lovelace"),
+    ("GIT_AUTHOR_EMAIL", "ada@example.org"),
+    ("GIT_COMMITTER_NAME", "Ada Lovelace"),
+    ("GIT_COMMITTER_EMAIL", "ada@example.org"),
+];
+
+fn git(dir: &Path, args: &[&str], envs: &[(&str, &str)]) {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .envs(GIT_ENV)
+        .envs(envs.iter().copied())
+        .output()
+        .expect("git must be installed to run this test");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn an_old_date_between_reverts_does_not_reset_the_hourly_cap() {
+    let (r, _, _) = broken_after_green();
+    let first = r.verify(
+        &["--revert", "--reruns", "0", "--max-reverts-per-hour", "1"],
+        4,
+    );
+    assert_eq!(first["outcome"], "reverted");
+
+    // On top of the revert, by a fast-forward, a git commit made two days
+    // ago.
+    let mirror = r.outside.join("mirror.git");
+    let clone = r.outside.join("clone");
+    git(
+        &r.outside,
+        &["init", "-q", "--bare", mirror.to_str().unwrap()],
+        &[],
+    );
+    run(
+        &r.dir,
+        &["git", "export", mirror.to_str().unwrap(), "--ref", "main"],
+        0,
+    );
+    git(
+        &r.outside,
+        &[
+            "clone",
+            "-q",
+            "-b",
+            "main",
+            mirror.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+        &[],
+    );
+    std::fs::write(clone.join("old"), "old\n").unwrap();
+    git(&clone, &["add", "old"], &[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let two_days_ago = format!("{} +0000", now - 2 * 86_400);
+    git(
+        &clone,
+        &["commit", "-q", "-m", "Made two days ago"],
+        &[
+            ("GIT_AUTHOR_DATE", &two_days_ago),
+            ("GIT_COMMITTER_DATE", &two_days_ago),
+        ],
+    );
+    run(&r.dir, &["git", "import", clone.to_str().unwrap()], 0);
+    let shown = run(&r.dir, &["show", "main"], 0);
+    assert_eq!(shown["message"], "Made two days ago\n");
+    assert!(shown["committer"]["seconds"].as_u64().unwrap() <= now - 2 * 86_400);
+
+    // Green again, then broken again: the revert below the old date still
+    // counts, also without verify's own record.
+    assert_eq!(r.verify(&[], 0)["outcome"], "pass");
+    let again = r.land(&[("broken", "again\n")], &[], "Break again");
+    r.forget_record();
+    let second = r.verify(
+        &["--revert", "--reruns", "0", "--max-reverts-per-hour", "1"],
+        4,
+    );
+    assert_eq!(second["outcome"], "refused", "{second}");
+    assert!(id(&second["reason"]).contains("1 revert on main in the last hour"));
+    assert_eq!(r.head(), Some(again));
+}

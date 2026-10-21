@@ -181,8 +181,11 @@ on the same lines is a conflict. `braid verify` lands the reverts it makes
 the same way, with the agent `braid-verify`. Its limits are read from the
 branch, so that a fresh clone keeps them: it refuses to revert a changeset
 that has a `reverts` field and that agent, and counts the reverts of the
-last hour by each one's own committer time, looking a fixed depth down
-the branch. Anyone can write that field and that label: the label is only
+last hour by each one's own committer time, among the last 10,000
+changesets of the branch. Dates are not in order along a branch, since a
+fast-forward keeps the date a changeset was made with and a git commit can
+carry any date, so an old one stops nothing: only the depth bounds the
+walk. Anyone can write that field and that label: the label is only
 ever a reason to refuse. The field also tells bisecting where a culprit
 was reverted later in the range, but verify only acts on that by testing
 the changeset it names, and bisects on after it only if the tests pass

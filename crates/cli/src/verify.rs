@@ -66,11 +66,7 @@ const SCRATCH_PREFIX: &str = "braid-verify-";
 
 /// How many changesets down the branch verify looks for its own reverts of
 /// the last hour, at most.
-const HISTORY_DEPTH: usize = 200;
-
-/// The walk for those reverts stops at the first changeset committed more
-/// than this long, in seconds, before now: a day.
-const HISTORY_AGE: i64 = 86_400;
+const HISTORY_DEPTH: usize = 10_000;
 
 /// The longest record file name made of the branch's name in hex; a longer
 /// name is hashed instead.
@@ -141,9 +137,10 @@ processes others leave behind.
     `braid revert` does. Verify does not revert a merge, nor a revert it
     made (one with a reverts field and the agent braid-verify), nor more
     than --max-reverts-per-hour (3 by default), which it counts by each
-    revert's committer time among the last 200 changesets of the branch
-    (down to one made more than a day before), and in .braid/verify/. The
-    green ref does not move: the next run tests the new head.
+    revert's own committer time among the last 10,000 changesets of the
+    branch, whatever the dates of those between them, and in
+    .braid/verify/. The green ref does not move: the next run tests the new
+    head.
 
 The green ref is local: a fresh clone has none, so give --from there.
 --dry-run runs the tests but moves no ref, records nothing, lands nothing
@@ -373,25 +370,25 @@ fn is_verify_revert(changeset: &Changeset) -> bool {
     extra(changeset, REVERTS).is_some() && extra(changeset, AGENT_FIELD) == Some(AGENT.as_bytes())
 }
 
-/// The reverts verify made on the branch below `tip` that were committed in
-/// the hour before `now`, each by its own committer time. Committer times
-/// do not only grow along a branch (a changeset that landed by a
-/// fast-forward keeps the time it was made), so the walk down first parents
-/// goes on past older changesets: it stops after [`HISTORY_DEPTH`]
-/// changesets, or at the first one committed more than [`HISTORY_AGE`]
-/// before now.
-fn reverts_in_last_hour(repo: &Repo, tip: ObjectId, now: u64) -> Result<HashSet<String>> {
-    let now = i64::try_from(now).unwrap_or(i64::MAX);
+/// The reverts verify made among the `depth` changesets down first parents
+/// from `tip`, that were committed in the hour before `now`, each by its own
+/// committer time. Dates are not in order along a branch (a changeset that
+/// landed by a fast-forward keeps the date it was made with, and a git
+/// commit can carry any date), so an old one stops nothing: only the depth
+/// bounds the walk.
+fn reverts_in_last_hour(
+    repo: &Repo,
+    tip: ObjectId,
+    now: u64,
+    depth: usize,
+) -> Result<HashSet<String>> {
+    let hour_ago = i64::try_from(now).unwrap_or(i64::MAX).saturating_sub(3600);
     let mut found = HashSet::new();
     let mut current = Some(tip);
-    for _ in 0..HISTORY_DEPTH {
+    for _ in 0..depth {
         let Some(id) = current else { break };
         let changeset = braid_engine::read_changeset(repo.store(), id)?;
-        let committed = changeset.committer.seconds;
-        if committed < now.saturating_sub(HISTORY_AGE) {
-            break;
-        }
-        if committed > now.saturating_sub(3600) && is_verify_revert(&changeset) {
+        if changeset.committer.seconds > hour_ago && is_verify_revert(&changeset) {
             found.insert(id.to_hex());
         }
         current = changeset.parents.first().copied();
@@ -1027,7 +1024,7 @@ impl Pass<'_> {
         let path = Record::path(self.repo, self.branch);
         let mut record = Record::load(&path)?;
         let now = now_seconds();
-        let mut recent = reverts_in_last_hour(self.repo, self.tip, now)?;
+        let mut recent = reverts_in_last_hour(self.repo, self.tip, now, HISTORY_DEPTH)?;
         recent.extend(record.in_last_hour(now));
         let refusal = if changeset.parents.len() > 1 {
             Some(format!(
@@ -1393,29 +1390,25 @@ mod tests {
             .unwrap()
         };
         // Down from the tip: a revert by someone else, one of verify's, a
-        // changeset that landed by a fast-forward hours after it was made,
-        // another of verify's below it, one older than an hour, and a base
-        // older than a day, where the walk stops.
-        let base = commit(None, 2 * 86_400, Vec::new());
+        // changeset that landed by a fast-forward two days after it was
+        // made, another of verify's below it, and one older than an hour.
+        let base = commit(None, 3 * 86_400, Vec::new());
         let too_old = commit(Some(base), 2 * 3600, revert_by(AGENT));
         let below = commit(Some(too_old), 30 * 60, revert_by(AGENT));
-        let made_earlier = commit(Some(below), 3 * 3600, Vec::new());
+        let made_earlier = commit(Some(below), 2 * 86_400, Vec::new());
         let recent = commit(Some(made_earlier), 10 * 60, revert_by(AGENT));
         let others = commit(Some(recent), 5 * 60, revert_by("ada"));
         let tip = commit(Some(others), 60, Vec::new());
-        let found = reverts_in_last_hour(&repo, tip, now as u64).unwrap();
+        let found = reverts_in_last_hour(&repo, tip, now as u64, HISTORY_DEPTH).unwrap();
         let expected: HashSet<String> = [below, recent].iter().map(ObjectId::to_hex).collect();
         assert_eq!(found, expected);
 
-        // A revert deeper than the walk goes is not counted.
-        let mut top = commit(Some(tip), 60, revert_by(AGENT));
-        let deep = top;
-        for _ in 0..HISTORY_DEPTH {
-            top = commit(Some(top), 30, Vec::new());
-        }
-        let found = reverts_in_last_hour(&repo, top, now as u64).unwrap();
-        assert!(!found.contains(&deep.to_hex()));
-        assert!(found.is_empty(), "{found:?}");
+        // Only the depth bounds the walk: four changesets down from the tip
+        // stop above `below`, five reach it.
+        let found = reverts_in_last_hour(&repo, tip, now as u64, 4).unwrap();
+        assert_eq!(found, HashSet::from([recent.to_hex()]));
+        let found = reverts_in_last_hour(&repo, tip, now as u64, 5).unwrap();
+        assert_eq!(found, expected);
     }
 
     /// A stand-in for the watchdog: `script`, run by `sh`.

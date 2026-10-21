@@ -380,12 +380,13 @@ braid verify --branch main --revert --json -- cargo test --workspace
 - It never reverts a merge, nor a revert it made, which it tells by the
   revert's `reverts` field and its agent, `braid-verify`, and it lands at
   most three reverts an hour (`--max-reverts-per-hour`), counted by each
-  revert's committer time among the last 200 changesets of the branch (or
-  fewer, down to one made more than a day before). A clone without its
-  local record in `.braid/verify/` keeps both rules, and braid warns
-  anyone else who acts as `braid-verify`. The green ref does not move
-  after a revert: the next pass tests the new head. `--dry-run` reports,
-  changes nothing and does not fetch from a hub.
+  revert's own committer time among the last 10,000 changesets of the
+  branch, whatever the dates of those between them. Both rules are read
+  from the branch, so a clone without verify's local record in
+  `.braid/verify/` follows them too; braid warns anyone else who acts as
+  `braid-verify`. The green ref does not move after a revert: the next
+  pass tests the new head. `--dry-run` reports, changes nothing and does
+  not fetch from a hub.
 - Bisecting tests each changeset as it is. When the first that fails was
   reverted later in the range, verify tests the revert and, if it passes,
   bisects again after it. A changeset whose files cannot be written on this
