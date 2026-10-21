@@ -23,7 +23,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -65,6 +65,15 @@ const SCRATCH_PREFIX: &str = "braid-verify-";
 /// hour, at most.
 const HISTORY_LIMIT: usize = 10_000;
 
+/// What the watchdog says once it runs, before braid starts any test. The
+/// number changes with the protocol, so that another braid's watchdog is
+/// never taken for this one's.
+const READY: &[u8] = b"braid verify watchdog 2 ready\n";
+
+/// How long braid waits for the watchdog to say it runs.
+#[cfg(unix)]
+const READY_WAIT: Duration = Duration::from_secs(30);
+
 /// The green ref of `branch`: the newest changeset of it that passed.
 pub(crate) fn green_ref(branch: &str) -> String {
     format!("braid/green/{branch}")
@@ -93,10 +102,16 @@ container or as a separate user when the code it tests is not trusted.
 
 A run fails when the command exits with a status other than 0, is killed,
 or runs longer than --timeout (10m by default; s, m and h are the units).
-The command runs in a process group of its own: when it exits or times
-out, the group is killed, and so are processes it started that are still
-in it (one that left the group, as a daemon does, is not). If braid itself
-is stopped, a watchdog process kills the group and removes the directory.
+On Unix the command runs in a process group of its own: when it exits or
+times out, the group is killed, and so are processes it started that are
+still in it (one that left the group, as a daemon does, is not). A watchdog
+process, started before the command, kills the group and removes the
+directory if braid is killed or exits while the tests run; when the
+watchdog cannot start, or stops, the run fails. Elsewhere (Windows is not
+verified) only the command itself is killed, and nothing watches braid. In
+a container, run braid under an init such as tini (docker run --init), not
+as PID 1, which gets no default signal handling and must reap the
+processes others leave behind.
 
   - The head is the green changeset already: pass, and nothing runs.
   - The tests pass: the green ref moves to the head, in an operation of
@@ -422,7 +437,21 @@ impl Tester<'_> {
         Ok(Some(passed))
     }
 
+    /// Runs the command in `dir` under a watchdog, started first: from then
+    /// on, however braid ends, the directory goes and the tests stop.
     fn run_in(&self, changeset: ObjectId, dir: &Path) -> Result<Option<RunEnd>> {
+        let mut watchdog = Watchdog::start(dir)?;
+        let end = self.watched(changeset, dir, &mut watchdog);
+        watchdog.done();
+        end
+    }
+
+    fn watched(
+        &self,
+        changeset: ObjectId,
+        dir: &Path,
+        watchdog: &mut Watchdog,
+    ) -> Result<Option<RunEnd>> {
         match braid_wc::materialize(self.repo.store(), changeset, dir) {
             Ok(_) => {}
             Err(err @ (braid_wc::Error::Unsafe { .. } | braid_wc::Error::Collision { .. })) => {
@@ -464,29 +493,39 @@ impl Tester<'_> {
         let mut child = command
             .spawn()
             .with_context(|| format!("cannot run {}", program.to_string_lossy()))?;
-        let watchdog = match Watchdog::start(&child, dir) {
-            Ok(watchdog) => watchdog,
-            Err(err) => {
-                kill_group(&mut child);
-                let _ = child.wait();
-                return Err(err);
-            }
-        };
-        let end = self.wait(&mut child);
-        watchdog.done();
-        end.map(Some)
+        if let Err(err) = watchdog.watch(&child) {
+            kill_group(&mut child);
+            let _ = child.wait();
+            return Err(err);
+        }
+        self.wait(&mut child, watchdog).map(Some)
     }
 
     /// Waits for the command, at most until the timeout, then kills its
-    /// group: whatever it left running, or all of it on a timeout.
-    fn wait(&self, child: &mut Child) -> Result<RunEnd> {
+    /// group: whatever it left running, or all of it on a timeout. Should
+    /// the watchdog stop meanwhile, or the wait fail, the group is killed
+    /// too, and the run fails.
+    fn wait(&self, child: &mut Child, watchdog: &mut Watchdog) -> Result<RunEnd> {
         let deadline = Instant::now() + self.timeout;
         loop {
-            if exited(child)? {
+            let gone = match exited(child) {
+                Ok(gone) => gone,
+                Err(err) => {
+                    kill_group(child);
+                    let _ = child.wait();
+                    return Err(err.context("cannot wait for the tests; they were stopped"));
+                }
+            };
+            if gone {
                 // The command is not reaped yet, so its group's id cannot
                 // be anyone else's.
                 kill_group(child);
                 return Ok(RunEnd::Exited(child.wait()?));
+            }
+            if watchdog.stopped() {
+                kill_group(child);
+                let _ = child.wait();
+                bail!("verify's watchdog stopped while the tests ran, so they were stopped too");
             }
             let now = Instant::now();
             if now >= deadline {
@@ -520,63 +559,146 @@ fn exited(child: &mut Child) -> Result<bool> {
 }
 
 /// A process that kills a test run's group, and removes its directory,
-/// if braid goes away while it runs: it waits for its standard input to
-/// close, which happens however braid ends, and does nothing when braid
-/// said `done` first.
-struct Watchdog(Option<Child>);
+/// if braid goes away while it runs. Braid starts it before the test, and
+/// starts no test until it says [`READY`]; then tells it the test's process
+/// group, a `group <id>` line on its standard input, and at the end `done`.
+/// Its standard input closes however braid ends: without `done` before,
+/// the watchdog kills the group and removes the directory. On systems other
+/// than Unix there is none.
+struct Watchdog {
+    child: Option<Child>,
+}
 
 impl Watchdog {
+    /// Starts the watchdog of a run in `dir`, from this very braid.
+    fn start(dir: &Path) -> Result<Watchdog> {
+        #[cfg(unix)]
+        {
+            let mut command = Command::new(own_exe()?);
+            command.arg(WATCHDOG).arg(dir);
+            Watchdog::spawn(command, READY_WAIT)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = dir;
+            Ok(Watchdog { child: None })
+        }
+    }
+
+    /// Starts `command` as the watchdog, out of braid's process group, and
+    /// waits up to `wait` for it to say [`READY`].
     #[cfg(unix)]
-    fn start(child: &Child, dir: &Path) -> Result<Watchdog> {
+    fn spawn(mut command: Command, wait: Duration) -> Result<Watchdog> {
+        use std::io::BufReader;
         use std::os::unix::process::CommandExt;
-        let exe = std::env::current_exe().context("cannot find the braid command")?;
-        let watchdog = Command::new(exe)
-            .arg(WATCHDOG)
-            .arg(child.id().to_string())
-            .arg(dir)
+        let mut child = command
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             // Out of braid's group, so that a Ctrl-C meant for braid does
             // not stop it too.
             .process_group(0)
             .spawn()
-            .context("cannot start verify's watchdog")?;
-        Ok(Watchdog(Some(watchdog)))
+            .context("cannot start verify's watchdog, so the tests did not run")?;
+        let said = match child.stdout.take() {
+            Some(stdout) => {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let mut line = Vec::new();
+                    let read = BufReader::new(stdout).read_until(b'\n', &mut line);
+                    let _ = sender.send(read.map(|_| line));
+                });
+                receiver.recv_timeout(wait)
+            }
+            None => Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        };
+        let why = match said {
+            Ok(Ok(line)) if line == READY => return Ok(Watchdog { child: Some(child) }),
+            Ok(Ok(line)) if line.is_empty() => "it ended without a word".to_owned(),
+            Ok(Ok(line)) => format!("it said {:?}", String::from_utf8_lossy(&line)),
+            Ok(Err(err)) => format!("it could not be read: {err}"),
+            Err(_) => format!("it said nothing for {wait:?}"),
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!(
+            "verify's watchdog did not start ({why}), so the tests did not run; is the braid command being replaced, or another braid in its place?"
+        )
     }
 
-    #[cfg(not(unix))]
-    fn start(_child: &Child, _dir: &Path) -> Result<Watchdog> {
-        Ok(Watchdog(None))
+    /// Tells the watchdog the process group of `test`, which runs in one of
+    /// its own.
+    fn watch(&mut self, test: &Child) -> Result<()> {
+        let Some(child) = &mut self.child else {
+            return Ok(());
+        };
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("verify's watchdog cannot be told what to watch")?;
+        writeln!(stdin, "group {}", test.id())
+            .and_then(|()| stdin.flush())
+            .context("verify's watchdog went away, so the tests were stopped")
+    }
+
+    /// Whether the watchdog stopped, which it should not do before `done`.
+    fn stopped(&mut self) -> bool {
+        match &mut self.child {
+            Some(child) => !matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
     }
 
     /// Tells the watchdog the run is over, and waits for it.
     fn done(mut self) {
-        if let Some(mut watchdog) = self.0.take() {
-            if let Some(mut stdin) = watchdog.stdin.take() {
+        if let Some(mut child) = self.child.take() {
+            if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(b"done\n");
             }
-            let _ = watchdog.wait();
+            let _ = child.wait();
         }
     }
 }
 
-/// The watchdog of one test run, as [`Watchdog`] starts it: `group` is the
-/// test's process group, `dir` its scratch directory.
-pub(crate) fn watchdog(group: &str, dir: &Path) -> Result<ExitCode> {
-    let mut said = Vec::new();
-    let _ = io::stdin().lock().read_to_end(&mut said);
-    if said.starts_with(b"done") {
-        return Ok(ExitCode::SUCCESS);
-    }
-    // Braid went away while the tests ran.
-    #[cfg(unix)]
-    if let Some(pid) = group
-        .parse::<i32>()
-        .ok()
-        .filter(|group| *group > 1)
-        .and_then(rustix::process::Pid::from_raw)
+/// The braid command to start the watchdog with: on Linux this very binary,
+/// through `/proc/self/exe`, even if its file was replaced or removed since
+/// it started; elsewhere the file it was started from.
+#[cfg(unix)]
+fn own_exe() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
     {
+        let this = PathBuf::from("/proc/self/exe");
+        if this.exists() {
+            return Ok(this);
+        }
+    }
+    std::env::current_exe().context(
+        "cannot find the braid command to start verify's watchdog, so the tests did not run",
+    )
+}
+
+/// The watchdog of one test run in `dir`, as [`Watchdog`] starts it.
+pub(crate) fn watchdog(dir: &Path) -> Result<ExitCode> {
+    {
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(READY).and_then(|()| out.flush());
+    }
+    let mut group = None;
+    for line in io::stdin().lock().split(b'\n') {
+        let Ok(line) = line else { break };
+        if line == b"done" {
+            return Ok(ExitCode::SUCCESS);
+        }
+        if let Some(id) = line.strip_prefix(b"group ") {
+            group = std::str::from_utf8(id)
+                .ok()
+                .and_then(|id| id.parse::<i32>().ok())
+                .filter(|id| *id > 1);
+        }
+    }
+    // Braid went away while the tests ran, or before they started.
+    #[cfg(unix)]
+    if let Some(pid) = group.and_then(rustix::process::Pid::from_raw) {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
     #[cfg(not(unix))]
@@ -1188,6 +1310,99 @@ mod tests {
         fs::write(&path, "{").unwrap();
         let err = format!("{:#}", Record::load(&path).unwrap_err());
         assert!(err.contains("delete it"), "{err}");
+    }
+
+    /// A stand-in for the watchdog: `script`, run by `sh`.
+    #[cfg(unix)]
+    fn fake_watchdog(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_test_runs_unless_the_watchdog_says_it_runs() {
+        let quick = Duration::from_millis(300);
+        // An older braid, which has no such command, or another program.
+        let err = Watchdog::spawn(fake_watchdog("echo 'no such command' >&2; exit 2"), quick)
+            .err()
+            .unwrap();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("did not start") && err.contains("without a word"),
+            "{err}"
+        );
+        // One that answers with another protocol.
+        let older = fake_watchdog("echo 'braid verify watchdog 1 ready'; exec cat");
+        let err = format!("{:#}", Watchdog::spawn(older, quick).err().unwrap());
+        assert!(err.contains("it said"), "{err}");
+        // One that never answers: it echoes its input, and gets none.
+        let silent = fake_watchdog("exec cat");
+        let err = format!("{:#}", Watchdog::spawn(silent, quick).err().unwrap());
+        assert!(err.contains("said nothing"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_watchdog_is_told_the_group_and_when_the_run_is_over() {
+        let temp = tempfile::tempdir().unwrap();
+        let heard = temp.path().join("heard");
+        let script = format!(
+            "echo '{}'; cat > '{}'",
+            String::from_utf8_lossy(READY).trim_end(),
+            heard.display()
+        );
+        let mut watchdog =
+            Watchdog::spawn(fake_watchdog(&script), Duration::from_secs(10)).unwrap();
+        let mut test = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        watchdog.watch(&test).unwrap();
+        assert!(!watchdog.stopped());
+        watchdog.done();
+        test.wait().unwrap();
+        assert_eq!(
+            fs::read_to_string(&heard).unwrap(),
+            format!("group {}\ndone\n", test.id())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_stops_when_its_watchdog_does() {
+        use std::os::unix::process::CommandExt;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repo::init(temp.path()).unwrap();
+        let tester = Tester {
+            repo: &repo,
+            branch: "main",
+            command: &[],
+            timeout: Duration::from_secs(60),
+            reruns: 0,
+            runs: 0,
+        };
+        // It answers, hears the group, and stops.
+        let mut watchdog = Watchdog::spawn(
+            fake_watchdog(&format!(
+                "echo '{}'; read line; exit 0",
+                String::from_utf8_lossy(READY).trim_end()
+            )),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let mut test = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        watchdog.watch(&test).unwrap();
+        let err = match tester.wait(&mut test, &mut watchdog) {
+            Ok(_) => panic!("the run went on without its watchdog"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains("watchdog stopped"), "{err}");
+        // The test went with it, and was reaped.
+        assert!(test.try_wait().unwrap().is_some());
+        watchdog.done();
     }
 
     #[test]

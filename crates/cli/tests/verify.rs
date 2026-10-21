@@ -673,3 +673,74 @@ fn an_error_after_the_revert_landed_keeps_it_in_the_report() {
     let shown = run(&r.dir, &["show", "main"], 0);
     assert_eq!(shown["agent"], "braid-verify");
 }
+
+/// Starts braid's own watchdog for `dir`, as verify does, and reads its
+/// handshake.
+#[cfg(unix)]
+fn start_watchdog(dir: &Path) -> std::process::Child {
+    use std::io::{BufRead, BufReader};
+    let mut watchdog = Command::new(env!("CARGO_BIN_EXE_braid"))
+        .arg("__verify-watchdog")
+        .arg(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(watchdog.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "braid verify watchdog 2 ready\n");
+    watchdog
+}
+
+#[cfg(unix)]
+#[test]
+fn the_watchdog_stops_the_group_and_removes_the_copy_unless_told_done() {
+    use std::io::Write;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    // Directories named as verify names its copies, where the watchdog
+    // looks for them.
+    let base = std::env::temp_dir();
+    let dir = |n: u32| {
+        let dir = base.join(format!("braid-verify-test-{}-{n}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("file"), "x").unwrap();
+        dir
+    };
+    // A process of this test's own, in a group of its own, as a test run is.
+    let sleeper = || {
+        Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    };
+
+    // Braid goes away: its end of the watchdog's input closes.
+    let gone = dir(1);
+    let mut test = sleeper();
+    let mut watchdog = start_watchdog(&gone);
+    let mut input = watchdog.stdin.take().unwrap();
+    writeln!(input, "group {}", test.id()).unwrap();
+    drop(input);
+    watchdog.wait().unwrap();
+    assert_eq!(test.wait().unwrap().signal(), Some(9));
+    assert!(!gone.exists());
+
+    // The run ended and braid said so: nothing is touched.
+    let kept = dir(2);
+    let mut test = sleeper();
+    let mut watchdog = start_watchdog(&kept);
+    let mut input = watchdog.stdin.take().unwrap();
+    writeln!(input, "group {}\ndone", test.id()).unwrap();
+    drop(input);
+    watchdog.wait().unwrap();
+    assert!(test.try_wait().unwrap().is_none());
+    assert!(kept.join("file").is_file());
+    // This test's own process, by its id.
+    test.kill().unwrap();
+    test.wait().unwrap();
+    std::fs::remove_dir_all(&kept).unwrap();
+}

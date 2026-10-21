@@ -327,8 +327,6 @@ enum Command {
     /// Kill a test run's process group when verify goes away (internal).
     #[command(name = verify::WATCHDOG, hide = true)]
     VerifyWatchdog {
-        /// The process group of the test run.
-        group: String,
         /// The run's scratch directory.
         dir: PathBuf,
     },
@@ -536,7 +534,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Change { action } => work::change(cli, action),
         Command::Revert(args) => revert::revert(cli, args),
         Command::Verify(args) => verify::verify(cli, args),
-        Command::VerifyWatchdog { group, dir } => verify::watchdog(group, dir),
+        Command::VerifyWatchdog { dir } => verify::watchdog(dir),
     }
 }
 
