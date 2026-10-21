@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 UtopiaIA
-"""Exports the site's "How it works" diagram for the README, in English, as
-standalone SVGs: wide, and tall for narrow screens, each dark and light.
+"""Exports the site's wide "How it works" diagram for the README, in
+English, as standalone SVGs, dark and light.
 
 usage: diagram.py <site/index.html> <site/site.css> <out dir>
+
+The site's tall diagram, for narrow screens, stays on the site: for a
+reader who has chosen a theme, GitHub rewrites the colour-scheme media
+queries of a README's <picture>, and a source that also tests the screen's
+width then shows on wide screens too.
 
 The site's diagram tells the scene of crates/cli/tests/three_agents.rs, where
 c lands as a fast-forward, a is rebased with 1 path merged, and b conflicts.
@@ -24,7 +29,7 @@ import sys
 
 SITE, CSS, OUT = sys.argv[1:4]
 ROUND = {"a": "b", "b": "c", "c": "a"}
-SIZES = {"wide": (1000, 408), "tall": (360, 836)}
+WIDTH, HEIGHT = 1000, 408
 TITLE = ("How braid works: workspaces commit in parallel over one shared store, "
          "land on main in turn, and git sync sends main to any git remote")
 
@@ -71,38 +76,34 @@ def relabel(svg):
     svg, n = re.subn(r"(>workspace(?: |</tspan><tspan [^>]*>))([abc])<",
                      lambda m: f"{m[1]}{ROUND[m[2]]}<", svg)
     assert n == 3, n
-    svg, wide = re.subn(r">rebased · 1 path merged<", ">rebased<", svg)
-    svg, tall = re.subn(r"<tspan [^>]*>1 path</tspan><tspan [^>]*>merged</tspan>", "", svg)
-    assert wide + tall == 1, (wide, tall)
+    svg, n = re.subn(r">rebased · 1 path merged<", ">rebased<", svg)
+    assert n == 1, n
     return svg
 
 
 def main():
     html = open(SITE, encoding="utf-8").read()
     css = open(CSS, encoding="utf-8").read()
-    themes = tokens(css)
-    for shape, (width, height) in SIZES.items():
-        svg = re.search(rf'<svg class="dgm dgm-{shape}".*?</svg>', html, re.S).group(0)
-        svg = relabel(english(svg))
-        svg, n = re.subn(r"^<svg [^>]*>", "", svg)
-        assert n == 1
-        used = set(re.findall(r'class="([^"]+)"', svg))
-        used = {c for group in used for c in group.split()}
-        suffix = "" if shape == "wide" else "-tall"
-        for theme, values in themes.items():
-            out = (
-                "<!-- SPDX-License-Identifier: Apache-2.0\n     Copyright (c) 2026 UtopiaIA\n"
-                "     Made by scripts/demos/diagram.py from the site's diagram: edit that, not this. -->\n"
-                f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-                f'width="{width}" height="{height}" role="img" aria-labelledby="dgm-title">\n'
-                f'<title id="dgm-title">{TITLE}</title>\n'
-                f"<style>\n{rules(css, values, used)}\n</style>\n"
-                f"{svg}\n"
-            )
-            name = os.path.join(OUT, f"how-it-works{suffix}-{theme}.svg")
-            with open(name, "w", encoding="utf-8") as f:
-                f.write(out)
-            print(name, len(out.encode()), "bytes")
+    svg = re.search(r'<svg class="dgm dgm-wide".*?</svg>', html, re.S).group(0)
+    svg = relabel(english(svg))
+    svg, n = re.subn(r"^<svg [^>]*>", "", svg)
+    assert n == 1
+    used = set(re.findall(r'class="([^"]+)"', svg))
+    used = {c for group in used for c in group.split()}
+    for theme, values in tokens(css).items():
+        out = (
+            "<!-- SPDX-License-Identifier: Apache-2.0\n     Copyright (c) 2026 UtopiaIA\n"
+            "     Made by scripts/demos/diagram.py from the site's diagram: edit that, not this. -->\n"
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {HEIGHT}" '
+            f'width="{WIDTH}" height="{HEIGHT}" role="img" aria-labelledby="dgm-title">\n'
+            f'<title id="dgm-title">{TITLE}</title>\n'
+            f"<style>\n{rules(css, values, used)}\n</style>\n"
+            f"{svg}\n"
+        )
+        name = os.path.join(OUT, f"how-it-works-{theme}.svg")
+        with open(name, "w", encoding="utf-8") as f:
+            f.write(out)
+        print(name, len(out.encode()), "bytes")
 
 
 main()

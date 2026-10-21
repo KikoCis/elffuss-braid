@@ -14,11 +14,11 @@ are left out to keep the banner short: the GIF has them all. A recording
 whose story changed stops it, rather than giving a banner that no longer
 matches.
 
-It writes, each one a final frame that CSS animates in once where the
-reader allows motion:
-
-  hero-dark.svg, hero-light.svg              1280 wide
-  hero-phone-dark.svg, hero-phone-light.svg  720 wide, for narrow screens
+It writes hero-dark.svg and hero-light.svg, 1280 wide, each a final frame
+that CSS animates in once where the reader allows motion. There is no
+narrow variant: for a reader who has chosen a theme, GitHub rewrites the
+colour-scheme media queries of a README's <picture>, and a source that
+also tests the screen's width then shows on wide screens too.
 
 The terminal stays dark in both themes, as on the site. No scripts, no
 external fonts or images: GitHub shows these files through <img>.
@@ -28,7 +28,6 @@ import json
 import os
 import re
 import sys
-import textwrap
 
 SITE, SOURCE, OUT = sys.argv[1:4]
 
@@ -62,16 +61,15 @@ THEMES = {
 TERM = {"bg": "#0e0f18", "text": "#eae8f2", "dim": "#b3afce", "muted": "#7f7ca0",
         "exit": "#e779cf", "agent-a": "#c8a06a", "agent-b": "#54dcc6", "agent-c": "#8272ff"}
 
-# Each layout: canvas width, side margin, logo scale and place, the URL, the
-# tagline (font size, baselines, one line or three), and the terminal (top,
-# font size, line height, and the column a line wraps at; 0 for none).
-LAYOUTS = {
-    "": dict(width=1280, margin=48, logo=(.75, 24), url=(22, 70),
-             tagline=(50, [158], False), term=(194, 24, 35, 0)),
-    "-phone": dict(width=720, margin=32, logo=(.7, 24), url=(20, 66),
-                   tagline=(58, [166, 234, 302], True), term=(338, 24, 34, 42)),
-}
-TAGLINE = ["Many agents.", "One main.", "No retry loop."]
+# The canvas and its side margin, the logo's scale and top, the font size
+# and baseline of the URL and of the tagline, and the terminal's top, font
+# size and line height.
+WIDTH, MARGIN = 1280, 48
+LOGO_SCALE, LOGO_TOP = .75, 24
+URL_SIZE, URL_BASE = 22, 70
+TAG_SIZE, TAG_BASE = 50, 158
+TERM_TOP, SIZE, STEP = 194, 24, 35
+TAGLINE = "Many agents. One main. No retry loop."
 
 
 def transcript(path):
@@ -101,21 +99,6 @@ def transcript(path):
     return lines
 
 
-def wrap(line, width):
-    """Breaks a line at word boundaries, after a comma or a semicolon when
-    one comes early enough; a comment goes on as a comment, the rest two
-    spaces in."""
-    if not width or len(line) <= width:
-        return [line]
-    if line.startswith("# "):
-        return ["# " + part for part in textwrap.wrap(line[2:], width - 2)]
-    cut = max(line.rfind(", ", 0, width), line.rfind("; ", 0, width))
-    if cut > 0:
-        return [line[:cut + 1]] + wrap("  " + line[cut + 2:], width)
-    return textwrap.wrap(line, width, subsequent_indent="  ",
-                         break_long_words=False, break_on_hyphens=False)
-
-
 def colours(line):
     """The coloured runs of one line: a prompt, a note, the exit status or
     braid's output."""
@@ -141,27 +124,20 @@ def logo_parts():
     return defs, paths
 
 
-def build(theme, layout, lines, defs, paths):
-    t, L = THEMES[theme], LAYOUTS[layout]
-    width, margin = L["width"], L["margin"]
-    scale, logo_top = L["logo"]
-    url_size, url_base = L["url"]
-    tag_size, tag_bases, stacked = L["tagline"]
-    term_top, size, step, columns = L["term"]
-
-    shown = [part for line in lines for part in wrap(line, columns)]
-    first = term_top + 44
-    term_h = 44 + step * (len(shown) - 1) + 24
-    height = term_top + term_h + (40 if not layout else 28)
-    term_x, term_w = margin - (0 if not layout else 8), width - 2 * margin + (0 if not layout else 16)
+def build(theme, lines, defs, paths):
+    t = THEMES[theme]
+    first = TERM_TOP + 44
+    term_h = 44 + STEP * (len(lines) - 1) + 24
+    height = TERM_TOP + term_h + 40
+    term_x, term_w = MARGIN, WIDTH - 2 * MARGIN
     text_x = term_x + 34
 
     out = []
     w = out.append
     w("<!-- SPDX-License-Identifier: Apache-2.0\n     Copyright (c) 2026 UtopiaIA\n"
       "     Made by scripts/demos/hero.py from the agents recording: edit that, not this. -->")
-    w(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-      f'width="{width}" height="{height}" role="img" aria-labelledby="hero-title hero-desc">')
+    w(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
+      f'width="{WIDTH}" height="{height}" role="img" aria-labelledby="hero-title hero-desc">')
     w("<title id=\"hero-title\">Elffuss Braid: Many agents. One main. No retry loop.</title>")
     w("<desc id=\"hero-desc\">Three agents land on main in turn: agent-a as a fast-forward, "
       "agent-b rebased onto it, and agent-c with a conflict, so main did not move and braid "
@@ -171,10 +147,10 @@ def build(theme, layout, lines, defs, paths):
     w(f".s {{ fill: none; stroke-width: 9.5; stroke-linecap: round; stroke-linejoin: round; "
       f"stroke-dasharray: 1 2; stroke-dashoffset: 0; }}")
     w(f".sa {{ stroke: {sa}; }} .sb {{ stroke: {sb}; }} .sc {{ stroke: {sc}; }}")
-    w(f".tag {{ font-family: {SERIF}; font-size: {tag_size}px; font-weight: 600; "
+    w(f".tag {{ font-family: {SERIF}; font-size: {TAG_SIZE}px; font-weight: 600; "
       f"letter-spacing: -0.3px; fill: {t['tagline']}; }}")
-    w(f".url {{ font-family: {MONO}; font-size: {url_size}px; letter-spacing: 1px; fill: {t['url']}; }}")
-    w(f".ln {{ font-family: {MONO}; font-size: {size}px; white-space: pre; }}")
+    w(f".url {{ font-family: {MONO}; font-size: {URL_SIZE}px; letter-spacing: 1px; fill: {t['url']}; }}")
+    w(f".ln {{ font-family: {MONO}; font-size: {SIZE}px; white-space: pre; }}")
     w("/* plays once, then holds: the last frame is the file as written */")
     w("@media (prefers-reduced-motion: no-preference) {")
     w("  .s { animation: draw 1.5s cubic-bezier(.22, .61, .36, 1) both; }")
@@ -189,41 +165,39 @@ def build(theme, layout, lines, defs, paths):
     w("</style>")
 
     w("<defs>")
-    w(f'<clipPath id="hero-card"><rect width="{width}" height="{height}" rx="24"/></clipPath>')
+    w(f'<clipPath id="hero-card"><rect width="{WIDTH}" height="{height}" rx="24"/></clipPath>')
     for i, (colour, opacity, cx, cy, r) in enumerate(t["glows"]):
         w(f'<radialGradient id="hero-glow{i}" cx="{cx}" cy="{cy}" r="{r}">'
           f'<stop offset="0" stop-color="{colour}" stop-opacity="{opacity}"/>'
           f'<stop offset="1" stop-color="{colour}" stop-opacity="0"/></radialGradient>')
     w("</defs>")
     w('<g clip-path="url(#hero-card)">')
-    w(f'<rect width="{width}" height="{height}" fill="{t["ground"]}"/>')
+    w(f'<rect width="{WIDTH}" height="{height}" fill="{t["ground"]}"/>')
     for i in range(len(t["glows"])):
-        w(f'<rect width="{width}" height="{height}" fill="url(#hero-glow{i})"/>')
+        w(f'<rect width="{WIDTH}" height="{height}" fill="url(#hero-glow{i})"/>')
     w("</g>")
-    w(f'<rect x=".5" y=".5" width="{width - 1}" height="{height - 1}" rx="23.5" fill="none" '
+    w(f'<rect x=".5" y=".5" width="{WIDTH - 1}" height="{height - 1}" rx="23.5" fill="none" '
       f'stroke="{t["edge"]}"/>')
 
     # The logo's strands start 17 units in, counting their round caps.
-    w(f'<g transform="translate({margin - 17 * scale:.2f} {logo_top}) scale({scale})">')
+    w(f'<g transform="translate({MARGIN - 17 * LOGO_SCALE:.2f} {LOGO_TOP}) scale({LOGO_SCALE})">')
     w(defs)
     w(paths)
     w("</g>")
-    w(f'<text class="url" x="{width - margin}" y="{url_base}" text-anchor="end">braid.elffuss.com</text>')
-    words = TAGLINE if stacked else [" ".join(TAGLINE)]
-    for base, text in zip(tag_bases, words):
-        w(f'<text class="tag" x="{margin}" y="{base}">{html.escape(text)}</text>')
+    w(f'<text class="url" x="{WIDTH - MARGIN}" y="{URL_BASE}" text-anchor="end">braid.elffuss.com</text>')
+    w(f'<text class="tag" x="{MARGIN}" y="{TAG_BASE}">{html.escape(TAGLINE)}</text>')
 
     w('<g class="term">')
-    w(f'<rect x="{term_x}" y="{term_top}" width="{term_w}" height="{term_h}" rx="16" '
+    w(f'<rect x="{term_x}" y="{TERM_TOP}" width="{term_w}" height="{term_h}" rx="16" '
       f'fill="{TERM["bg"]}" stroke="{t["term_edge"]}"/>')
     for i, colour in enumerate((TERM["agent-a"], TERM["agent-b"], TERM["agent-c"])):
-        w(f'<rect x="{term_x + 1 + 3 * i}" y="{term_top + 22}" width="3" height="{term_h - 44}" '
+        w(f'<rect x="{term_x + 1 + 3 * i}" y="{TERM_TOP + 22}" width="3" height="{term_h - 44}" '
           f'fill="{colour}"/>')
     w("</g>")
-    for i, line in enumerate(shown):
+    for i, line in enumerate(lines):
         runs = "".join(f'<tspan fill="{TERM[c]}">{html.escape(s, quote=False)}</tspan>'
                        for s, c in colours(line))
-        w(f'<text class="ln" x="{text_x}" y="{first + i * step}" xml:space="preserve" '
+        w(f'<text class="ln" x="{text_x}" y="{first + i * STEP}" xml:space="preserve" '
           f'style="animation-delay: {1.1 + .22 * i:.2f}s">{runs}</text>')
     w("</svg>")
     return "\n".join(out) + "\n"
@@ -232,13 +206,12 @@ def build(theme, layout, lines, defs, paths):
 def main():
     lines = transcript(SOURCE)
     defs, paths = logo_parts()
-    for layout in LAYOUTS:
-        for theme in THEMES:
-            name = os.path.join(OUT, f"hero{layout}-{theme}.svg")
-            svg = build(theme, layout, lines, defs, paths)
-            with open(name, "w", encoding="utf-8") as f:
-                f.write(svg)
-            print(name, len(svg.encode()), "bytes")
+    for theme in THEMES:
+        name = os.path.join(OUT, f"hero-{theme}.svg")
+        svg = build(theme, lines, defs, paths)
+        with open(name, "w", encoding="utf-8") as f:
+            f.write(svg)
+        print(name, len(svg.encode()), "bytes")
 
 
 main()

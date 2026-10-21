@@ -1,7 +1,6 @@
 <picture>
-  <source media="(max-width: 1011px) and (prefers-color-scheme: dark)" srcset="docs/assets/hero-phone-dark.svg">
-  <source media="(max-width: 1011px)" srcset="docs/assets/hero-phone-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.svg">
   <img src="docs/assets/hero-light.svg" width="100%" alt="Elffuss Braid: many agents, one main, no retry loop. Under it, a terminal shows three agents landing on main in turn: agent-a lands as a fast-forward, agent-b is rebased onto it, and agent-c, which changed the same line of shipping.toml as agent-a, gets a conflict, so main did not move and braid exits with status 2.">
 </picture>
 
@@ -44,13 +43,13 @@ how far along that is.
 | A changeset lists the files changed against its first parent | The same, plus the root tree id; the bytes are [frozen](docs/spec/format-v1.md) | ✅ done |
 | Data is content-addressed and never changes, so any cache can serve it | BLAKE3 ids; BraidHub serves every object by id as immutable | ✅ done |
 | Commits take no lock, only moving a branch is serial, and the server does the rebases | Agents commit in parallel; `braid land` rebases path by path onto whatever landed first, in one short step taken in turn, locally or on BraidHub | ✅ done |
-| A commit costs what it changes, not what the repository weighs | Landing rebases only the paths a change touches, and `braid change create` needs no working copy; but `braid commit` scans the whole working copy, and at the last measurement was slower than git on large trees ([measured](#measured-against-git)) | partly |
-| Derived data for blame, path history and ancestry, computed from the parents | Generation numbers, skip pointers, changed-path filters and blame records, computed once and kept (`braid derive`); BraidHub serves history and diffs, not blame | ✅ done locally |
+| A commit costs what it changes, not what the repository weighs | Landing rebases only the paths a change touches, and `braid change create` needs no working copy; but `braid commit` scans the whole working copy by default (given paths, only those), and at the last measurement was slower than git on large trees ([measured](#measured-against-git)) | partly |
+| Derived data for blame, path history and ancestry, computed from the parents | Generation numbers, skip pointers and changed-path filters, which `braid derive` can compute ahead of time, and blame records, which `braid blame` computes per file, all kept in the store; BraidHub serves history and diffs, not blame | ✅ done locally |
 | Every query is an API, and the working copy is optional | `--json` on every command; `braid hub show`, `ls`, `cat`, `log` and `diff` read a repository with no clone; `braid change create --land` writes with no checkout | first version |
-| Sparse and virtualized checkouts | `braid hub clone --paths` brings only the trees under some paths; a virtual file system is planned (milestone 7) | first version |
+| Sparse and virtualized checkouts | `braid hub clone --paths` fetches only the trees under some paths, with no working copy (`cat-object`, `log` and `change create --land` work there); no sparse working copy yet; a virtual file system is planned (milestone 7) | partly |
 | The daemon, the caches and the server answer the same requests | BraidHub is the server; a per-machine daemon and cache tiers are planned (milestones 6 and 7) | planned |
-| No merge queue: test after merging, bisect, revert | [`braid verify --revert`](#keeping-main-green) bisects to the changeset that broke the tests and lands its revert | ✅ new in 0.1.1 |
-| Concurrent changes can conflict, and agents fix them | A conflict comes back as data, with the command to run `next`, and `main` does not move; braid has no resolver of its own | ✅ done |
+| A proper merge queue doesn't make much sense at agent scale; invest in post-merge testing instead, and automate bisect and revert | [`braid verify --revert`](#keeping-main-green) bisects to the changeset that broke the tests and lands its revert | ✅ new in 0.1.1 |
+| Concurrent changes can conflict, and agents fix them | A conflict comes back as data, with the command to run `next`, and `main` does not move; braid does not settle conflicts itself: the agent edits the files (`braid resolve` only marks them settled) | ✅ done |
 | Hermetic simulations and fuzzing | Deterministic simulation of agents landing at once, with injected faults; crash and power-loss tests; five fuzz targets | ✅ done |
 | Permissions per directory, semantic approval rules, monitoring agents ("superfans") | BraidHub's permissions are per repository, and its change requests take reviews and approvals | not in braid |
 | Clients are always online | Braid works offline on one machine; BraidHub is the authority when several machines share a repository | no, by design |
@@ -58,7 +57,8 @@ how far along that is.
 ## Three agents, one main
 
 Three agents change a small shop at once, each in a workspace of its own:
-no index to fight over, no lock. Then they land on `main`, in turn.
+no shared index, no repository-wide lock. Then they land on `main`, in
+turn.
 
 ![Three agents commit at the same time, each in its own workspace, and land on main in turn: the first is a fast-forward, the second is rebased onto it, and the third changed the same line as the first, so main does not move and braid reports the conflict with exit status 2](docs/assets/demo-agents.gif)
 
@@ -126,7 +126,7 @@ Run `braid --agent agent-c --workspace agent-c update` to bring the conflicts in
 <details>
 <summary>The same conflict as an agent reads it, with --json</summary>
 
-`braid land --json`, abridged:
+`braid land --workspace agent-c --agent agent-c --json`, abridged:
 
 ```json
 {
@@ -145,9 +145,10 @@ Run `braid --agent agent-c --workspace agent-c update` to bring the conflicts in
 ```
 
 `base` is what both sides started from, `branch` what `main` holds now and
-`workspace` the agent's own change; lines count from 0, and `end` is left
-out. Exit status 2 also means a command line that braid could not parse, so
-an agent reads `outcome` too. `braid land --help` describes every field.
+`workspace` the agent's own change; lines count from 0, and a range stops
+before `end`. Exit status 2 also means a command line that braid could not
+parse, so an agent reads `outcome` too. `braid land --help` describes every
+field.
 
 </details>
 
@@ -219,7 +220,7 @@ proper merge queue, for example, doesn't make much sense at agent scale."
 | Landing | `git push`, rejected whenever another agent got in first | waits for CI on the changes ahead of it | `braid land`: one short step, taken in turn |
 | Retries | grow with the agents: 5.2 per push with 16, [in one run](#measured-against-git) | none | none: a change that fell behind is rebased |
 | A conflict | markers, and messages written for people | the change leaves the queue | exit status 2, `main` does not move, JSON with `next` |
-| A change that breaks the build | lands | is stopped before it lands | lands, and [`braid verify`](#keeping-main-green) then lands its revert |
+| A change that breaks the build | lands | is stopped before it lands | lands, and [`braid verify --revert`](#keeping-main-green) then lands its revert |
 
 So braid trades the queue's guarantee for landings that never wait for CI:
 between a landing and the next `braid verify`, `main` can be red, and
@@ -232,7 +233,7 @@ between a landing and the next `braid verify`, `main` can be red, and
 |---|---|---|
 | Unit of change | a commit: a full tree snapshot | a changeset: the files that changed against the first parent, plus the root tree id |
 | Many writers | one index per working tree | one workspace per agent over a shared append-only store; creating a change takes no repository lock |
-| Fetching | negotiated packs, built for each client | immutable objects by id, which any HTTP cache can serve |
+| Fetching | negotiated packs, built for each client | immutable objects by id; any HTTP cache can serve a public repository's, and a private one's carry `Cache-Control: private` |
 | Large directories | rewritten whole on every change | split into content-defined nodes; an edit rewrites only its path |
 | Large files | a separate extension | content-defined chunks, deduplicated across versions |
 | Hash | SHA-1 by default | BLAKE3 |
@@ -246,9 +247,8 @@ exists today.
 ## How it works
 
 <picture>
-  <source media="(max-width: 1011px) and (prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-tall-dark.svg">
-  <source media="(max-width: 1011px)" srcset="docs/assets/how-it-works-tall-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.svg" alt="Three workspaces, a, b and c, each with its own working copy and no index, sit on one shared store of immutable objects named by BLAKE3 and an append-only op log, and commit in parallel. Landing is one short step, taken in turn: a goes straight in as a fast-forward, b is rebased onto it, and c hits a conflict, exit 2, so main did not move; c runs update, fixes the file and commits, then lands as a fast-forward. The strands braid into main, which git sync sends to any git remote as a fast-forward, with a lease. A dashed box marks a daemon and caches as planned.">
 </picture>
 
@@ -390,9 +390,9 @@ matters, keep a GitHub mirror as the source of truth.
 | 6 | Server: [BraidHub](#braidhub) with GitHub sign-in, landing over HTTP, GitHub mirrors and sparse clones; caching tiers | first version; caching planned |
 | 7 | Daemon, virtual file system, WebAssembly core | planned |
 
-New in 0.1.1: `braid revert`, and `braid verify`, which tests a branch's
-head, bisects a failure and lands the revert of the changeset that caused
-it.
+New in 0.1.1: `braid revert`, and `braid verify`, which runs when you run
+it: one run tests a branch's head, bisects a failure to the changeset that
+caused it and, with `--revert`, lands that changeset's revert.
 
 Each milestone ships when its tests pass: golden vectors and fuzzing for
 the format, crash and many-process tests for the store, bit-for-bit round
@@ -411,12 +411,16 @@ simulation for landing.
   ratio against git on the same machine, with the script that reproduces
   it. At commit `5330054`, braid was faster when many agents landed at
   once, and slower at importing and storing history, and at status and
-  commit on large trees. Much of that has been worked on since, and has
-  not been measured again.
+  commit on large trees. Much of that has been worked on since, but
+  `bench/run.py` has not been run again for the ratio table. A later
+  measurement of the store's size, on the imported histories of four
+  public repositories, found 2.5 to 3.1 times what `git gc --aggressive`
+  packs them into
+  ([format v1, section 7](docs/spec/format-v1.md#7-storage-not-hashed-versioned-on-its-own)).
 - **`main` can be red for a while.** Braid lands first and tests after,
   and merges are textual: two changes can merge cleanly and still break
-  the build together, until [`braid verify`](#keeping-main-green) reverts
-  one of them.
+  the build together, until
+  [`braid verify --revert`](#keeping-main-green) reverts one of them.
 - **Not there yet:** garbage collection, so nothing is ever removed from a
   store, and shallow or SHA-256 git repositories, which the git bridge
   refuses. `log -- <path>` and `blame` follow first parents and, on
@@ -550,9 +554,10 @@ commit en su propio espacio de trabajo, y aterrizar en `main` es un paso
 corto que dan por turnos: si un cambio se ha quedado atrás, braid le hace
 rebase sobre lo que haya aterrizado antes, y un conflicto vuelve como
 datos, sin mover `main`. `braid verify`, nuevo en la 0.1.1, ejecuta los
-tests después de aterrizar, localiza con bisect el changeset que los rompió
-y aterriza el cambio que lo deshace. Git se queda en los bordes, así que
-GitHub y Gitea siguen funcionando.
+tests cada vez que lo lanzas tras aterrizar; si fallan, localiza con bisect
+el changeset que los rompió y, con `--revert`, aterriza el cambio que lo
+deshace. Git se queda en los bordes, así que GitHub y Gitea siguen
+funcionando.
 
 Se inspira en las ideas que Anthropic publicó sobre Scion, su sistema
 interno de control de versiones. Es una implementación independiente: no
