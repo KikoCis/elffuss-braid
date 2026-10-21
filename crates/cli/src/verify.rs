@@ -153,9 +153,9 @@ green, the green ref before and after; outcome, one of pass, flaky, red,
 reverted, revert_conflicts, refused, no_culprit or error; culprit, the
 first failing changeset, or null; revert, the revert made, or null;
 skipped, the changesets that could not be tested; tests_run, how many
-times the command ran; reason, why, in words, or null; dry_run; and land,
-the landing report of the revert as `braid land --help` describes it, or
-null.
+times the command started; reason, why, in words, or null; dry_run; and
+land, the landing report of the revert as `braid land --help` describes
+it, or null.
 
 Exit status: 0 for pass and flaky; 4 for red, reverted, refused and
 no_culprit; 2 for revert_conflicts; 1 for an error. Once the tests have
@@ -446,8 +446,6 @@ impl Tester<'_> {
         let Some(end) = result? else {
             return Ok(None);
         };
-        // Only a command that ran counts.
-        self.runs += 1;
         let passed = matches!(&end, RunEnd::Exited(status) if status.success());
         let said = match &end {
             RunEnd::Exited(status) if status.success() => "passed".to_owned(),
@@ -460,7 +458,7 @@ impl Tester<'_> {
 
     /// Runs the command in `dir` under a watchdog, started first: from then
     /// on, however braid ends, the directory goes and the tests stop.
-    fn run_in(&self, changeset: ObjectId, dir: &Path) -> Result<Option<RunEnd>> {
+    fn run_in(&mut self, changeset: ObjectId, dir: &Path) -> Result<Option<RunEnd>> {
         let mut watchdog = Watchdog::start(dir)?;
         let end = self.watched(changeset, dir, &mut watchdog);
         watchdog.done();
@@ -468,7 +466,7 @@ impl Tester<'_> {
     }
 
     fn watched(
-        &self,
+        &mut self,
         changeset: ObjectId,
         dir: &Path,
         watchdog: &mut Watchdog,
@@ -514,6 +512,9 @@ impl Tester<'_> {
         let mut child = command
             .spawn()
             .with_context(|| format!("cannot run {}", program.to_string_lossy()))?;
+        // A run counts once the command started, so that one cut short
+        // still shows in the report; a command that cannot start does not.
+        self.runs += 1;
         if let Err(err) = watchdog.watch(&child) {
             kill_group(&mut child);
             let _ = child.wait();

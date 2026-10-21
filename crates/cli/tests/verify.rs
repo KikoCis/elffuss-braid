@@ -851,3 +851,63 @@ fn an_old_date_between_reverts_does_not_reset_the_hourly_cap() {
     assert!(id(&second["reason"]).contains("1 revert on main in the last hour"));
     assert_eq!(r.head(), Some(again));
 }
+
+/// The processes whose parent is `parent`.
+#[cfg(unix)]
+fn children_of(parent: u32) -> Vec<String> {
+    let ps = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?;
+            let ppid = fields.next()?;
+            (ppid == parent.to_string()).then(|| pid.to_owned())
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_cut_short_counts_and_its_report_is_printed() {
+    let r = Repo::new();
+    let shell_file = r.outside.join("shell");
+    let script = format!("echo $$ > '{}'; sleep 60", shell_file.display());
+    let braid = Command::new(env!("CARGO_BIN_EXE_braid"))
+        .current_dir(&r.dir)
+        .args(["--json", "verify", "--", "sh", "-c", &script])
+        .env("BRAID_HUB", "off")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let shell = written(&shell_file);
+    // Braid's children are the test's shell and the watchdog: stop the
+    // watchdog, by its id, under the running test.
+    let watchdog: Vec<String> = children_of(braid.id())
+        .into_iter()
+        .filter(|pid| *pid != shell)
+        .collect();
+    assert_eq!(watchdog.len(), 1, "{watchdog:?}");
+    let stopped = Command::new("kill")
+        .args(["-KILL", &watchdog[0]])
+        .status()
+        .unwrap();
+    assert!(stopped.success());
+    let out = braid.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["outcome"], "error");
+    assert_eq!(report["tests_run"], 1);
+    assert!(
+        id(&report["reason"]).contains("watchdog stopped"),
+        "{report}"
+    );
+    assert!(
+        gone(&shell),
+        "the test's shell {shell} outlived its watchdog"
+    );
+}
