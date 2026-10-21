@@ -348,22 +348,41 @@ braid verify --branch main --revert --json -- cargo test --workspace
 
 - The command runs as given, with no shell, in a fresh copy of the
   changeset's files in the system's temporary directory: outside the
-  repository, so every run builds from scratch. `BRAID_TOKEN` and the other
-  `BRAID_HUB` variables are taken out of its environment, and
-  `BRAID_VERIFY_CHANGESET` and `BRAID_VERIFY_BRANCH` say what it tests.
-  After `--timeout` (10 minutes by default) it is killed with every process
-  it started.
-- A failing run is run again (`--reruns`, once by default) before it counts;
-  one that then passes is `flaky`. With no green ref yet, verify tests only
-  the head, unless `--from` names a changeset to bisect from.
-- It never reverts a merge, nor a revert it made itself, which it keeps in
-  `.braid/verify/<branch>.json`, and it lands at most three reverts an hour
-  (`--max-reverts-per-hour`). The green ref does not move after a revert:
-  the next pass tests the new head. `--dry-run` reports and changes nothing.
-- Bisecting tests each changeset as it is: an earlier revert in the range is
-  not undone first, so a culprit found among reverted work needs a look.
+  repository, so every run builds from scratch, and the copy is removed
+  after the run. `BRAID_VERIFY_CHANGESET` and `BRAID_VERIFY_BRANCH` say what
+  it tests. `BRAID_TOKEN`, every variable whose name starts with
+  `BRAID_HUB`, and `OLDPWD` are taken out of its environment, and `PWD`
+  names the copy.
+- That is not a sandbox. The command runs as you, with your access to your
+  files, the network, the `braid` command and any hub login saved in
+  braid's configuration directory. To test code you do not trust, run
+  verify in a container, a sandbox or as a user of its own.
+- It runs in a process group of its own. When it exits, or runs past
+  `--timeout` (10 minutes by default), the group is killed, with whatever
+  it started that is still in it; a process that left the group, as a
+  daemon does, is not. If braid itself is stopped, a watchdog process
+  kills the group and removes the copy.
+- A failing run is run again (`--reruns`, once by default) before it counts.
+  One that then passes is `flaky`, and leaves the green ref where it was
+  unless `--flaky-moves-green`.
+- The green ref is local to the repository: it is never exported or sent
+  to a hub, and a fresh clone, as CI has, has none. With no green ref,
+  verify tests only the head, unless `--from` names a changeset to bisect
+  from.
+- It never reverts a merge, nor a revert it made, which it tells by the
+  revert's `reverts` field and its agent, `braid-verify`, and it lands at
+  most three reverts an hour (`--max-reverts-per-hour`), counted on the
+  branch by committer time. A clone without its local record in
+  `.braid/verify/` keeps both rules. The green ref does not move after a
+  revert: the next pass tests the new head. `--dry-run` reports, changes
+  nothing and does not fetch from a hub.
+- Bisecting tests each changeset as it is. When the first that fails was
+  reverted later in the range, verify tests the revert and, if it passes,
+  bisects again after it. A changeset whose files cannot be written on this
+  system is skipped, and listed in `skipped`.
 - Exit status 0 means green (`pass` or `flaky`), 4 red (`red`, `reverted`,
-  `refused` or `no_culprit`), 2 a revert that conflicts, and 1 an error.
+  `refused` or `no_culprit`), 2 a revert that conflicts, and 1 an error;
+  once the tests have started, an error prints the report too.
   `braid status --json` shows the green changeset as `green`, and
   `braid verify --help` describes every JSON field.
 

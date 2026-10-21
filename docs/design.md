@@ -178,9 +178,14 @@ parent's, and a `reverts` extra field naming `C`. Landed on a head that moved
 past `C`, it is rebased path by path with `C` as the base, the head as ours
 and `C`'s parent as theirs: later work on other lines stays, and later work
 on the same lines is a conflict. `braid verify` lands the reverts it makes
-the same way; which reverts it made, it keeps in a file of its own rather
-than trusting the `reverts` field, which anyone can write. Its green ref,
-`braid/green/<branch>`, lives in braid's own namespace and is never exported.
+the same way, with the agent `braid-verify`. Its limits are read from the
+branch, so that a fresh clone keeps them: it refuses to revert a changeset
+that has a `reverts` field and that agent, and counts the reverts of the
+last hour by committer time. Anyone can write that field and that label,
+but they are only ever reasons to refuse, never to act; a local record in
+`.braid/verify/` is a second source. Its green ref, `braid/green/<branch>`,
+lives in braid's own namespace: it is local to the repository and never
+exported or sent to a hub.
 
 **Invariants.** A branch only moves forward. A branch never contains a
 conflict. No value is overwritten except by a change whose base already

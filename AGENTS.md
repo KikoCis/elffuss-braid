@@ -269,8 +269,9 @@ with the branch it names where the commands here say `main`. In short:
   has not landed.
 - Every command takes `--json`. Exit status 2 is a conflict, and 1 a
   failure, which braid prints as text on standard error, with nothing on
-  standard output, even with `--json`; only `git sync` and `fsck` print
-  their report as well when they exit with 1.
+  standard output, even with `--json`; only `git sync`, `fsck` and
+  `verify`, once its tests have started, print their report as well when
+  they exit with 1. `verify` exits with 4 when the branch it checks is red.
 - Changesets are signed by `BRAID_AUTHOR` (`"Name <email>"`), or else by
   the `name` and `email` in `.braid/config`. With neither, `commit`,
   `land` and `update` fail with "no author", and `braid status` lists it
