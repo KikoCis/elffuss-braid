@@ -188,8 +188,9 @@ carry any date, so an old one stops nothing: only the depth bounds the
 walk. Anyone can write that field and that label: the label is only
 ever a reason to refuse. The field also tells bisecting where a culprit
 was reverted later in the range, but verify only acts on that by testing
-the changeset it names, and bisects on after it only if the tests pass
-there: a false field can make verify run one more test, never blame a
+the changeset that carries it, and bisects on after it only if the tests
+pass there: a false field can make verify run one more test, or end with
+`no_culprit` instead of reverting the culprit, but it never blames a
 changeset that passes, or one whose parent fails. A local record in
 `.braid/verify/` is a second source for both limits. Its green ref,
 `braid/green/<branch>`, lives in braid's own namespace: it is local to the

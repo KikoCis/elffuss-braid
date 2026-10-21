@@ -364,11 +364,11 @@ Revert: dbc25836e20d
   again (`--reruns`, once by default) before it counts. One that then
   passes is `flaky`: green, but the green ref stays where it was unless
   `--flaky-moves-green`.
-- **Bisecting** tests each changeset as it is, along first parents. When
-  the first that fails was reverted later in the range, verify tests the
-  revert and, if it passes, bisects again after it. A changeset whose
-  files cannot be written on this system is skipped, and listed in
-  `skipped`.
+- **Bisecting** tests the changesets it picks as they are, along first
+  parents. When the first that fails was reverted later in the range,
+  verify tests the revert and, if it passes, bisects again after it. A
+  changeset whose files cannot be written on this system is skipped, and
+  listed in `skipped`.
 - **Limits on reverts.** Verify never reverts a merge, nor a revert it
   made, which it tells by the revert's `reverts` field and its agent,
   `braid-verify`; braid warns anyone else who acts as `braid-verify`. It
