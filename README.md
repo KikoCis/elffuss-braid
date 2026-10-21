@@ -594,7 +594,7 @@ software with agents.
 
 ## Prior art and credits
 
-- Anthropic, [Redesigning source control at Anthropic](https://www.anthropic.com/engineering/redesigning-source-control):
+- Anthropic, [Redesigning source control at Anthropic](https://www.anthropic.com/research/redesigning-source-control):
   changesets stored against the first parent, server-side merges, minimal
   branch state, immutable objects served by any cache tier.
 - [Jujutsu](https://github.com/jj-vcs/jj): the operation log and undo.

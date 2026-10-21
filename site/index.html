@@ -72,13 +72,13 @@
       "@id": "https://braid.elffuss.com/#app",
       "name": "Elffuss Braid",
       "alternateName": "braid",
-      "description": "Version control for repositories where many AI coding agents land changes at the same time. Each agent commits in a workspace of its own over one shared store, and landing on main is one short step taken in turn. No server or daemon is needed on one machine; BraidHub is for agents on several machines.",
+      "description": "Version control for repositories where many AI coding agents land changes at the same time. Each agent commits in a workspace of its own over one shared store, and landing on main is one short step taken in turn. No server or daemon is needed on one machine.",
       "url": "https://braid.elffuss.com/",
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "Version control system",
       "operatingSystem": "Linux and other Unix-like systems",
       "softwareVersion": "0.1.1",
-      "softwareRequirements": "Rust 1.89 or newer, to build it with cargo",
+      "softwareRequirements": "Rust 1.89 or newer, a C compiler (cc), git, and a POSIX shell such as bash",
       "installUrl": "https://braid.elffuss.com/agents.md",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
       "isAccessibleForFree": true,
@@ -90,8 +90,7 @@
         "No server or daemon on one machine",
         "Bit-for-bit import of git history, and braid git sync to keep GitHub or any git remote in step",
         "An append-only op log, and braid undo",
-        "braid verify: keep a branch green, bisect a failure and revert the changeset that broke it",
-        "BraidHub, for agents that land on one main from several machines"
+        "braid verify: keep a branch green, bisect a failure and revert the changeset that broke it"
       ],
       "publisher": { "@id": "https://braid.elffuss.com/#utopiaia" },
       "sameAs": [
@@ -470,8 +469,8 @@ git init --quiet --bare remote.git
 <li><strong>La misma API en cada nivel,</strong> de modo que un almacén local, un daemon por máquina, una caché y un servidor respondan a las mismas peticiones. El servidor ya tiene una primera versión, <a href="#hub">BraidHub</a>; las cachés y el daemon están previstos (fases 6 y 7).</li>
 </ol>
 <h3 class="grid-title"><span data-l="en" lang="en">Where the ideas come from: Scion</span><span data-l="es" lang="es">De dónde vienen las ideas: Scion</span></h3>
-<p class="credit" data-l="en" lang="en">Braid starts from ideas Anthropic published about Scion, its internal source control system (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets stored against the first parent, server-side merges, minimal branch state, immutable objects any cache can serve. Braid is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic. <a href="scion.html">What braid takes from Scion, and where it differs</a>.</p>
-<p class="credit" data-l="es" lang="es">Braid parte de ideas que Anthropic publicó sobre Scion, su sistema interno de control de versiones (<a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets guardados respecto al primer padre, fusiones en el servidor, ramas con un estado mínimo y objetos inmutables que cualquier caché puede servir. Braid es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo. <a href="scion.html">Qué toma braid de Scion y en qué se aparta</a>.</p>
+<p class="credit" data-l="en" lang="en">Braid starts from ideas Anthropic published about Scion, its internal source control system (<a href="https://www.anthropic.com/research/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets stored against the first parent, server-side merges, minimal branch state, immutable objects any cache can serve. Braid is an independent implementation: it contains no Anthropic code and is not affiliated with or endorsed by Anthropic. <a href="scion.html">What braid takes from Scion, and where it differs</a>.</p>
+<p class="credit" data-l="es" lang="es">Braid parte de ideas que Anthropic publicó sobre Scion, su sistema interno de control de versiones (<a href="https://www.anthropic.com/research/redesigning-source-control">Redesigning source control at Anthropic</a>): changesets guardados respecto al primer padre, fusiones en el servidor, ramas con un estado mínimo y objetos inmutables que cualquier caché puede servir. Braid es una implementación independiente: no contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo. <a href="scion.html">Qué toma braid de Scion y en qué se aparta</a>.</p>
 </div>
 </section>
 
