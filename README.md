@@ -451,6 +451,15 @@ New in 0.1.1: `braid revert`, and `braid verify`, which runs when you run
 it: one run tests a branch's head, bisects a failure to the changeset that
 caused it and, with `--revert`, lands that changeset's revert.
 
+New in 0.1.2: a sturdier `braid verify`. On Unix its watchdog starts
+before the tests, and when it cannot, or stops, verify ends with an error
+rather than go on unwatched. Its limit on reverts an hour counts each of
+its reverts by the revert's own committer time, among the last 10,000
+changesets of the branch, whatever the dates of those between them. Cut
+short by an error once its tests have started, it still prints its report,
+counting every run that started. And any other command run as the agent
+`braid-verify` warns that verify takes that agent's reverts for its own.
+
 Each milestone ships when its tests pass: golden vectors and fuzzing for
 the format, crash and many-process tests for the store, bit-for-bit round
 trips and differential tests against git for the bridge, deterministic
