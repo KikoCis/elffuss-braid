@@ -16,8 +16,8 @@
 //! fresh clone, as CI has, follows the same rules: a revert verify made
 //! carries a `reverts` field and the agent `braid-verify`, and verify never
 //! reverts such a changeset, nor lands more reverts an hour than it is
-//! allowed, counting them by their committer time. A label anyone can write
-//! is safe to refuse on. `.braid/verify/` keeps a record of the reverts this
+//! allowed, counting them by their own committer time. A label anyone can
+//! write is safe to refuse on. `.braid/verify/` keeps a record of the reverts this
 //! repository landed, as a second source for both rules.
 
 use std::collections::{BTreeSet, HashSet};
@@ -61,9 +61,13 @@ const CONFLICTS: u8 = crate::work::CONFLICTS;
 /// The prefix of the scratch directories the tests run in.
 const SCRATCH_PREFIX: &str = "braid-verify-";
 
-/// How far down the branch verify looks for its own reverts of the last
-/// hour, at most.
-const HISTORY_LIMIT: usize = 10_000;
+/// How many changesets down the branch verify looks for its own reverts of
+/// the last hour, at most.
+const HISTORY_DEPTH: usize = 200;
+
+/// The walk for those reverts stops at the first changeset committed more
+/// than this long, in seconds, before now: a day.
+const HISTORY_AGE: i64 = 86_400;
 
 /// What the watchdog says once it runs, before braid starts any test. The
 /// number changes with the protocol, so that another braid's watchdog is
@@ -129,9 +133,10 @@ processes others leave behind.
   - With --revert, the culprit is reverted and the revert landed, as
     `braid revert` does. Verify does not revert a merge, nor a revert it
     made (one with a reverts field and the agent braid-verify), nor more
-    than --max-reverts-per-hour (3 by default), which it counts on the
-    branch by committer time and in .braid/verify/. The green ref does not
-    move: the next run tests the new head.
+    than --max-reverts-per-hour (3 by default), which it counts by each
+    revert's committer time among the last 200 changesets of the branch
+    (down to one made more than a day before), and in .braid/verify/. The
+    green ref does not move: the next run tests the new head.
 
 The green ref is local: a fresh clone has none, so give --from there.
 --dry-run runs the tests but moves no ref, records nothing, lands nothing
@@ -354,20 +359,25 @@ fn is_verify_revert(changeset: &Changeset) -> bool {
     extra(changeset, REVERTS).is_some() && extra(changeset, AGENT_FIELD) == Some(AGENT.as_bytes())
 }
 
-/// The reverts verify made that landed on the branch below `tip` in the
-/// hour before `now`, by committer time. The walk down first parents stops
-/// at the first changeset committed earlier than that.
+/// The reverts verify made on the branch below `tip` that were committed in
+/// the hour before `now`, each by its own committer time. Committer times
+/// do not only grow along a branch (a changeset that landed by a
+/// fast-forward keeps the time it was made), so the walk down first parents
+/// goes on past older changesets: it stops after [`HISTORY_DEPTH`]
+/// changesets, or at the first one committed more than [`HISTORY_AGE`]
+/// before now.
 fn reverts_in_last_hour(repo: &Repo, tip: ObjectId, now: u64) -> Result<HashSet<String>> {
-    let since = now as i64 - 3600;
+    let now = i64::try_from(now).unwrap_or(i64::MAX);
     let mut found = HashSet::new();
     let mut current = Some(tip);
-    for _ in 0..HISTORY_LIMIT {
+    for _ in 0..HISTORY_DEPTH {
         let Some(id) = current else { break };
         let changeset = braid_engine::read_changeset(repo.store(), id)?;
-        if changeset.committer.seconds <= since {
+        let committed = changeset.committer.seconds;
+        if committed < now.saturating_sub(HISTORY_AGE) {
             break;
         }
-        if is_verify_revert(&changeset) {
+        if committed > now.saturating_sub(3600) && is_verify_revert(&changeset) {
             found.insert(id.to_hex());
         }
         current = changeset.parents.first().copied();
@@ -1310,6 +1320,61 @@ mod tests {
         fs::write(&path, "{").unwrap();
         let err = format!("{:#}", Record::load(&path).unwrap_err());
         assert!(err.contains("delete it"), "{err}");
+    }
+
+    #[test]
+    fn the_hourly_cap_counts_by_each_reverts_own_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repo::init(temp.path()).unwrap();
+        let now: i64 = 1_800_000_000;
+        let signature = |seconds| braid_format::Signature {
+            name: b"Ada".to_vec(),
+            email: b"ada@example.org".to_vec(),
+            seconds,
+            offset_minutes: 0,
+        };
+        let revert_by = |agent: &str| {
+            vec![
+                (AGENT_FIELD.to_vec(), agent.as_bytes().to_vec()),
+                (REVERTS.to_vec(), "c".repeat(64).into_bytes()),
+            ]
+        };
+        let commit = |parent: Option<ObjectId>, ago: i64, extras| {
+            braid_engine::commit(
+                repo.store(),
+                parent.into_iter().collect(),
+                Vec::new(),
+                signature(now - ago),
+                signature(now - ago),
+                b"change\n".to_vec(),
+                extras,
+            )
+            .unwrap()
+        };
+        // Down from the tip: a revert by someone else, one of verify's, a
+        // changeset that landed by a fast-forward hours after it was made,
+        // another of verify's below it, one older than an hour, and a base
+        // older than a day, where the walk stops.
+        let base = commit(None, 2 * 86_400, Vec::new());
+        let too_old = commit(Some(base), 2 * 3600, revert_by(AGENT));
+        let below = commit(Some(too_old), 30 * 60, revert_by(AGENT));
+        let made_earlier = commit(Some(below), 3 * 3600, Vec::new());
+        let recent = commit(Some(made_earlier), 10 * 60, revert_by(AGENT));
+        let others = commit(Some(recent), 5 * 60, revert_by("ada"));
+        let tip = commit(Some(others), 60, Vec::new());
+        let found = reverts_in_last_hour(&repo, tip, now as u64).unwrap();
+        let expected: HashSet<String> = [below, recent].iter().map(ObjectId::to_hex).collect();
+        assert_eq!(found, expected);
+
+        // A revert deeper than the walk goes is not counted.
+        let mut top = commit(Some(tip), 60, revert_by(AGENT));
+        let deep = top;
+        for _ in 0..HISTORY_DEPTH {
+            top = commit(Some(top), 30, Vec::new());
+        }
+        let found = reverts_in_last_hour(&repo, top, now as u64).unwrap();
+        assert!(!found.contains(&deep.to_hex()));
+        assert!(found.is_empty(), "{found:?}");
     }
 
     /// A stand-in for the watchdog: `script`, run by `sh`.
