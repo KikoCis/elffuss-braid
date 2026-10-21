@@ -14,7 +14,7 @@ so GitHub keeps working.
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square&logo=apache&logoColor=white)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-8272ff?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-54dcc6?style=flat-square)](#status-and-roadmap)
+[![Version 0.1.1](https://img.shields.io/badge/version-0.1.1-54dcc6?style=flat-square)](#status-and-roadmap)
 [![Format v1: frozen](https://img.shields.io/badge/format%20v1-frozen-c8a06a?style=flat-square)](docs/spec/format-v1.md)
 
 [![Website](https://img.shields.io/badge/web-braid.elffuss.com-54dcc6?style=flat-square)](https://braid.elffuss.com)
@@ -137,7 +137,7 @@ first (git hooks, submodules, LFS, a branch that takes only pull requests)
 and what to do when a step fails.
 
 ```bash
-cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.0 elffuss-braid-cli
+cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.1 elffuss-braid-cli
 braid init                       # .braid/: the store and the agents' workspaces
 mkdir -p "$(git rev-parse --git-path info)"
 echo .braid >> "$(git rev-parse --git-path info/exclude)"   # git ignores braid, in this checkout only
