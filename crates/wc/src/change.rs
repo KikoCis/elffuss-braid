@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 UtopiaIA
 
-//! Making a changeset without a working copy, and landing one.
+//! Making a changeset without a working copy, reverting one, and landing
+//! one.
 //!
 //! An agent that knows which files it wants to change does not need a
 //! checkout: it names the base, the new contents and the deletions, and can
 //! state what it expects the base to hold at each path, so that it never
 //! overwrites an edit it did not see.
 
-use braid_engine::{EMPTY_TREE, LandOutcome, entry_at, land, read_changeset};
+use braid_engine::{EMPTY_TREE, LandOutcome, REVERTS, diff, entry_at, land, read_changeset};
 use braid_format::{Change, ChangeOp, EntryKind, Kind, ObjectId, Objects, validate_path};
 use braid_store::{RefUpdate, Store, TransactError};
 
@@ -127,6 +128,81 @@ pub fn create_change(store: &Store, request: &ChangeRequest) -> Result<ObjectId,
     Ok(id)
 }
 
+/// A revert to make: a changeset that undoes another.
+#[derive(Clone, Debug)]
+pub struct RevertRequest {
+    /// The changeset to undo.
+    pub culprit: ObjectId,
+    /// Whether a merge may be reverted. Its revert undoes what it brought
+    /// in against its first parent.
+    pub allow_merge: bool,
+    /// The author, who also commits it.
+    pub author: Identity,
+    /// The label of the agent making it, recorded as its
+    /// [`AGENT`](braid_engine::AGENT) field.
+    pub agent: String,
+}
+
+/// Makes the revert of `request.culprit` (C), and returns its id: a
+/// changeset whose only parent is C, whose changes turn C's tree back into
+/// its first parent's, modes, symlinks and gitlinks included, with the
+/// message `Revert "<C's subject>"` and a [`REVERTS`] field naming C.
+///
+/// It is stored but not landed. [`land_change`] lands it like any change:
+/// on a branch that moved past C, the rebase merges each path with C as the
+/// base, the head as ours and C's parent as theirs, which is what undoing C
+/// on top of later work means; a later change to the same lines is a
+/// conflict.
+///
+/// A changeset without parents, one that changes nothing, and a merge
+/// unless [`RevertRequest::allow_merge`] says so, are refused.
+pub fn create_revert(store: &Store, request: &RevertRequest) -> Result<ObjectId, Error> {
+    let culprit = request.culprit;
+    let changeset = read_changeset(store, culprit)?;
+    let parent = match changeset.parents.as_slice() {
+        [] => return Err(Error::RevertRoot(culprit)),
+        [parent] => *parent,
+        [parent, ..] if request.allow_merge => *parent,
+        parents => {
+            return Err(Error::RevertMerge {
+                changeset: culprit,
+                parents: parents.len(),
+            });
+        }
+    };
+    let parent_root = read_changeset(store, parent)?.root;
+    let changes = diff(store, changeset.root, parent_root)?;
+    if changes.is_empty() {
+        return Err(Error::NothingToRevert(culprit));
+    }
+    let mut message = format!("Revert \"{}\"", subject(&changeset.message)).into_bytes();
+    message.extend_from_slice(format!("\n\nThis reverts changeset {culprit}.\n").as_bytes());
+    let mut extras = crate::rebase::agent_extras(&request.agent);
+    extras.push((REVERTS.to_vec(), culprit.to_hex().into_bytes()));
+    let signature = request.author.now();
+    let id = braid_engine::commit(
+        store,
+        vec![culprit],
+        changes,
+        signature.clone(),
+        signature,
+        message,
+        extras,
+    )?;
+    store.sync()?;
+    Ok(id)
+}
+
+/// The first line of a message that is not blank, trimmed.
+fn subject(message: &[u8]) -> String {
+    String::from_utf8_lossy(message)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_owned()
+}
+
 fn describe(entry: Option<&EntryKind>) -> String {
     match entry {
         None => "absent".to_owned(),
@@ -219,6 +295,8 @@ mod tests {
     #[test]
     fn describing_entries() {
         assert_eq!(describe(None), "absent");
+        assert_eq!(subject(b"\n  Fix the parser \nmore\n"), "Fix the parser");
+        assert_eq!(subject(b""), "");
         let blob = ObjectId::hash(Kind::Blob, b"x");
         assert_eq!(
             describe(Some(&EntryKind::File { blob, size: 1 })),

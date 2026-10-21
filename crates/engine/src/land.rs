@@ -51,6 +51,12 @@ pub const REBASED_FROM: &[u8] = b"rebased-from";
 /// field names the agent that made the change, wherever it landed.
 pub const AGENT: &[u8] = b"agent";
 
+/// The extra field a revert carries: the id, in hex, of the changeset it
+/// undoes. A rebased revert keeps it, as it keeps every extra field but
+/// [`REBASED_FROM`]. It says what the revert undoes; it proves nothing about
+/// who made it.
+pub const REVERTS: &[u8] = b"reverts";
+
 /// What landing a change does to the branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LandOutcome {
@@ -1013,6 +1019,38 @@ mod tests {
                 (REBASED_FROM.to_vec(), merge.to_hex().into_bytes()),
             ]
         );
+    }
+
+    #[test]
+    fn a_rebased_revert_keeps_what_it_reverts() {
+        // A revert of `culprit` is a changeset on it whose changes are the
+        // diff back to its parent. Rebased onto a head that moved, the merge
+        // takes base = culprit, ours = head, theirs = the culprit's parent.
+        let repo = Repo::new();
+        let base = repo.commit(
+            &[],
+            vec![repo.set("f", "1\n2\n3\n4\n5\n"), repo.set("g", "1")],
+        );
+        let culprit = repo.commit(&[base], vec![repo.set("f", "1\n2\nbad\n4\n5\n")]);
+        let head = repo.commit(&[culprit], vec![repo.set("f", "one\n2\nbad\n4\n5\n")]);
+        let back = diff(&repo.objects, repo.root(culprit), repo.root(base)).unwrap();
+        let extras = vec![
+            (AGENT.to_vec(), b"verifier".to_vec()),
+            (REVERTS.to_vec(), culprit.to_hex().into_bytes()),
+        ];
+        let revert = commit_with_extras(&repo, vec![culprit], back, extras.clone());
+        let outcome = land(&repo.objects, Some(head), revert, signature("x")).unwrap();
+        let LandOutcome::Rebased { changeset, .. } = outcome else {
+            panic!("expected a rebase, got {outcome:?}");
+        };
+        let new = read_changeset(&repo.objects, changeset).unwrap();
+        assert_eq!(
+            repo.files(new.root),
+            text_map(&[("f", "one\n2\n3\n4\n5\n"), ("g", "1")])
+        );
+        let mut expected = extras;
+        expected.push((REBASED_FROM.to_vec(), revert.to_hex().into_bytes()));
+        assert_eq!(new.extras, expected);
     }
 
     fn commit_with_extras(

@@ -233,6 +233,27 @@ pub enum Error {
         index: usize,
     },
 
+    /// A changeset without parents cannot be reverted: there is nothing to
+    /// go back to.
+    #[error("changeset {} has no parent, so there is nothing to revert it to", .0.short())]
+    RevertRoot(ObjectId),
+
+    /// A merge is reverted only on request, against its first parent.
+    #[error(
+        "changeset {} is a merge of {parents} parents: pass --mainline 1 to undo what it brought in against its first parent",
+        .changeset.short()
+    )]
+    RevertMerge {
+        /// The merge.
+        changeset: ObjectId,
+        /// How many parents it has.
+        parents: usize,
+    },
+
+    /// The changeset changes no file, so its revert would change none.
+    #[error("changeset {} changes no file against its first parent: there is nothing to revert", .0.short())]
+    NothingToRevert(ObjectId),
+
     /// The workspace's base changed while its changesets were landing
     /// somewhere else.
     #[error(

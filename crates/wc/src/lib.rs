@@ -40,8 +40,9 @@
 //! - [`Workspace::update`] brings the workspace onto the branch's head,
 //!   rebasing its own changesets; conflicts are written with markers.
 //! - [`create_change`] and [`land_change`] make and land a changeset
-//!   without any working copy; [`land_stack`] lands a stack of them made
-//!   elsewhere, as a hub does.
+//!   without any working copy; [`create_revert`] makes one that undoes
+//!   another; [`land_stack`] lands a stack of them made elsewhere, as a hub
+//!   does.
 //! - [`Workspace::stack`] and [`Workspace::adopt`] split a landing in two,
 //!   for a repository whose branches live on a hub: what to land there,
 //!   and moving onto the head that holds it afterwards.
@@ -83,7 +84,7 @@ mod tree;
 mod workspace;
 
 pub use blocker::Blocker;
-pub use change::{ChangeRequest, Expect, create_change, land_change};
+pub use change::{ChangeRequest, Expect, RevertRequest, create_change, create_revert, land_change};
 pub use error::Error;
 pub use fsprobe::FileSystem;
 pub use identity::Identity;

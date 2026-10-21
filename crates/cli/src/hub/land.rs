@@ -186,7 +186,8 @@ pub(crate) fn land_workspace(
 
 /// Lands one changeset, made without a working copy, on `branch` of the
 /// hub, then fetches. Every error names the changeset, and whether it
-/// landed.
+/// landed; when the answer was lost, it says to run `again`, the command
+/// that made the changeset, once more.
 pub(crate) fn land_change(
     repo: &Repo,
     remote: &impl Remote,
@@ -194,6 +195,7 @@ pub(crate) fn land_change(
     branch: &str,
     change: ObjectId,
     agent: &str,
+    again: &str,
 ) -> Result<LandResponse> {
     let store = repo.store();
     let base = read_changeset(store, change)?.parents.first().copied();
@@ -207,13 +209,8 @@ pub(crate) fn land_change(
         mode: LandMode::Rebase,
         agent: Some(agent.to_owned()),
     };
-    let response = land(store, remote, &request, OffBranch::Change { base }).map_err(|err| {
-        not_landed(
-            err,
-            &format!("its {branch} (changeset {change})"),
-            "braid change create",
-        )
-    })?;
+    let response = land(store, remote, &request, OffBranch::Change { base })
+        .map_err(|err| not_landed(err, &format!("its {branch} (changeset {change})"), again))?;
     let landed = match response.outcome.as_str() {
         "fast-forward" | "rebased" | "already-applied" => true,
         "conflicts" => false,
@@ -655,6 +652,7 @@ mod tests {
             "main",
             change,
             "agent-1",
+            "braid change create",
         )
         .unwrap_err();
         let local = braid_engine::Error::BaseNotOnBranch {
@@ -676,10 +674,65 @@ mod tests {
             "main",
             change,
             "agent-1",
+            "braid change create",
         )
         .unwrap();
         assert_eq!(response.outcome, "fast-forward");
         assert_eq!(s.hub_main(), Some(change));
         assert_eq!(s.local_main(), Some(change));
+    }
+
+    #[test]
+    fn a_revert_lands_on_the_hub_rebased_over_later_work() {
+        let s = Setup::new();
+        let base = s.local_main().unwrap();
+        let culprit = ada_change(&s.local.repo, Some(base), &[("b.txt", "bad\n")]);
+        let later = ada_change(&s.local.repo, Some(culprit), &[("c.txt", "c\n")]);
+        for change in [culprit, later] {
+            let response = land_change(
+                &s.local.repo,
+                &s.hub,
+                &s.local.link,
+                "main",
+                change,
+                "agent-1",
+                "braid change create",
+            )
+            .unwrap();
+            assert_eq!(response.outcome, "fast-forward");
+        }
+        let revert = braid_wc::create_revert(
+            s.local.repo.store(),
+            &braid_wc::RevertRequest {
+                culprit,
+                allow_merge: false,
+                author: ada(),
+                agent: "verifier".to_owned(),
+            },
+        )
+        .unwrap();
+        let response = land_change(
+            &s.local.repo,
+            &s.hub,
+            &s.local.link,
+            "main",
+            revert,
+            "verifier",
+            "braid revert",
+        )
+        .unwrap();
+        assert_eq!(response.outcome, "rebased");
+        let head = s.hub_main().unwrap();
+        assert_eq!(s.local_main(), Some(head));
+        let store = s.local.repo.store();
+        let root = braid_engine::read_changeset(store, head).unwrap().root;
+        let file = |path: &str| match braid_engine::entry_at(store, root, path.as_bytes()) {
+            Ok(Some(braid_format::EntryKind::File { blob, .. })) => {
+                braid_engine::read_blob(store, blob).unwrap()
+            }
+            other => panic!("{path}: {other:?}"),
+        };
+        assert_eq!(file("b.txt"), b"b\n");
+        assert_eq!(file("c.txt"), b"c\n");
     }
 }

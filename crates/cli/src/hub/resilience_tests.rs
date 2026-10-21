@@ -726,7 +726,8 @@ fn a_refused_or_unknown_outcome_is_an_error() {
                 &s.local.link,
                 "main",
                 change,
-                "agent-1"
+                "agent-1",
+                "braid change create"
             )
             .unwrap_err()
         );

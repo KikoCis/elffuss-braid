@@ -464,7 +464,7 @@ fn choose_branch(given: Option<&str>, named: Option<String>, place: &Place) -> R
 
 /// The repository's main branch among its branches `names`: `main`,
 /// `master`, or its only branch.
-fn main_branch(names: &[&str]) -> Result<String> {
+pub(crate) fn main_branch(names: &[&str]) -> Result<String> {
     if let Some(preferred) = ["main", "master"]
         .into_iter()
         .find(|preferred| names.contains(preferred))

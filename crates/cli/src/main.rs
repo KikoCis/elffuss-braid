@@ -6,6 +6,7 @@
 mod agents;
 mod history;
 mod hub;
+mod revert;
 mod sync;
 mod work;
 
@@ -313,6 +314,10 @@ enum Command {
         #[command(subcommand)]
         action: work::ChangeAction,
     },
+    /// Undo a changeset with a new one, and land it (exit status 2 on
+    /// conflicts).
+    #[command(long_about = revert::REVERT_HELP)]
+    Revert(revert::RevertArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -515,6 +520,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Resolve { paths } => work::resolve(cli, paths),
         Command::Track { paths } => work::track(cli, paths),
         Command::Change { action } => work::change(cli, action),
+        Command::Revert(args) => revert::revert(cli, args),
     }
 }
 

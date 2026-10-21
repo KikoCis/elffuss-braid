@@ -29,7 +29,7 @@ use crate::hub::{self, land::HubLanding};
 use crate::{Cli, change_json, open_repo, print_json, resolve_changeset};
 
 /// Exit status of a command that stopped on conflicts.
-const CONFLICTS: u8 = 2;
+pub(crate) const CONFLICTS: u8 = 2;
 
 /// The fields of the report `land`, `update` and `change create --land`
 /// print with `--json`, for their long help.
@@ -396,7 +396,7 @@ fn check_tracked(refs: &Refs, branch: &str, new_branch: bool) -> Result<()> {
     )
 }
 
-fn identity(args: &IdentityArgs, repo: &Repo) -> Result<Identity> {
+pub(crate) fn identity(args: &IdentityArgs, repo: &Repo) -> Result<Identity> {
     Ok(Identity::resolve(args.author.as_deref(), repo)?)
 }
 
@@ -763,28 +763,29 @@ pub(crate) fn commit(cli: &Cli, args: &CommitArgs) -> Result<ExitCode> {
     })
 }
 
-/// What `land`, `update` and `change create --land` report, in one shape:
-/// the fields their long help lists. A landing on a hub fills it from the
-/// hub's answer, so that it prints exactly what a local landing does.
-struct Report {
-    branch: String,
-    outcome: String,
+/// What `land`, `update`, `change create --land` and `revert` report, in
+/// one shape: the fields their long help lists. A landing on a hub fills it
+/// from the hub's answer, so that it prints exactly what a local landing
+/// does.
+pub(crate) struct Report {
+    pub(crate) branch: String,
+    pub(crate) outcome: String,
     head_before: Option<ObjectId>,
-    head: Option<ObjectId>,
+    pub(crate) head: Option<ObjectId>,
     placed: Vec<Placed>,
     merged_paths: Vec<String>,
     operation: Option<u64>,
     change: Option<ObjectId>,
     /// Each conflict as data (see [`conflict_json`]).
-    conflicts: Vec<Value>,
-    next: Option<String>,
+    pub(crate) conflicts: Vec<Value>,
+    pub(crate) next: Option<String>,
     /// For a workspace: its base afterwards, and the paths of its working
     /// copy written or removed.
     workspace: Option<(Option<ObjectId>, Vec<String>)>,
 }
 
 impl Report {
-    fn landing(report: &LandReport) -> Report {
+    pub(crate) fn landing(report: &LandReport) -> Report {
         let (outcome, change, conflicts): (_, _, &[Conflict]) = match &report.landed {
             Landed::Nothing => ("nothing", None, &[]),
             Landed::FastForward(_) => ("fast-forward", None, &[]),
@@ -809,7 +810,7 @@ impl Report {
     }
 
     /// A landing as the hub answered it.
-    fn hub(response: &LandResponse) -> Report {
+    pub(crate) fn hub(response: &LandResponse) -> Report {
         Report {
             branch: response.reference.clone(),
             outcome: response.outcome.clone(),
@@ -886,11 +887,11 @@ impl Report {
         }
     }
 
-    fn conflicted(&self) -> bool {
+    pub(crate) fn conflicted(&self) -> bool {
         self.outcome == "conflicts" || !self.conflicts.is_empty()
     }
 
-    fn json(&self) -> Value {
+    pub(crate) fn json(&self) -> Value {
         let mut value = json!({
             "branch": self.branch,
             "outcome": self.outcome,
@@ -913,7 +914,7 @@ impl Report {
         value
     }
 
-    fn exit_code(&self) -> ExitCode {
+    pub(crate) fn exit_code(&self) -> ExitCode {
         if self.conflicted() {
             ExitCode::from(CONFLICTS)
         } else {
@@ -942,7 +943,7 @@ impl Report {
     }
 
     /// Prints a landing as text.
-    fn print_landing(&self, cli: &Cli) {
+    pub(crate) fn print_landing(&self, cli: &Cli) {
         let branch = &self.branch;
         let several = self.placed.len() > 1;
         match self.outcome.as_str() {
@@ -1199,8 +1200,15 @@ pub(crate) fn change(cli: &Cli, action: &ChangeAction) -> Result<ExitCode> {
             Some(link) => {
                 let hub = hub::connect(&link)?;
                 let remote = hub.repo(link.repo.clone());
-                let response =
-                    hub::land::land_change(&repo, &remote, &link, branch, change, &cli.agent)?;
+                let response = hub::land::land_change(
+                    &repo,
+                    &remote,
+                    &link,
+                    branch,
+                    change,
+                    &cli.agent,
+                    "braid change create",
+                )?;
                 Report::hub(&response)
             }
             None => Report::landing(&braid_wc::land_change(
@@ -1313,7 +1321,7 @@ pub(crate) fn conflict_json(conflict: &Conflict) -> Value {
 /// Prints conflicts as data ([`conflict_json`], or a hub's answer, which
 /// has the same shape), one line each: the kind, the path, and the regions
 /// of a content conflict, the directory removed, or the path collided with.
-fn print_conflicts(conflicts: &[Value]) {
+pub(crate) fn print_conflicts(conflicts: &[Value]) {
     for conflict in conflicts {
         let text = |key: &str| conflict[key].as_str().unwrap_or("");
         let regions = conflict["hunks"].as_array().map_or(0, Vec::len);
