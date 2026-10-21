@@ -1,0 +1,66 @@
+<!-- SPDX-License-Identifier: Apache-2.0
+     Copyright (c) 2026 UtopiaIA
+     Made by scripts/demos/hero.py from the agents recording: edit that, not this. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 808" width="720" height="808" role="img" aria-labelledby="hero-title hero-desc">
+<title id="hero-title">Elffuss Braid: Many agents. One main. No retry loop.</title>
+<desc id="hero-desc">Three agents land on main in turn: agent-a as a fast-forward, agent-b rebased onto it, and agent-c with a conflict, so main did not move and braid exits with status 2.</desc>
+<style>
+.s { fill: none; stroke-width: 9.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1 2; stroke-dashoffset: 0; }
+.sa { stroke: #c8a06a; } .sb { stroke: #54dcc6; } .sc { stroke: #8272ff; }
+.tag { font-family: 'Iowan Old Style', Georgia, 'Palatino Linotype', Palatino, serif; font-size: 58px; font-weight: 600; letter-spacing: -0.3px; fill: #eae8f2; }
+.url { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 20px; letter-spacing: 1px; fill: #7f7ca0; }
+.ln { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 24px; white-space: pre; }
+/* plays once, then holds: the last frame is the file as written */
+@media (prefers-reduced-motion: no-preference) {
+  .s { animation: draw 1.5s cubic-bezier(.22, .61, .36, 1) both; }
+  .sb { animation-delay: .15s; } .sc { animation-delay: .3s; }
+  .tag { animation: show .8s ease-out .45s both; }
+  .url { animation: show .8s ease-out .8s both; }
+  .term { animation: show .5s ease-out 1s both; }
+  .ln { animation: show .3s ease-out both; }
+}
+@keyframes draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes show { from { opacity: 0; } to { opacity: 1; } }
+</style>
+<defs>
+<clipPath id="hero-card"><rect width="720" height="808" rx="24"/></clipPath>
+<radialGradient id="hero-glow0" cx="0.12" cy="0.02" r="0.62"><stop offset="0" stop-color="#54dcc6" stop-opacity="0.2"/><stop offset="1" stop-color="#54dcc6" stop-opacity="0"/></radialGradient>
+<radialGradient id="hero-glow1" cx="0.9" cy="0.02" r="0.66"><stop offset="0" stop-color="#8272ff" stop-opacity="0.24"/><stop offset="1" stop-color="#8272ff" stop-opacity="0"/></radialGradient>
+<radialGradient id="hero-glow2" cx="0.3" cy="1.05" r="0.7"><stop offset="0" stop-color="#c8a06a" stop-opacity="0.12"/><stop offset="1" stop-color="#c8a06a" stop-opacity="0"/></radialGradient>
+</defs>
+<g clip-path="url(#hero-card)">
+<rect width="720" height="808" fill="#090a11"/>
+<rect width="720" height="808" fill="url(#hero-glow0)"/>
+<rect width="720" height="808" fill="url(#hero-glow1)"/>
+<rect width="720" height="808" fill="url(#hero-glow2)"/>
+</g>
+<rect x=".5" y=".5" width="719" height="807" rx="23.5" fill="none" stroke="rgba(150,146,184,.22)"/>
+<g transform="translate(20.10 24) scale(0.7)">
+<defs><mask id="hero-cut0" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M38.67 21.01C41.17 21.11 43.67 22.42 46.17 24.77C48.67 27.12 51.17 30.51 53.67 34.5C56.17 38.49 58.67 43.08 61.17 47.69C63.67 52.3 66.17 56.92 68.67 60.96M84.67 74.99C87.17 74.89 89.67 73.58 92.17 71.23C94.67 68.88 97.17 65.49 99.67 61.5C102.17 57.51 104.67 52.92 107.17 48.31C109.67 43.7 112.17 39.08 114.67 35.04M130.67 21.01C133.17 21.11 135.67 22.42 138.17 24.77C140.67 27.12 143.17 30.51 145.67 34.5C148.17 38.49 150.67 43.08 153.17 47.69C155.67 52.3 158.17 56.92 160.67 60.96M176.67 74.99C179.17 74.89 181.67 73.58 184.17 71.23C186.67 68.88 189.17 65.49 191.67 61.5C194.17 57.51 196.67 52.92 199.17 48.31C201.67 43.7 204.17 39.08 206.67 35.04M222.67 21.01C225.17 21.11 227.67 22.42 230.17 24.77C232.67 27.12 235.17 30.51 237.67 34.5C240.17 38.49 242.67 43.08 245.17 47.69C247.67 52.3 250.17 56.92 252.67 60.96M268.67 74.99C271.11 74.89 273.56 73.64 276 71.38C278.44 69.13 280.89 65.88 283.33 62.03C285.78 58.18 288.22 53.73 290.67 49.23C293.11 44.73 295.56 40.18 298 36.13" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask><mask id="hero-cut1" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M22 32.94C23.78 35.66 25.56 38.71 27.33 41.91C29.11 45.1 30.89 48.43 32.67 51.68C34.44 54.92 36.22 58.09 38 60.96M54 74.99C56.5 74.89 59 73.58 61.5 71.23C64 68.88 66.5 65.49 69 61.5C71.5 57.51 74 52.92 76.5 48.31C79 43.7 81.5 39.08 84 35.04M100 21.01C102.5 21.11 105 22.42 107.5 24.77C110 27.12 112.5 30.51 115 34.5C117.5 38.49 120 43.08 122.5 47.69C125 52.3 127.5 56.92 130 60.96M146 74.99C148.5 74.89 151 73.58 153.5 71.23C156 68.88 158.5 65.49 161 61.5C163.5 57.51 166 52.92 168.5 48.31C171 43.7 173.5 39.08 176 35.04M192 21.01C194.5 21.11 197 22.42 199.5 24.77C202 27.12 204.5 30.51 207 34.5C209.5 38.49 212 43.08 214.5 47.69C217 52.3 219.5 56.92 222 60.96M238 74.99C240.5 74.89 243 73.58 245.5 71.23C248 68.88 250.5 65.49 253 61.5C255.5 57.51 258 52.92 260.5 48.31C263 43.7 265.5 39.08 268 35.04" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask><mask id="hero-cut2" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="96"><rect x="0" y="0" width="320" height="96" fill="#fff"/><path d="M23.33 74.99C25.83 74.89 28.33 73.58 30.83 71.23C33.33 68.88 35.83 65.49 38.33 61.5C40.83 57.51 43.33 52.92 45.83 48.31C48.33 43.7 50.83 39.08 53.33 35.04M69.33 21.01C71.83 21.11 74.33 22.42 76.83 24.77C79.33 27.12 81.83 30.51 84.33 34.5C86.83 38.49 89.33 43.08 91.83 47.69C94.33 52.3 96.83 56.92 99.33 60.96M115.33 74.99C117.83 74.89 120.33 73.58 122.83 71.23C125.33 68.88 127.83 65.49 130.33 61.5C132.83 57.51 135.33 52.92 137.83 48.31C140.33 43.7 142.83 39.08 145.33 35.04M161.33 21.01C163.83 21.11 166.33 22.42 168.83 24.77C171.33 27.12 173.83 30.51 176.33 34.5C178.83 38.49 181.33 43.08 183.83 47.69C186.33 52.3 188.83 56.92 191.33 60.96M207.33 74.99C209.83 74.89 212.33 73.58 214.83 71.23C217.33 68.88 219.83 65.49 222.33 61.5C224.83 57.51 227.33 52.92 229.83 48.31C232.33 43.7 234.83 39.08 237.33 35.04M253.33 21.01C255.83 21.11 258.33 22.42 260.83 24.77C263.33 27.12 265.83 30.51 268.33 34.5C270.83 38.49 273.33 43.08 275.83 47.69C278.33 52.3 280.83 56.92 283.33 60.96" fill="none" stroke="#000" stroke-width="18.5" stroke-linecap="butt"/></mask></defs>
+<path class="s sa" d="M22 74.94C25.83 75.42 29.67 73 33.5 68.35C37.33 63.7 41.17 56.89 45 49.84C48.83 42.79 52.67 35.58 56.5 30.26C60.33 24.93 64.17 21.55 68 21.06C71.83 20.58 75.67 23 79.5 27.65C83.33 32.3 87.17 39.11 91 46.16C94.83 53.21 98.67 60.42 102.5 65.74C106.33 71.07 110.17 74.45 114 74.94C117.83 75.42 121.67 73 125.5 68.35C129.33 63.7 133.17 56.89 137 49.84C140.83 42.79 144.67 35.58 148.5 30.26C152.33 24.93 156.17 21.55 160 21.06C163.83 20.58 167.67 23 171.5 27.65C175.33 32.3 179.17 39.11 183 46.16C186.83 53.21 190.67 60.42 194.5 65.74C198.33 71.07 202.17 74.45 206 74.94C209.83 75.42 213.67 73 217.5 68.35C221.33 63.7 225.17 56.89 229 49.84C232.83 42.79 236.67 35.58 240.5 30.26C244.33 24.93 248.17 21.55 252 21.06C255.83 20.58 259.67 23 263.5 27.65C267.33 32.3 271.17 39.11 275 46.16C278.83 53.21 282.67 60.42 286.5 65.74C290.33 71.07 294.17 74.45 298 74.94" mask="url(#hero-cut0)" pathLength="1"/>
+<path class="s sb" d="M22 36.13C25.83 29.78 29.67 24.75 33.5 22.46C37.33 20.17 41.17 20.64 45 23.75C48.83 26.86 52.67 32.56 56.5 39.25C60.33 45.94 64.17 53.52 68 59.87C71.83 66.22 75.67 71.25 79.5 73.54C83.33 75.83 87.17 75.36 91 72.25C94.83 69.14 98.67 63.44 102.5 56.75C106.33 50.06 110.17 42.48 114 36.13C117.83 29.78 121.67 24.75 125.5 22.46C129.33 20.17 133.17 20.64 137 23.75C140.83 26.86 144.67 32.56 148.5 39.25C152.33 45.94 156.17 53.52 160 59.87C163.83 66.22 167.67 71.25 171.5 73.54C175.33 75.83 179.17 75.36 183 72.25C186.83 69.14 190.67 63.44 194.5 56.75C198.33 50.06 202.17 42.48 206 36.13C209.83 29.78 213.67 24.75 217.5 22.46C221.33 20.17 225.17 20.64 229 23.75C232.83 26.86 236.67 32.56 240.5 39.25C244.33 45.94 248.17 53.52 252 59.87C255.83 66.22 259.67 71.25 263.5 73.54C267.33 75.83 271.17 75.36 275 72.25C278.83 69.14 282.67 63.44 286.5 56.75C290.33 50.06 294.17 42.48 298 36.13" mask="url(#hero-cut1)" pathLength="1"/>
+<path class="s sc" d="M22 32.94C25.83 38.8 29.67 46.26 33.5 53.19C37.33 60.13 41.17 66.46 45 70.41C48.83 74.35 52.67 75.86 56.5 74.5C60.33 73.14 64.17 68.93 68 63.06C71.83 57.2 75.67 49.74 79.5 42.81C83.33 35.87 87.17 29.54 91 25.59C94.83 21.65 98.67 20.14 102.5 21.5C106.33 22.86 110.17 27.07 114 32.94C117.83 38.8 121.67 46.26 125.5 53.19C129.33 60.13 133.17 66.46 137 70.41C140.83 74.35 144.67 75.86 148.5 74.5C152.33 73.14 156.17 68.93 160 63.06C163.83 57.2 167.67 49.74 171.5 42.81C175.33 35.87 179.17 29.54 183 25.59C186.83 21.65 190.67 20.14 194.5 21.5C198.33 22.86 202.17 27.07 206 32.94C209.83 38.8 213.67 46.26 217.5 53.19C221.33 60.13 225.17 66.46 229 70.41C232.83 74.35 236.67 75.86 240.5 74.5C244.33 73.14 248.17 68.93 252 63.06C255.83 57.2 259.67 49.74 263.5 42.81C267.33 35.87 271.17 29.54 275 25.59C278.83 21.65 282.67 20.14 286.5 21.5C290.33 22.86 294.17 27.07 298 32.94" mask="url(#hero-cut2)" pathLength="1"/>
+</g>
+<text class="url" x="688" y="66" text-anchor="end">braid.elffuss.com</text>
+<text class="tag" x="32" y="166">Many agents.</text>
+<text class="tag" x="32" y="234">One main.</text>
+<text class="tag" x="32" y="302">No retry loop.</text>
+<g class="term">
+<rect x="24" y="338" width="672" height="442" rx="16" fill="#0e0f18" stroke="rgba(150,146,184,.28)"/>
+<rect x="25" y="360" width="3" height="398" fill="#c8a06a"/>
+<rect x="28" y="360" width="3" height="398" fill="#54dcc6"/>
+<rect x="31" y="360" width="3" height="398" fill="#8272ff"/>
+</g>
+<text class="ln" x="58" y="382" xml:space="preserve" style="animation-delay: 1.10s"><tspan fill="#7f7ca0"># landing on main is one short step that</tspan></text>
+<text class="ln" x="58" y="416" xml:space="preserve" style="animation-delay: 1.32s"><tspan fill="#7f7ca0"># they take in turn</tspan></text>
+<text class="ln" x="58" y="450" xml:space="preserve" style="animation-delay: 1.54s"><tspan fill="#c8a06a">[agent-a]</tspan><tspan fill="#7f7ca0"> $ </tspan><tspan fill="#eae8f2">braid land</tspan></text>
+<text class="ln" x="58" y="484" xml:space="preserve" style="animation-delay: 1.76s"><tspan fill="#b3afce">Landed 0b042deed1e6 on main (fast-forward)</tspan></text>
+<text class="ln" x="58" y="518" xml:space="preserve" style="animation-delay: 1.98s"><tspan fill="#54dcc6">[agent-b]</tspan><tspan fill="#7f7ca0"> $ </tspan><tspan fill="#eae8f2">braid land</tspan></text>
+<text class="ln" x="58" y="552" xml:space="preserve" style="animation-delay: 2.20s"><tspan fill="#b3afce">Landed on main as 4ac41391a609,</tspan></text>
+<text class="ln" x="58" y="586" xml:space="preserve" style="animation-delay: 2.42s"><tspan fill="#b3afce">  rebased onto 0b042deed1e6</tspan></text>
+<text class="ln" x="58" y="620" xml:space="preserve" style="animation-delay: 2.64s"><tspan fill="#8272ff">[agent-c]</tspan><tspan fill="#7f7ca0"> $ </tspan><tspan fill="#eae8f2">braid land</tspan></text>
+<text class="ln" x="58" y="654" xml:space="preserve" style="animation-delay: 2.86s"><tspan fill="#b3afce">fc89c7629ad1 conflicts with main at</tspan></text>
+<text class="ln" x="58" y="688" xml:space="preserve" style="animation-delay: 3.08s"><tspan fill="#b3afce">  4ac41391a609; main did not move:</tspan></text>
+<text class="ln" x="58" y="722" xml:space="preserve" style="animation-delay: 3.30s"><tspan fill="#b3afce">  CONTENT       shipping.toml  (1 region)</tspan></text>
+<text class="ln" x="58" y="756" xml:space="preserve" style="animation-delay: 3.52s"><tspan fill="#e779cf">exit status 2</tspan></text>
+</svg>
