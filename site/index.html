@@ -62,7 +62,7 @@
       "codeRepository": "https://github.com/KikoCis/elffuss-braid",
       "programmingLanguage": { "@type": "ComputerLanguage", "name": "Rust" },
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "copyrightHolder": { "@id": "https://braid.elffuss.com/#utopiaia" },
       "copyrightYear": 2026,
       "targetProduct": { "@id": "https://braid.elffuss.com/#app" }
@@ -77,7 +77,7 @@
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "Version control system",
       "operatingSystem": "Linux and other Unix-like systems",
-      "softwareVersion": "0.1.1",
+      "softwareVersion": "0.1.2",
       "softwareRequirements": "Rust 1.89 or newer, a C compiler (cc), git, and a POSIX shell such as bash",
       "installUrl": "https://braid.elffuss.com/agents.md",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
@@ -496,7 +496,7 @@ git init --quiet --bare remote.git
 <p data-l="es" lang="es">Los mismos pasos, en una copia de git que esté en su rama principal, sin nada pendiente de commit y con <code>user.name</code> y <code>user.email</code> configurados en git:</p>
 <div class="code" lang="en">
 <div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the setup commands" data-aria-en="Copy the setup commands" data-aria-es="Copiar los comandos para configurarlo" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
-<pre tabindex="0" role="region" aria-label="Setting braid up by hand" data-aria-en="Setting braid up by hand" data-aria-es="Configurar braid a mano"><code>cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.1 elffuss-braid-cli
+<pre tabindex="0" role="region" aria-label="Setting braid up by hand" data-aria-en="Setting braid up by hand" data-aria-es="Configurar braid a mano"><code>cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.2 elffuss-braid-cli
 braid init                       # .braid/: the store and the agents' workspaces
 mkdir -p "$(git rev-parse --git-path info)"
 echo .braid &gt;&gt; "$(git rev-parse --git-path info/exclude)"   # git ignores braid, in this checkout only
