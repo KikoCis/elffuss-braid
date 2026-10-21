@@ -17,8 +17,8 @@
 //! carries a `reverts` field and the agent `braid-verify`, and verify never
 //! reverts such a changeset, nor lands more reverts an hour than it is
 //! allowed, counting them by their own committer time. A label anyone can
-//! write is safe to refuse on. `.braid/verify/` keeps a record of the reverts this
-//! repository landed, as a second source for both rules.
+//! write is safe to refuse on. `.braid/verify/` keeps a record of the
+//! reverts this repository landed, as a second source for both rules.
 
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
