@@ -149,7 +149,9 @@ The green ref is local: a fresh clone has none, so give --from there.
 --dry-run runs the tests but moves no ref, records nothing, lands nothing
 and does not fetch. In a repository linked to a hub, verify fetches first
 and lands a revert on the hub; --local, or BRAID_HUB=off, keeps it here.
-Run one verify per branch at a time.
+Verify records all its work as the agent braid-verify, whatever --agent or
+BRAID_AGENT says: its fetches, the green ref's moves, and the reverts it
+makes and lands. Run one verify per branch at a time.
 
 With --json it prints branch; tip, the head it tested; green_before and
 green, the green ref before and after; outcome, one of pass, flaky, red,
