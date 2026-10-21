@@ -9,7 +9,9 @@ mod common;
 
 use braid_engine::{AGENT, REBASED_FROM, REVERTS, read_changeset};
 use braid_format::{ChangeOp, GitId, ObjectId};
-use braid_wc::{Error, Landed, RevertRequest, create_revert, land_change};
+use braid_wc::{
+    Error, Landed, RevertRequest, create_revert, create_revert_with_message, land_change,
+};
 use common::{Fixture, ada};
 
 fn revert(f: &Fixture, culprit: ObjectId, mainline: bool) -> Result<ObjectId, Error> {
@@ -189,5 +191,61 @@ fn roots_empty_changes_and_merges_are_refused() {
     assert!(matches!(
         revert(&f, side, true),
         Err(Error::NotAMerge(id)) if id == side
+    ));
+}
+
+#[test]
+fn a_revert_can_carry_a_message_of_its_own() {
+    let f = Fixture::new();
+    let base = f.commit(&[], vec![("a", f.file("1\n")), ("b", f.file("b\n"))]);
+    let culprit = f.commit(
+        &[base],
+        vec![("a", f.file("2\n")), ("run", f.exec("echo\n"))],
+    );
+    let request = |culprit, mainline| RevertRequest {
+        culprit,
+        mainline,
+        author: ada(),
+        agent: "reverter".to_owned(),
+    };
+    let message = b"Undo the change to a\n\nIt broke the tests.\n";
+    let own =
+        create_revert_with_message(f.repo.store(), &request(culprit, false), message).unwrap();
+    let usual = revert(&f, culprit, false).unwrap();
+    let (own, usual) = (
+        read_changeset(f.repo.store(), own).unwrap(),
+        read_changeset(f.repo.store(), usual).unwrap(),
+    );
+    assert_eq!(own.message, message);
+    assert_ne!(usual.message, own.message);
+    assert_eq!(own.root, usual.root);
+    assert_eq!(own.root, root(&f, base));
+    assert_eq!(own.parents, usual.parents);
+    assert_eq!(own.parents, [culprit]);
+    assert_eq!(own.extras, usual.extras);
+    assert_eq!(own.changes, usual.changes);
+
+    // And the same refusals.
+    let with_message = |culprit, mainline| {
+        create_revert_with_message(f.repo.store(), &request(culprit, mainline), message)
+    };
+    assert!(matches!(
+        with_message(base, false),
+        Err(Error::RevertRoot(_))
+    ));
+    assert!(matches!(
+        with_message(culprit, true),
+        Err(Error::NotAMerge(_))
+    ));
+    let empty = f.commit(&[culprit], Vec::new());
+    assert!(matches!(
+        with_message(empty, false),
+        Err(Error::NothingToRevert(_))
+    ));
+    let side = f.commit(&[base], vec![("s", f.file("s\n"))]);
+    let merge = f.commit(&[culprit, side], vec![("s", f.file("s\n"))]);
+    assert!(matches!(
+        with_message(merge, false),
+        Err(Error::RevertMerge { parents: 2, .. })
     ));
 }

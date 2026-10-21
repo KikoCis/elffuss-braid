@@ -41,10 +41,13 @@
 //!   rebasing its own changesets; conflicts are written with markers.
 //! - [`create_change`] and [`land_change`] make and land a changeset
 //!   without any working copy; [`create_revert`] makes one that undoes
-//!   another; [`land_stack`] lands a stack of them made elsewhere, as a hub
-//!   does.
-//! - [`materialize`] writes a changeset's files into a plain directory,
-//!   with the same safe checkout, for a command that only needs the files.
+//!   another, and [`create_revert_with_message`] the same with a message of
+//!   the caller's; [`land_stack`] lands a stack of them made elsewhere, as a
+//!   hub does.
+//! - `materialize` writes a changeset's files into a plain directory, with
+//!   the same safe checkout, for a command that only needs the files. It
+//!   comes with the `materialize` feature, on by default; a build that never
+//!   writes files outside a workspace, such as a server's, can leave it out.
 //! - [`Workspace::stack`] and [`Workspace::adopt`] split a landing in two,
 //!   for a repository whose branches live on a hub: what to land there,
 //!   and moving onto the head that holds it afterwards.
@@ -75,6 +78,7 @@ mod fsprobe;
 mod identity;
 mod ignores;
 mod markers;
+#[cfg(feature = "materialize")]
 mod materialize;
 mod paths;
 mod rebase;
@@ -87,10 +91,14 @@ mod tree;
 mod workspace;
 
 pub use blocker::Blocker;
-pub use change::{ChangeRequest, Expect, RevertRequest, create_change, create_revert, land_change};
+pub use change::{
+    ChangeRequest, Expect, RevertRequest, create_change, create_revert, create_revert_with_message,
+    land_change,
+};
 pub use error::Error;
 pub use fsprobe::FileSystem;
 pub use identity::Identity;
+#[cfg(feature = "materialize")]
 pub use materialize::materialize;
 pub use paths::workspace_path;
 pub use stack::{StackMode, land_stack};

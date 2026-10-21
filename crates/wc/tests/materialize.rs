@@ -4,6 +4,8 @@
 //! Writing a changeset into a plain directory: the files only, with the
 //! checkout's modes and its refusal to follow symlinks.
 
+#![cfg(feature = "materialize")]
+
 mod common;
 
 use braid_format::{ChangeOp, GitId};

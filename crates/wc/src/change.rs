@@ -161,6 +161,21 @@ pub struct RevertRequest {
 pub fn create_revert(store: &Store, request: &RevertRequest) -> Result<ObjectId, Error> {
     let culprit = request.culprit;
     let changeset = read_changeset(store, culprit)?;
+    let mut message = format!("Revert \"{}\"", subject(&changeset.message)).into_bytes();
+    message.extend_from_slice(format!("\n\nThis reverts changeset {culprit}.\n").as_bytes());
+    create_revert_with_message(store, request, &message)
+}
+
+/// Makes the revert of `request.culprit` as [`create_revert`] does, with the
+/// same parent, changes, extra fields and refusals, but with `message` for
+/// its message.
+pub fn create_revert_with_message(
+    store: &Store,
+    request: &RevertRequest,
+    message: &[u8],
+) -> Result<ObjectId, Error> {
+    let culprit = request.culprit;
+    let changeset = read_changeset(store, culprit)?;
     let parent = match changeset.parents.as_slice() {
         [] => return Err(Error::RevertRoot(culprit)),
         [_] if request.mainline => return Err(Error::NotAMerge(culprit)),
@@ -178,8 +193,6 @@ pub fn create_revert(store: &Store, request: &RevertRequest) -> Result<ObjectId,
     if changes.is_empty() {
         return Err(Error::NothingToRevert(culprit));
     }
-    let mut message = format!("Revert \"{}\"", subject(&changeset.message)).into_bytes();
-    message.extend_from_slice(format!("\n\nThis reverts changeset {culprit}.\n").as_bytes());
     let mut extras = crate::rebase::agent_extras(&request.agent);
     extras.push((REVERTS.to_vec(), culprit.to_hex().into_bytes()));
     let signature = request.author.now();
@@ -189,7 +202,7 @@ pub fn create_revert(store: &Store, request: &RevertRequest) -> Result<ObjectId,
         changes,
         signature.clone(),
         signature,
-        message,
+        message.to_vec(),
         extras,
     )?;
     store.sync()?;
