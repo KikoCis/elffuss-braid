@@ -319,9 +319,9 @@ enum Command {
     /// conflicts).
     #[command(long_about = revert::REVERT_HELP)]
     Revert(revert::RevertArgs),
-    /// Run the tests on a branch's head, keep braid/green/<branch> at the
-    /// newest changeset that passed, and find what broke them (exit status
-    /// 4 when the branch is red).
+    /// Run the tests on a branch's head, keep its green ref at the newest
+    /// changeset that passed, and find what broke them (exit status 4 when
+    /// the branch is red).
     #[command(long_about = verify::VERIFY_HELP)]
     Verify(verify::VerifyArgs),
 }
