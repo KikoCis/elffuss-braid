@@ -153,7 +153,14 @@ impl Repo {
     }
 
     fn has_record(&self) -> bool {
-        self.dir.join(".braid/verify/main.json").is_file()
+        // The branch's name in hex.
+        self.dir.join(".braid/verify/6d61696e.json").is_file()
+    }
+
+    /// Forgets the local record of verify's reverts, as a fresh clone
+    /// never had it.
+    fn forget_record(&self) {
+        std::fs::remove_dir_all(self.dir.join(".braid/verify")).unwrap();
     }
 }
 
@@ -321,9 +328,12 @@ fn reverts_stop_at_the_hourly_cap() {
         4,
     );
     assert_eq!(first["outcome"], "reverted");
-    // Green again, then broken again: the cap of one an hour is spent.
+    // Green again, then broken again: the cap of one an hour is spent. It
+    // is counted on the branch, so a clone without verify's record, as CI
+    // has, counts it too.
     assert_eq!(r.verify(&[], 0)["outcome"], "pass");
     let again = r.land(&[("broken", "again\n")], &[], "Break again");
+    r.forget_record();
     let second = r.verify(
         &["--revert", "--reruns", "0", "--max-reverts-per-hour", "1"],
         4,
@@ -350,8 +360,10 @@ fn verify_does_not_revert_its_own_revert() {
     let revert = r.head().unwrap();
 
     // Now the revert fails and the change it undid passes: the culprit is
-    // the revert, which verify leaves alone.
+    // the revert, which verify leaves alone, by what the revert says of
+    // itself, without its record.
     std::fs::write(&list, format!("{revert}\n")).unwrap();
+    r.forget_record();
     let out = r.verify_env(&["--revert", "--reruns", "0"], &command, &[], 4);
     assert_eq!(out["outcome"], "refused");
     assert_eq!(out["culprit"], revert.as_str());
@@ -400,6 +412,13 @@ fn a_run_that_fails_then_passes_is_flaky() {
     let out = r.verify_env(&[], &["sh", "-c", &script], &[], 0);
     assert_eq!(out["outcome"], "flaky");
     assert_eq!(out["tests_run"], 2);
+    // A flaky pass leaves the green ref where it was, unless asked.
+    assert_eq!(out["green"], Value::Null);
+    assert!(id(&out["reason"]).contains("--flaky-moves-green"));
+    assert_eq!(r.green(), None);
+    std::fs::remove_file(&marker).unwrap();
+    let out = r.verify_env(&["--flaky-moves-green"], &["sh", "-c", &script], &[], 0);
+    assert_eq!(out["outcome"], "flaky");
     assert_eq!(out["green"], r.head().unwrap().as_str());
 }
 
@@ -422,6 +441,29 @@ fn the_tests_get_a_clean_copy_and_no_credentials() {
     let leak = "test -n \"$BRAID_AGENT\"";
     let out = r.verify_env(&["--dry-run"], &["sh", "-c", leak], &envs, 0);
     assert_eq!(out["outcome"], "pass");
+    // The environment as `env` prints it, with no shell to change it: PWD
+    // names the copy, and OLDPWD, which named the repository, is gone.
+    let envs = [
+        ("BRAID_TOKEN", "brd_secret"),
+        ("BRAID_HUB_URL", "https://hub.example.org"),
+        ("OLDPWD", r.dir.to_str().unwrap()),
+        ("PWD", r.dir.to_str().unwrap()),
+    ];
+    let out = braid_with(&r.dir, &["verify", "--dry-run", "--", "env"], &envs);
+    assert!(out.status.success());
+    let printed = String::from_utf8_lossy(&out.stderr);
+    let var = |name: &str| {
+        printed
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .map(str::to_owned)
+    };
+    assert_eq!(var("BRAID_TOKEN"), None);
+    assert_eq!(var("BRAID_HUB_URL"), None);
+    assert_eq!(var("OLDPWD"), None);
+    let pwd = var("PWD").unwrap();
+    assert!(pwd.contains("braid-verify-"), "{pwd}");
+    assert_eq!(var("BRAID_VERIFY_BRANCH").as_deref(), Some("main"));
     // A command that cannot run is an error, not a red branch.
     let out = braid_with(&r.dir, &["verify", "--", "no-such-command-for-braid"], &[]);
     assert_eq!(out.status.code(), Some(1));
@@ -463,4 +505,166 @@ fn a_timeout_kills_the_command_and_what_it_started() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(!alive, "the background process {pid} outlived the timeout");
+}
+
+/// Whether the process `pid` is gone, or a zombie waiting to be reaped,
+/// within a few seconds.
+#[cfg(unix)]
+fn gone(pid: &str) -> bool {
+    for _ in 0..100 {
+        let ps = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&ps.stdout).trim().to_owned();
+        if state.is_empty() || state.starts_with('Z') {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// The contents of `path` once a command wrote them, within a few seconds.
+#[cfg(unix)]
+fn written(path: &Path) -> String {
+    for _ in 0..200 {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.ends_with('\n')
+        {
+            return text.trim().to_owned();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{} was never written", path.display());
+}
+
+#[cfg(unix)]
+#[test]
+fn what_a_passing_command_leaves_running_is_killed() {
+    let r = Repo::new();
+    let pid_file = r.outside.join("pid");
+    let script = format!(
+        "sleep 120 > /dev/null 2>&1 & echo $! > '{}'",
+        pid_file.display()
+    );
+    let out = r.verify_env(&["--dry-run"], &["sh", "-c", &script], &[], 0);
+    assert_eq!(out["outcome"], "pass");
+    let pid = written(&pid_file);
+    assert!(gone(&pid), "the background process {pid} outlived its test");
+}
+
+#[cfg(unix)]
+#[test]
+fn stopping_braid_stops_the_tests_and_removes_their_copy() {
+    let r = Repo::new();
+    let shell_file = r.outside.join("shell");
+    let sleep_file = r.outside.join("sleep");
+    let dir_file = r.outside.join("dir");
+    let script = format!(
+        "pwd > '{dir}'; echo $$ > '{shell}'; sleep 120 > /dev/null 2>&1 & echo $! > '{sleep}'; wait",
+        dir = dir_file.display(),
+        shell = shell_file.display(),
+        sleep = sleep_file.display(),
+    );
+    let mut braid = Command::new(env!("CARGO_BIN_EXE_braid"))
+        .current_dir(&r.dir)
+        .args(["verify", "--", "sh", "-c", &script])
+        .env("BRAID_HUB", "off")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let sleep = written(&sleep_file);
+    let shell = written(&shell_file);
+    let dir = PathBuf::from(written(&dir_file));
+    assert!(dir.is_dir());
+    // Only the braid this test started.
+    let term = Command::new("kill")
+        .args(["-TERM", &braid.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(term.success());
+    braid.wait().unwrap();
+    assert!(gone(&shell), "the test's shell {shell} outlived braid");
+    assert!(gone(&sleep), "the test's sleep {sleep} outlived braid");
+    let mut removed = false;
+    for _ in 0..100 {
+        if !dir.exists() {
+            removed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(removed, "{} is still there", dir.display());
+}
+
+#[test]
+fn a_revert_verify_made_earlier_does_not_stall_the_bisect() {
+    // Green at the seed; C broke the tests and verify reverted it; then D
+    // broke them again. Bisecting from the seed meets C first: verify sees
+    // its revert, tests it, and goes on after it to find D.
+    let r = Repo::new();
+    assert_eq!(r.verify(&[], 0)["outcome"], "pass");
+    let c = r.land(&[("broken", "c\n")], &[], "C breaks the tests");
+    let first = r.verify(&["--revert", "--reruns", "0"], 4);
+    assert_eq!(first["outcome"], "reverted");
+    assert_eq!(first["culprit"], c.as_str());
+    let d = r.land(
+        &[("broken", "d\n"), ("d", "d\n")],
+        &[],
+        "D breaks them again",
+    );
+    let second = r.verify(&["--revert", "--reruns", "0"], 4);
+    assert_eq!(second["outcome"], "reverted", "{second}");
+    assert_eq!(second["culprit"], d.as_str());
+    // The head, C, C's revert, then the green one is not needed.
+    assert_eq!(second["tests_run"], 3);
+    assert_eq!(r.verify(&[], 0)["outcome"], "pass");
+}
+
+#[test]
+fn a_changeset_that_cannot_be_written_here_is_skipped() {
+    // Two names that differ only in case are one file where the file
+    // system ignores case: such a changeset cannot be tested there.
+    let probe = tempfile::tempdir().unwrap();
+    std::fs::write(probe.path().join("Aa"), "").unwrap();
+    if !probe.path().join("aA").exists() {
+        return;
+    }
+    let r = Repo::new();
+    assert_eq!(r.verify(&[], 0)["outcome"], "pass");
+    r.land(&[("a", "a\n")], &[], "Add a");
+    let twins = r.land(&[("Case", "1\n"), ("case", "2\n")], &[], "Add twins");
+    r.land(&[], &["case"], "Remove a twin");
+    let culprit = r.land(&[("broken", "x\n")], &[], "Break");
+    r.land(&[("z", "z\n")], &[], "Add z");
+    let out = r.verify(&["--reruns", "0"], 4);
+    assert_eq!(out["outcome"], "red");
+    assert_eq!(out["culprit"], culprit.as_str());
+    assert_eq!(out["skipped"], serde_json::json!([twins]));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_error_after_the_revert_landed_keeps_it_in_the_report() {
+    use std::os::unix::fs::PermissionsExt;
+    let (r, _, ids) = broken_after_green();
+    // Verify's record cannot be written.
+    let record = r.dir.join(".braid/verify");
+    std::fs::create_dir(&record).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let out = r.verify(&["--revert", "--reruns", "0"], 1);
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(out["outcome"], "error");
+    assert_eq!(out["culprit"], ids[1].as_str());
+    let revert = id(&out["revert"]);
+    assert_eq!(out["land"]["outcome"], "rebased");
+    let head = r.head().unwrap();
+    assert_eq!(out["land"]["head"], head.as_str());
+    assert_ne!(head, ids[3]);
+    assert!(!revert.is_empty());
+    // The branch says verify made it, so the next pass will not undo it.
+    let shown = run(&r.dir, &["show", "main"], 0);
+    assert_eq!(shown["agent"], "braid-verify");
 }

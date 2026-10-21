@@ -6,24 +6,32 @@
 //! changeset that broke them and, if asked, revert it.
 //!
 //! One pass per invocation. The tests run in a fresh copy of the
-//! changeset's files outside the repository, with no shell, and with the
-//! hub's credentials taken out of their environment. The green ref,
-//! `braid/green/<branch>`, is in braid's own namespace, so it is never
-//! exported to git or sent to a hub; it moves with a compare-and-swap, in
-//! an operation of its own. The reverts verify landed are recorded in
-//! `.braid/verify/<branch>.json`, which is what it trusts to tell its own
-//! reverts, never the `reverts` field a changeset carries.
+//! changeset's files outside the repository, with no shell, in a process
+//! group of their own that a watchdog process kills if braid goes away. The
+//! green ref, `braid/green/<branch>`, is in braid's own namespace, so it is
+//! never exported to git or sent to a hub: it is local to the repository.
+//! It moves with a compare-and-swap, in an operation of its own.
+//!
+//! What verify must not do again it reads from the branch itself, so that a
+//! fresh clone, as CI has, follows the same rules: a revert verify made
+//! carries a `reverts` field and the agent `braid-verify`, and verify never
+//! reverts such a changeset, nor lands more reverts an hour than it is
+//! allowed, counting them by their committer time. A label anyone can write
+//! is safe to refuse on. `.braid/verify/` keeps a record of the reverts this
+//! repository landed, as a second source for both rules.
 
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use braid_format::ObjectId;
+use braid_engine::{AGENT as AGENT_FIELD, REVERTS};
+use braid_format::{Changeset, ObjectId};
 use braid_repo::Repo;
 use braid_store::RefUpdate;
 use braid_wc::RevertRequest;
@@ -33,12 +41,15 @@ use serde_json::{Value, json};
 
 use crate::hub::{self, link::Link};
 use crate::revert::{branch_or_main, land_revert};
-use crate::work::{IdentityArgs, Report, hex, identity, print_conflicts, short};
+use crate::work::{IdentityArgs, Report, count, hex, identity, print_conflicts, short};
 use crate::{Cli, open_repo, print_json, resolve_changeset};
 
 /// The agent label of everything verify records: the green ref's moves,
 /// and the reverts it makes and lands.
 pub(crate) const AGENT: &str = "braid-verify";
+
+/// The hidden subcommand that watches a test run for braid going away.
+pub(crate) const WATCHDOG: &str = "__verify-watchdog";
 
 /// Exit status of a pass that leaves the branch red: the tests fail on its
 /// head, whether or not the culprit was found or reverted.
@@ -46,6 +57,13 @@ const RED: u8 = 4;
 
 /// The exit status of a revert that conflicts, as for every conflict.
 const CONFLICTS: u8 = crate::work::CONFLICTS;
+
+/// The prefix of the scratch directories the tests run in.
+const SCRATCH_PREFIX: &str = "braid-verify-";
+
+/// How far down the branch verify looks for its own reverts of the last
+/// hour, at most.
+const HISTORY_LIMIT: usize = 10_000;
 
 /// The green ref of `branch`: the newest changeset of it that passed.
 pub(crate) fn green_ref(branch: &str) -> String {
@@ -61,47 +79,64 @@ them, and with --revert, revert it.
 
 The command comes after `--` and runs as given, with no shell: write
 `-- sh -c '...'` for one. It runs in a fresh copy of the changeset's files,
-in a new directory under the system's temporary directory: outside the
-repository, with no .braid file and no .git, so each run starts from
-scratch and nothing it writes stays. Its output goes to standard error. It
-gets BRAID_VERIFY_CHANGESET (the changeset's id) and BRAID_VERIFY_BRANCH,
-and neither BRAID_TOKEN nor any BRAID_HUB variable. A run fails when the
-command exits with a status other than 0, is killed, or runs longer than
---timeout (10m by default; s, m and h are the units), which kills it and
-every process it started.
+in a new directory under the system's temporary directory, outside the
+repository and with no .braid file and no .git, so each run starts from
+scratch; the directory is removed after the run. Its output goes to
+standard error. It gets BRAID_VERIFY_CHANGESET (the changeset's id),
+BRAID_VERIFY_BRANCH and PWD (its directory); BRAID_TOKEN, every variable
+whose name starts with BRAID_HUB, and OLDPWD are taken out.
+
+That is all the isolation there is: the command runs as you, with your
+access to every file, the network, the braid command, and any hub login
+saved in braid's configuration directory. Run verify in a sandbox, a
+container or as a separate user when the code it tests is not trusted.
+
+A run fails when the command exits with a status other than 0, is killed,
+or runs longer than --timeout (10m by default; s, m and h are the units).
+The command runs in a process group of its own: when it exits or times
+out, the group is killed, and so are processes it started that are still
+in it (one that left the group, as a daemon does, is not). If braid itself
+is stopped, a watchdog process kills the group and removes the directory.
 
   - The head is the green changeset already: pass, and nothing runs.
   - The tests pass: the green ref moves to the head, in an operation of
     its own by braid-verify. A run that failed and passed when run again
-    (--reruns, 1 by default) is flaky, and moves it too.
+    (--reruns, 1 by default) is flaky: the green ref stays, unless
+    --flaky-moves-green.
   - They fail, again on every rerun: verify bisects the changesets after
     the green one along first parents, the head's changes and its
     parents', to find the first that fails. With no green ref yet it does
-    not bisect unless --from names a changeset to take as passing.
-    Midpoints run as they are: an earlier revert in the range is not
-    undone first.
+    not bisect unless --from names a changeset to take as passing. A
+    changeset whose files cannot be written on this system is skipped, and
+    listed in skipped. When the first failing changeset was reverted later
+    in the range, verify tests the revert and, if it passes, goes on
+    bisecting after it. Otherwise midpoints run as they are.
   - With --revert, the culprit is reverted and the revert landed, as
     `braid revert` does. Verify does not revert a merge, nor a revert it
-    made itself (it keeps those in .braid/verify/<branch>.json), nor more
-    than --max-reverts-per-hour (3 by default). The green ref does not move:
-    the next run tests the new head.
+    made (one with a reverts field and the agent braid-verify), nor more
+    than --max-reverts-per-hour (3 by default), which it counts on the
+    branch by committer time and in .braid/verify/. The green ref does not
+    move: the next run tests the new head.
 
---dry-run runs the tests but moves no ref, records nothing and lands
-nothing. In a repository linked to a hub, verify fetches first and lands a
-revert on the hub; --local, or BRAID_HUB=off, keeps it here. Run one verify
-per branch at a time.
+The green ref is local: a fresh clone has none, so give --from there.
+--dry-run runs the tests but moves no ref, records nothing, lands nothing
+and does not fetch. In a repository linked to a hub, verify fetches first
+and lands a revert on the hub; --local, or BRAID_HUB=off, keeps it here.
+Run one verify per branch at a time.
 
 With --json it prints branch; tip, the head it tested; green_before and
 green, the green ref before and after; outcome, one of pass, flaky, red,
 reverted, revert_conflicts, refused, no_culprit or error; culprit, the
 first failing changeset, or null; revert, the revert made, or null;
-tests_run, how many times the command ran; reason, why, in words, or null;
-dry_run; and land, the landing report of the revert as `braid land --help`
-describes it, or null.
+skipped, the changesets that could not be tested; tests_run, how many
+times the command ran; reason, why, in words, or null; dry_run; and land,
+the landing report of the revert as `braid land --help` describes it, or
+null.
 
 Exit status: 0 for pass and flaky; 4 for red, reverted, refused and
-no_culprit; 2 for revert_conflicts; 1 for an error, with the report
-printed when the tests had started.";
+no_culprit; 2 for revert_conflicts; 1 for an error. Once the tests have
+started, or a revert was made, an error prints the report too, with what
+was done until then.";
 
 #[derive(Debug, Args)]
 pub(crate) struct VerifyArgs {
@@ -112,7 +147,8 @@ pub(crate) struct VerifyArgs {
     /// Revert the changeset that broke the tests, and land the revert.
     #[arg(long)]
     revert: bool,
-    /// Run the tests, but move no ref, record nothing and land nothing.
+    /// Run the tests, but move no ref, record nothing, land nothing and
+    /// fetch nothing.
     #[arg(long)]
     dry_run: bool,
     /// The most reverts verify lands on the branch in an hour.
@@ -122,6 +158,9 @@ pub(crate) struct VerifyArgs {
     /// failing.
     #[arg(long, value_name = "N", default_value_t = 1)]
     reruns: u32,
+    /// Move the green ref when the tests passed only on a rerun.
+    #[arg(long)]
+    flaky_moves_green: bool,
     /// How long one run may take: a number with s, m or h.
     #[arg(long, value_name = "DURATION", default_value = "10m", value_parser = parse_duration)]
     timeout: Duration,
@@ -161,13 +200,15 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     }
 }
 
-/// What one pass found.
+/// What one pass found, filled in as it goes, so that an error keeps what
+/// was done before it.
 #[derive(Default)]
 struct Verdict {
     outcome: &'static str,
     green: Option<ObjectId>,
     culprit: Option<ObjectId>,
     revert: Option<ObjectId>,
+    skipped: Vec<ObjectId>,
     reason: Option<String>,
     land: Option<Report>,
 }
@@ -181,10 +222,15 @@ impl Verdict {
             _ => ExitCode::from(RED),
         }
     }
+
+    fn red(&mut self, outcome: &'static str, reason: String) {
+        self.outcome = outcome;
+        self.reason = Some(reason);
+    }
 }
 
-/// The reverts verify landed on one branch, as `.braid/verify/<branch>.json`
-/// keeps them.
+/// The reverts verify landed on one branch from this repository, as
+/// `.braid/verify/<branch in hex>.json` keeps them.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Record {
     #[serde(default)]
@@ -199,25 +245,17 @@ struct Reverted {
     /// The revert as verify made it, in hex.
     revert: String,
     /// The changeset that holds it on the branch: itself, or the rebased
-    /// one.
+    /// one; null when the landing's answer was lost.
     landed: Option<String>,
     /// When it landed, in seconds since the Unix epoch.
     time: u64,
 }
 
 impl Record {
-    /// The file of `branch`. A branch name may hold `/` and other bytes a
-    /// file name should not, so all but letters, digits, `.`, `_` and `-`
-    /// are written as `%XX`.
+    /// The file of `branch`: its name in hex, so that no two branches share
+    /// a file, even on a file system that ignores case.
     fn path(repo: &Repo, branch: &str) -> PathBuf {
-        let mut name = String::new();
-        for byte in branch.bytes() {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
-                name.push(byte as char);
-            } else {
-                name.push_str(&format!("%{byte:02X}"));
-            }
-        }
+        let name: String = branch.bytes().map(|byte| format!("{byte:02x}")).collect();
         repo.root()
             .join(braid_repo::DIR)
             .join("verify")
@@ -226,26 +264,41 @@ impl Record {
 
     fn load(path: &Path) -> Result<Record> {
         match fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("{} is not verify's record", path.display())),
+            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+                format!(
+                    "{} is not verify's record of its reverts; delete it to start a new one (verify also finds its reverts on the branch)",
+                    path.display()
+                )
+            }),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Record::default()),
             Err(err) => Err(err).with_context(|| format!("cannot read {}", path.display())),
         }
     }
 
-    /// Writes the record whole, through a scratch file and a rename.
+    /// Writes the record whole, through a scratch file that reaches the
+    /// disk before it is renamed into place.
     fn save(&self, path: &Path) -> Result<()> {
         let dir = path.parent().context("the record has no directory")?;
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let scratch = path.with_extension("json.new");
         let mut text = serde_json::to_vec_pretty(self)?;
         text.push(b'\n');
-        fs::write(&scratch, text).with_context(|| format!("cannot write {}", scratch.display()))?;
+        File::create(&scratch)
+            .and_then(|mut file| {
+                file.write_all(&text)?;
+                file.sync_all()
+            })
+            .with_context(|| format!("cannot write {}", scratch.display()))?;
         fs::rename(&scratch, path).with_context(|| format!("cannot write {}", path.display()))?;
+        #[cfg(unix)]
+        if let Ok(dir) = File::open(dir) {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 
-    /// Whether verify made `id`: a revert of its own, as made or landed.
+    /// Whether this repository's verify made `id`: a revert, as made or
+    /// landed.
     fn made(&self, id: ObjectId) -> bool {
         let hex = id.to_hex();
         self.reverts
@@ -253,9 +306,14 @@ impl Record {
             .any(|r| r.revert == hex || r.landed.as_deref() == Some(hex.as_str()))
     }
 
-    /// How many reverts landed in the hour before `now`.
-    fn in_last_hour(&self, now: u64) -> usize {
-        self.reverts.iter().filter(|r| r.time + 3600 > now).count()
+    /// The reverts landed in the hour before `now`, by the id that holds
+    /// each on the branch.
+    fn in_last_hour(&self, now: u64) -> HashSet<String> {
+        self.reverts
+            .iter()
+            .filter(|r| r.time + 3600 > now)
+            .map(|r| r.landed.clone().unwrap_or_else(|| r.revert.clone()))
+            .collect()
     }
 }
 
@@ -263,6 +321,53 @@ fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+/// The value of an extra field of `changeset`.
+fn extra<'c>(changeset: &'c Changeset, key: &[u8]) -> Option<&'c [u8]> {
+    changeset
+        .extras
+        .iter()
+        .find(|(k, _)| k.as_slice() == key)
+        .map(|(_, value)| value.as_slice())
+}
+
+/// Whether `changeset` says it is a revert verify made: a `reverts` field,
+/// and `braid-verify` as its agent. Anyone can write both, which is why it
+/// is only ever a reason to refuse.
+fn is_verify_revert(changeset: &Changeset) -> bool {
+    extra(changeset, REVERTS).is_some() && extra(changeset, AGENT_FIELD) == Some(AGENT.as_bytes())
+}
+
+/// The reverts verify made that landed on the branch below `tip` in the
+/// hour before `now`, by committer time. The walk down first parents stops
+/// at the first changeset committed earlier than that.
+fn reverts_in_last_hour(repo: &Repo, tip: ObjectId, now: u64) -> Result<HashSet<String>> {
+    let since = now as i64 - 3600;
+    let mut found = HashSet::new();
+    let mut current = Some(tip);
+    for _ in 0..HISTORY_LIMIT {
+        let Some(id) = current else { break };
+        let changeset = braid_engine::read_changeset(repo.store(), id)?;
+        if changeset.committer.seconds <= since {
+            break;
+        }
+        if is_verify_revert(&changeset) {
+            found.insert(id.to_hex());
+        }
+        current = changeset.parents.first().copied();
+    }
+    Ok(found)
+}
+
+/// How a changeset fared.
+enum Check {
+    /// The tests passed: `flaky` when a run failed first.
+    Passed { flaky: bool },
+    /// Every run failed.
+    Failed,
+    /// Its files cannot be written on this system, so it was not tested.
+    Skipped,
 }
 
 /// Runs the test command on changesets, counting the runs.
@@ -283,25 +388,29 @@ enum RunEnd {
 
 impl Tester<'_> {
     /// Whether the tests pass on `changeset`: the first run, or one of the
-    /// reruns after it fails. Returns whether they passed, and whether a
-    /// run failed before one passed.
-    fn passes(&mut self, changeset: ObjectId) -> Result<(bool, bool)> {
+    /// reruns after it fails.
+    fn check(&mut self, changeset: ObjectId) -> Result<Check> {
         for attempt in 0..=self.reruns {
-            if self.run(changeset)? {
-                return Ok((true, attempt > 0));
+            match self.run(changeset)? {
+                None => return Ok(Check::Skipped),
+                Some(true) => return Ok(Check::Passed { flaky: attempt > 0 }),
+                Some(false) => {}
             }
         }
-        Ok((false, false))
+        Ok(Check::Failed)
     }
 
-    /// Runs the command once on a fresh copy of `changeset`.
-    fn run(&mut self, changeset: ObjectId) -> Result<bool> {
+    /// Runs the command once on a fresh copy of `changeset`: whether it
+    /// passed, or `None` when the files cannot be written here.
+    fn run(&mut self, changeset: ObjectId) -> Result<Option<bool>> {
         let dir = scratch_dir()?;
         let result = self.run_in(changeset, &dir);
         // Whatever the command left goes too.
         let _ = fs::remove_dir_all(&dir);
+        let Some(end) = result? else {
+            return Ok(None);
+        };
         // Only a command that ran counts.
-        let end = result?;
         self.runs += 1;
         let passed = matches!(&end, RunEnd::Exited(status) if status.success());
         let said = match &end {
@@ -310,12 +419,25 @@ impl Tester<'_> {
             RunEnd::TimedOut => format!("timed out after {:?} and was killed", self.timeout),
         };
         eprintln!("braid verify: {} {said}", changeset.short());
-        Ok(passed)
+        Ok(Some(passed))
     }
 
-    fn run_in(&self, changeset: ObjectId, dir: &Path) -> Result<RunEnd> {
-        braid_wc::materialize(self.repo.store(), changeset, dir)
-            .with_context(|| format!("cannot write changeset {} to test it", changeset.short()))?;
+    fn run_in(&self, changeset: ObjectId, dir: &Path) -> Result<Option<RunEnd>> {
+        match braid_wc::materialize(self.repo.store(), changeset, dir) {
+            Ok(_) => {}
+            Err(err @ (braid_wc::Error::Unsafe { .. } | braid_wc::Error::Collision { .. })) => {
+                eprintln!(
+                    "braid verify: {} skipped: its files cannot be written here: {err}",
+                    changeset.short()
+                );
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("cannot write changeset {} to test it", changeset.short())
+                });
+            }
+        }
         let (program, args) = self.command.split_first().context("no command to run")?;
         let mut command = Command::new(program);
         command
@@ -325,7 +447,9 @@ impl Tester<'_> {
             .stdout(to_stderr()?)
             .stderr(to_stderr()?)
             .env("BRAID_VERIFY_CHANGESET", changeset.to_hex())
-            .env("BRAID_VERIFY_BRANCH", self.branch);
+            .env("BRAID_VERIFY_BRANCH", self.branch)
+            .env("PWD", dir)
+            .env_remove("OLDPWD");
         for (name, _) in std::env::vars_os() {
             if is_credential(&name) {
                 command.env_remove(&name);
@@ -334,21 +458,39 @@ impl Tester<'_> {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            // A group of its own, so that a timeout kills everything it
-            // started.
+            // A group of its own, so that what it started goes with it.
             command.process_group(0);
         }
         let mut child = command
             .spawn()
             .with_context(|| format!("cannot run {}", program.to_string_lossy()))?;
+        let watchdog = match Watchdog::start(&child, dir) {
+            Ok(watchdog) => watchdog,
+            Err(err) => {
+                kill_group(&mut child);
+                let _ = child.wait();
+                return Err(err);
+            }
+        };
+        let end = self.wait(&mut child);
+        watchdog.done();
+        end.map(Some)
+    }
+
+    /// Waits for the command, at most until the timeout, then kills its
+    /// group: whatever it left running, or all of it on a timeout.
+    fn wait(&self, child: &mut Child) -> Result<RunEnd> {
         let deadline = Instant::now() + self.timeout;
         loop {
-            if let Some(status) = child.try_wait()? {
-                return Ok(RunEnd::Exited(status));
+            if exited(child)? {
+                // The command is not reaped yet, so its group's id cannot
+                // be anyone else's.
+                kill_group(child);
+                return Ok(RunEnd::Exited(child.wait()?));
             }
             let now = Instant::now();
             if now >= deadline {
-                kill(&mut child);
+                kill_group(child);
                 let _ = child.wait();
                 return Ok(RunEnd::TimedOut);
             }
@@ -357,16 +499,115 @@ impl Tester<'_> {
     }
 }
 
+/// Whether the command exited, without reaping it where the system can.
+fn exited(child: &mut Child) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+        let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+        loop {
+            match waitid(WaitId::Pid(Pid::from_child(child)), options) {
+                Ok(found) => return Ok(found.is_some()),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(err) => return Err(io::Error::from(err).into()),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(child.try_wait()?.is_some())
+    }
+}
+
+/// A process that kills a test run's group, and removes its directory,
+/// if braid goes away while it runs: it waits for its standard input to
+/// close, which happens however braid ends, and does nothing when braid
+/// said `done` first.
+struct Watchdog(Option<Child>);
+
+impl Watchdog {
+    #[cfg(unix)]
+    fn start(child: &Child, dir: &Path) -> Result<Watchdog> {
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().context("cannot find the braid command")?;
+        let watchdog = Command::new(exe)
+            .arg(WATCHDOG)
+            .arg(child.id().to_string())
+            .arg(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // Out of braid's group, so that a Ctrl-C meant for braid does
+            // not stop it too.
+            .process_group(0)
+            .spawn()
+            .context("cannot start verify's watchdog")?;
+        Ok(Watchdog(Some(watchdog)))
+    }
+
+    #[cfg(not(unix))]
+    fn start(_child: &Child, _dir: &Path) -> Result<Watchdog> {
+        Ok(Watchdog(None))
+    }
+
+    /// Tells the watchdog the run is over, and waits for it.
+    fn done(mut self) {
+        if let Some(mut watchdog) = self.0.take() {
+            if let Some(mut stdin) = watchdog.stdin.take() {
+                let _ = stdin.write_all(b"done\n");
+            }
+            let _ = watchdog.wait();
+        }
+    }
+}
+
+/// The watchdog of one test run, as [`Watchdog`] starts it: `group` is the
+/// test's process group, `dir` its scratch directory.
+pub(crate) fn watchdog(group: &str, dir: &Path) -> Result<ExitCode> {
+    let mut said = Vec::new();
+    let _ = io::stdin().lock().read_to_end(&mut said);
+    if said.starts_with(b"done") {
+        return Ok(ExitCode::SUCCESS);
+    }
+    // Braid went away while the tests ran.
+    #[cfg(unix)]
+    if let Some(pid) = group
+        .parse::<i32>()
+        .ok()
+        .filter(|group| *group > 1)
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    #[cfg(not(unix))]
+    let _ = group;
+    // Only ever one of verify's scratch directories.
+    let ours = dir.parent() == Some(std::env::temp_dir().as_path())
+        && dir
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(SCRATCH_PREFIX));
+    if ours {
+        for _ in 0..10 {
+            if fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// Whether an environment variable is one of the hub's credentials or
-/// settings, which the tests never see: `BRAID_TOKEN` and every
-/// `BRAID_HUB…`.
+/// settings, which the tests never see: `BRAID_TOKEN` and every variable
+/// whose name starts with `BRAID_HUB`.
 fn is_credential(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
     name == "BRAID_TOKEN" || name.starts_with("BRAID_HUB")
 }
 
-/// Kills the command and every process in its group.
-fn kill(child: &mut Child) {
+/// Kills the command and every process left in its group. A group already
+/// gone is no error.
+fn kill_group(child: &mut Child) {
     #[cfg(unix)]
     {
         let group = rustix::process::Pid::from_child(child);
@@ -405,7 +646,7 @@ fn scratch_dir() -> Result<PathBuf> {
     loop {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = base.join(format!(
-            "braid-verify-{}-{nanos:08x}-{n}",
+            "{SCRATCH_PREFIX}{}-{nanos:08x}-{n}",
             std::process::id()
         ));
         let mut builder = fs::DirBuilder::new();
@@ -443,6 +684,16 @@ fn range(repo: &Repo, tip: ObjectId, good: ObjectId) -> Result<Option<Vec<Object
     Ok(Some(chain))
 }
 
+/// `a, b and c`, of short ids.
+fn listed(ids: &[ObjectId]) -> String {
+    let shorts: Vec<String> = ids.iter().map(ObjectId::short).collect();
+    match shorts.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Everything one pass needs.
 struct Pass<'a> {
     args: &'a VerifyArgs,
@@ -451,49 +702,56 @@ struct Pass<'a> {
     branch: &'a str,
     tip: ObjectId,
     green_before: Option<ObjectId>,
+    /// `--from`, resolved.
+    from: Option<ObjectId>,
 }
 
 impl Pass<'_> {
-    fn run(&self, tester: &mut Tester<'_>) -> Result<Verdict> {
-        let mut verdict = Verdict {
-            green: self.green_before,
-            ..Verdict::default()
-        };
+    fn run(&self, tester: &mut Tester<'_>, verdict: &mut Verdict) -> Result<()> {
         if self.green_before == Some(self.tip) {
             verdict.outcome = "pass";
             verdict.reason = Some("the head is the green changeset already".to_owned());
-            return Ok(verdict);
+            return Ok(());
         }
-        let (passed, flaky) = tester.passes(self.tip)?;
-        if passed {
-            verdict.outcome = if flaky { "flaky" } else { "pass" };
-            if flaky {
-                verdict.reason = Some("a run failed, and a rerun passed".to_owned());
-            }
-            if self.args.dry_run {
-                let moved = format!("dry run: the green ref would move to {}", self.tip.short());
-                verdict.reason = Some(match verdict.reason.take() {
-                    Some(reason) => format!("{reason}; {moved}"),
-                    None => moved,
-                });
-            } else {
-                self.move_green()?;
-                verdict.green = Some(self.tip);
-            }
-            return Ok(verdict);
-        }
-
-        verdict.outcome = "red";
-        let good = match &self.args.from {
-            Some(revision) => Some(resolve_changeset(self.repo, revision)?),
-            None => self.green_before,
+        let flaky = match tester.check(self.tip)? {
+            Check::Passed { flaky } => flaky,
+            Check::Failed => return self.red(tester, verdict),
+            Check::Skipped => bail!(
+                "the files of the head, {}, cannot be written on this system, so it cannot be tested here",
+                self.tip.short()
+            ),
         };
-        let Some(good) = good else {
+        verdict.outcome = if flaky { "flaky" } else { "pass" };
+        let mut reasons = Vec::new();
+        if flaky {
+            reasons.push("a run failed, and a rerun passed".to_owned());
+        }
+        if flaky && !self.args.flaky_moves_green {
+            reasons.push("the green ref stays; --flaky-moves-green would move it".to_owned());
+        } else if self.args.dry_run {
+            reasons.push(format!(
+                "dry run: the green ref would move to {}",
+                self.tip.short()
+            ));
+        } else {
+            self.move_green()?;
+            verdict.green = Some(self.tip);
+        }
+        if !reasons.is_empty() {
+            verdict.reason = Some(reasons.join("; "));
+        }
+        Ok(())
+    }
+
+    /// The tests fail on the head: find the first changeset that fails.
+    fn red(&self, tester: &mut Tester<'_>, verdict: &mut Verdict) -> Result<()> {
+        verdict.outcome = "red";
+        let Some(good) = self.from.or(self.green_before) else {
             verdict.reason = Some(
                 "the tests fail on the head, and with no green changeset there is nothing to bisect from: --from names one"
                     .to_owned(),
             );
-            return Ok(verdict);
+            return Ok(());
         };
         let Some(range) = range(self.repo, self.tip, good)? else {
             verdict.reason = Some(format!(
@@ -501,36 +759,87 @@ impl Pass<'_> {
                 good.short(),
                 self.branch
             ));
-            return Ok(verdict);
+            return Ok(());
         };
         if range.is_empty() {
-            verdict.outcome = "no_culprit";
-            verdict.reason = Some(format!("the head is {}, which was to pass", good.short()));
-            return Ok(verdict);
+            verdict.red(
+                "no_culprit",
+                format!("the head is {}, which was to pass", good.short()),
+            );
+            return Ok(());
         }
-        // `range[lo]` passes (or is `good`, at -1), `range[hi]` fails.
-        let (mut lo, mut hi) = (-1_isize, range.len() as isize - 1);
-        while hi - lo > 1 {
-            let mid = lo + (hi - lo) / 2;
-            if tester.passes(range[mid as usize])?.0 {
-                lo = mid;
-            } else {
-                hi = mid;
+        let last = range.len() as isize - 1;
+        // `range[lo]` passes (or is `good`, at -1), and the head fails.
+        let mut lo = -1;
+        loop {
+            let (passing, failing, untested) = bisect(tester, &range, lo, last, verdict)?;
+            if !untested.is_empty() {
+                let mut candidates: Vec<ObjectId> =
+                    untested.iter().map(|i| range[*i as usize]).collect();
+                candidates.push(range[failing as usize]);
+                verdict.reason = Some(format!(
+                    "the first changeset that fails is one of {}: the others could not be tested here",
+                    listed(&candidates)
+                ));
+                return Ok(());
             }
+            let culprit = range[failing as usize];
+            if let Some(at) = reverted_at(self.repo, &range, failing)? {
+                // Fixed once already: what fails now came after, hidden by
+                // the culprit until its revert.
+                let revert = range[at];
+                let hidden = format!(
+                    "{} fails, and {revert_short} reverted it later, but the tests fail at {revert_short} too: what broke them since is hidden behind {}",
+                    culprit.short(),
+                    culprit.short(),
+                    revert_short = revert.short()
+                );
+                if at as isize == last {
+                    verdict.red("no_culprit", hidden);
+                    return Ok(());
+                }
+                match tester.check(revert)? {
+                    Check::Passed { .. } => {
+                        lo = at as isize;
+                        continue;
+                    }
+                    Check::Failed => {
+                        verdict.red("no_culprit", hidden);
+                        return Ok(());
+                    }
+                    Check::Skipped => {
+                        verdict.skipped.push(revert);
+                        verdict.reason = Some(format!(
+                            "{} fails, and {} reverted it later, but the revert could not be tested here",
+                            culprit.short(),
+                            revert.short()
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
+            if passing < 0 {
+                match tester.check(good)? {
+                    Check::Passed { .. } => {}
+                    Check::Failed => {
+                        // The changeset taken as passing fails now too:
+                        // something outside the range broke the tests.
+                        verdict.red(
+                            "no_culprit",
+                            format!(
+                                "{} fails too, though it was to pass: the failure is not in the changesets after it",
+                                good.short()
+                            ),
+                        );
+                        return Ok(());
+                    }
+                    // It cannot be checked; it was to pass.
+                    Check::Skipped => verdict.skipped.push(good),
+                }
+            }
+            verdict.culprit = Some(culprit);
+            return self.revert(culprit, verdict);
         }
-        let culprit = range[hi as usize];
-        if lo < 0 && !tester.passes(good)?.0 {
-            // The changeset taken as passing fails now too: something
-            // outside the range broke the tests.
-            verdict.outcome = "no_culprit";
-            verdict.reason = Some(format!(
-                "{} fails too, though it was to pass: the failure is not in the changesets after it",
-                good.short()
-            ));
-            return Ok(verdict);
-        }
-        verdict.culprit = Some(culprit);
-        self.revert(culprit, verdict)
     }
 
     /// Moves the green ref from where it was to the tip, unless someone
@@ -559,46 +868,45 @@ impl Pass<'_> {
     }
 
     /// Decides whether to revert `culprit`, and does.
-    fn revert(&self, culprit: ObjectId, mut verdict: Verdict) -> Result<Verdict> {
+    fn revert(&self, culprit: ObjectId, verdict: &mut Verdict) -> Result<()> {
         let first = format!(
             "the tests fail from {}, the first changeset that fails",
             culprit.short()
         );
         if !self.args.revert {
             verdict.reason = Some(format!("{first}; --revert would revert it"));
-            return Ok(verdict);
+            return Ok(());
         }
-        let parents = braid_engine::read_changeset(self.repo.store(), culprit)?
-            .parents
-            .len();
+        let changeset = braid_engine::read_changeset(self.repo.store(), culprit)?;
         let path = Record::path(self.repo, self.branch);
         let mut record = Record::load(&path)?;
         let now = now_seconds();
-        let refusal = if parents > 1 {
+        let mut recent = reverts_in_last_hour(self.repo, self.tip, now)?;
+        recent.extend(record.in_last_hour(now));
+        let refusal = if changeset.parents.len() > 1 {
             Some(format!(
                 "{first}, and it is a merge: verify does not revert merges"
             ))
-        } else if record.made(culprit) {
+        } else if is_verify_revert(&changeset) || record.made(culprit) {
             Some(format!(
                 "{first}, and it is a revert verify made: verify does not revert its own reverts"
             ))
-        } else if record.in_last_hour(now) >= self.args.max_reverts_per_hour {
+        } else if recent.len() >= self.args.max_reverts_per_hour {
             Some(format!(
                 "{first}, but verify landed {} on {} in the last hour, the most --max-reverts-per-hour allows",
-                crate::work::count(record.in_last_hour(now), "revert"),
+                count(recent.len(), "revert"),
                 self.branch
             ))
         } else {
             None
         };
         if let Some(reason) = refusal {
-            verdict.outcome = "refused";
-            verdict.reason = Some(reason);
-            return Ok(verdict);
+            verdict.red("refused", reason);
+            return Ok(());
         }
         if self.args.dry_run {
             verdict.reason = Some(format!("{first}; dry run: verify would revert it"));
-            return Ok(verdict);
+            return Ok(());
         }
         let author = identity(&self.args.identity, self.repo)?;
         let change = braid_wc::create_revert(
@@ -611,46 +919,117 @@ impl Pass<'_> {
             },
         )?;
         verdict.revert = Some(change);
-        let mut report = land_revert(
+        let landed = land_revert(
             self.repo,
             self.link.as_ref(),
             self.branch,
             change,
             AGENT,
             &author,
-        )?;
-        match report.outcome.as_str() {
+        );
+        let mut report = match landed {
+            Ok(report) => report,
+            Err(err) => {
+                // The hub may have landed it all the same: the record
+                // keeps it, as the branch will once fetched.
+                record.reverts.push(Reverted {
+                    culprit: culprit.to_hex(),
+                    revert: change.to_hex(),
+                    landed: None,
+                    time: now,
+                });
+                let _ = record.save(&path);
+                return Err(err);
+            }
+        };
+        let outcome = report.outcome.clone();
+        match outcome.as_str() {
             "fast-forward" | "rebased" => {
+                verdict.red(
+                    "reverted",
+                    format!("{first}; its revert landed on {}", self.branch),
+                );
                 record.reverts.push(Reverted {
                     culprit: culprit.to_hex(),
                     revert: change.to_hex(),
                     landed: report.head.map(|id| id.to_hex()),
                     time: now,
                 });
+                verdict.land = Some(report);
                 record.save(&path)?;
-                verdict.outcome = "reverted";
-                verdict.reason = Some(format!("{first}; its revert landed on {}", self.branch));
+                return Ok(());
             }
             "conflicts" => {
-                verdict.outcome = "revert_conflicts";
-                verdict.reason = Some(format!(
-                    "{first}; its revert conflicts with what landed since, so {} did not move: revert it by hand in a workspace",
-                    self.branch
-                ));
+                verdict.red(
+                    "revert_conflicts",
+                    format!(
+                        "{first}; its revert conflicts with what landed since, so {} did not move: revert it by hand in a workspace",
+                        self.branch
+                    ),
+                );
                 report.next = None;
             }
-            "already-applied" => {
-                verdict.outcome = "refused";
-                verdict.reason = Some(format!(
+            "already-applied" => verdict.red(
+                "refused",
+                format!(
                     "{first}, but {} has what its revert would change already",
                     self.branch
-                ));
+                ),
+            ),
+            other => {
+                verdict.land = Some(report);
+                bail!("the revert's landing ended with {other}");
             }
-            other => bail!("the revert's landing ended with {other}"),
         }
         verdict.land = Some(report);
-        Ok(verdict)
+        Ok(())
     }
+}
+
+/// Bisects `range` between `lo`, which passes (-1 for the changeset before
+/// the range), and `hi`, which fails, skipping changesets that cannot be
+/// tested. Returns the last passing and the first failing index found, and
+/// the skipped indexes between them.
+fn bisect(
+    tester: &mut Tester<'_>,
+    range: &[ObjectId],
+    mut lo: isize,
+    mut hi: isize,
+    verdict: &mut Verdict,
+) -> Result<(isize, isize, Vec<isize>)> {
+    let mut skipped = BTreeSet::new();
+    loop {
+        let middle = lo + (hi - lo) / 2;
+        let Some(pick) = (lo + 1..hi)
+            .filter(|i| !skipped.contains(i))
+            .min_by_key(|i| (i - middle).abs())
+        else {
+            break;
+        };
+        match tester.check(range[pick as usize])? {
+            Check::Passed { .. } => lo = pick,
+            Check::Failed => hi = pick,
+            Check::Skipped => {
+                skipped.insert(pick);
+                verdict.skipped.push(range[pick as usize]);
+            }
+        }
+    }
+    let untested = skipped.into_iter().filter(|i| *i > lo && *i < hi).collect();
+    Ok((lo, hi, untested))
+}
+
+/// Where in `range`, after `index`, a changeset reverts `range[index]`, if
+/// one does.
+fn reverted_at(repo: &Repo, range: &[ObjectId], index: isize) -> Result<Option<usize>> {
+    let culprit = range[index as usize].to_hex().into_bytes();
+    for (at, id) in range.iter().enumerate().skip(index as usize + 1) {
+        let changeset = braid_engine::read_changeset(repo.store(), *id)?;
+        if extra(&changeset, REVERTS) == Some(culprit.as_slice()) {
+            return Ok(Some(at));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn verify(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
@@ -670,6 +1049,10 @@ pub(crate) fn verify(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
     let Some(tip) = refs.get(&branch) else {
         bail!("there is no branch {branch:?} to verify");
     };
+    let from = match &args.from {
+        Some(revision) => Some(resolve_changeset(&repo, revision)?),
+        None => None,
+    };
     let green_before = refs.get(&green_ref(&branch));
     let pass = Pass {
         args,
@@ -678,6 +1061,7 @@ pub(crate) fn verify(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
         branch: &branch,
         tip,
         green_before,
+        from,
     };
     let mut tester = Tester {
         repo: &repo,
@@ -687,20 +1071,19 @@ pub(crate) fn verify(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
         reruns: args.reruns,
         runs: 0,
     };
-    let verdict = match pass.run(&mut tester) {
-        Ok(verdict) => verdict,
-        // Before anything ran, an error is only an error.
-        Err(err) if tester.runs == 0 => return Err(err),
-        Err(err) => {
-            eprintln!("braid: error: {err:#}");
-            Verdict {
-                outcome: "error",
-                green: green_before,
-                reason: Some(format!("{err:#}")),
-                ..Verdict::default()
-            }
-        }
+    let mut verdict = Verdict {
+        green: green_before,
+        ..Verdict::default()
     };
+    if let Err(err) = pass.run(&mut tester, &mut verdict) {
+        // Before anything ran or was made, an error is only an error.
+        if tester.runs == 0 && verdict.revert.is_none() {
+            return Err(err);
+        }
+        eprintln!("braid: error: {err:#}");
+        verdict.outcome = "error";
+        verdict.reason = Some(format!("{err:#}"));
+    }
     if cli.json {
         print_json(&json!({
             "branch": branch,
@@ -710,6 +1093,7 @@ pub(crate) fn verify(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
             "outcome": verdict.outcome,
             "culprit": hex(verdict.culprit),
             "revert": hex(verdict.revert),
+            "skipped": verdict.skipped.iter().map(ObjectId::to_hex).collect::<Vec<_>>(),
             "tests_run": tester.runs,
             "reason": verdict.reason,
             "dry_run": args.dry_run,
@@ -722,7 +1106,7 @@ pub(crate) fn verify(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
 }
 
 fn print_text(branch: &str, tip: ObjectId, verdict: &Verdict, runs: usize) {
-    let ran = crate::work::count(runs, "run");
+    let ran = count(runs, "run");
     match verdict.outcome {
         "pass" | "flaky" => println!(
             "{branch} is green at {} ({}, {ran})",
@@ -733,6 +1117,12 @@ fn print_text(branch: &str, tip: ObjectId, verdict: &Verdict, runs: usize) {
     }
     if let Some(reason) = &verdict.reason {
         println!("{reason}");
+    }
+    if let Some(revert) = verdict.revert {
+        println!("Revert: {}", revert.short());
+    }
+    if !verdict.skipped.is_empty() {
+        println!("Not tested here: {}", listed(&verdict.skipped));
     }
     if let Some(report) = &verdict.land
         && report.conflicted()
@@ -772,15 +1162,13 @@ mod tests {
     }
 
     #[test]
-    fn record_paths_escape_branch_names() {
+    fn record_files_are_named_in_hex_and_kept_whole() {
         let temp = tempfile::tempdir().unwrap();
         let repo = Repo::init(temp.path()).unwrap();
-        let path = Record::path(&repo, "feature/x y");
-        assert_eq!(path.file_name().unwrap(), "feature%2Fx%20y.json");
-        assert_eq!(
-            Record::path(&repo, "main").file_name().unwrap(),
-            "main.json"
-        );
+        let path = Record::path(&repo, "feature/x");
+        assert_eq!(path.file_name().unwrap(), "666561747572652f78.json");
+        // Two names that differ only in case get two files.
+        assert_ne!(Record::path(&repo, "Main"), Record::path(&repo, "main"));
         let mut record = Record::default();
         record.reverts.push(Reverted {
             culprit: "c".repeat(64),
@@ -790,9 +1178,33 @@ mod tests {
         });
         let landed: ObjectId = "b".repeat(64).parse().unwrap();
         assert!(record.made(landed));
-        assert_eq!(record.in_last_hour(10_000 + 3599), 1);
-        assert_eq!(record.in_last_hour(10_000 + 3600), 0);
+        assert_eq!(record.in_last_hour(10_000 + 3599).len(), 1);
+        assert_eq!(record.in_last_hour(10_000 + 3600).len(), 0);
         record.save(&path).unwrap();
         assert_eq!(Record::load(&path).unwrap().reverts.len(), 1);
+        assert!(!path.with_extension("json.new").exists());
+
+        // A damaged record says how to recover.
+        fs::write(&path, "{").unwrap();
+        let err = format!("{:#}", Record::load(&path).unwrap_err());
+        assert!(err.contains("delete it"), "{err}");
+    }
+
+    #[test]
+    fn ids_are_listed_in_words() {
+        let ids: Vec<ObjectId> = ["a", "b", "c"]
+            .iter()
+            .map(|c| c.repeat(64).parse().unwrap())
+            .collect();
+        assert_eq!(listed(&ids[..1]), "a".repeat(12));
+        assert_eq!(
+            listed(&ids),
+            format!(
+                "{}, {} and {}",
+                "a".repeat(12),
+                "b".repeat(12),
+                "c".repeat(12)
+            )
+        );
     }
 }
