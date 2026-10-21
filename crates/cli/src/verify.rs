@@ -69,6 +69,10 @@ const HISTORY_DEPTH: usize = 200;
 /// than this long, in seconds, before now: a day.
 const HISTORY_AGE: i64 = 86_400;
 
+/// The longest record file name made of the branch's name in hex; a longer
+/// name is hashed instead.
+const MAX_HEX_NAME: usize = 200;
+
 /// What the watchdog says once it runs, before braid starts any test. The
 /// number changes with the protocol, so that another braid's watchdog is
 /// never taken for this one's.
@@ -273,9 +277,16 @@ struct Reverted {
 
 impl Record {
     /// The file of `branch`: its name in hex, so that no two branches share
-    /// a file, even on a file system that ignores case.
+    /// a file, even on a file system that ignores case, or for a name whose
+    /// hex would be longer than [`MAX_HEX_NAME`], `b3-` and the BLAKE3 hash
+    /// of the name, which no name in hex can look like.
     fn path(repo: &Repo, branch: &str) -> PathBuf {
-        let name: String = branch.bytes().map(|byte| format!("{byte:02x}")).collect();
+        let hex: String = branch.bytes().map(|byte| format!("{byte:02x}")).collect();
+        let name = if hex.len() <= MAX_HEX_NAME {
+            hex
+        } else {
+            format!("b3-{}", blake3::hash(branch.as_bytes()).to_hex())
+        };
         repo.root()
             .join(braid_repo::DIR)
             .join("verify")
@@ -1320,6 +1331,33 @@ mod tests {
         fs::write(&path, "{").unwrap();
         let err = format!("{:#}", Record::load(&path).unwrap_err());
         assert!(err.contains("delete it"), "{err}");
+    }
+
+    #[test]
+    fn long_branch_names_are_hashed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repo::init(temp.path()).unwrap();
+        let name = |branch: &str| {
+            Record::path(&repo, branch)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let longest = "b".repeat(MAX_HEX_NAME / 2);
+        assert_eq!(
+            name(&longest),
+            format!("{}.json", "62".repeat(longest.len()))
+        );
+        let longer = format!("{longest}x");
+        let hashed = name(&longer);
+        assert_eq!(
+            hashed,
+            format!("b3-{}.json", blake3::hash(longer.as_bytes()).to_hex())
+        );
+        assert_ne!(name(&format!("{longest}y")), hashed);
+        // Even the longest branch name a ref can have fits a file name.
+        assert!(name(&"z".repeat(4096)).len() < 100);
     }
 
     #[test]

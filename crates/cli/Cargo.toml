@@ -22,6 +22,7 @@ braid-repo.workspace = true
 braid-store.workspace = true
 braid-wc.workspace = true
 anyhow.workspace = true
+blake3.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
