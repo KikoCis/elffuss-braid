@@ -357,11 +357,19 @@ braid verify --branch main --revert --json -- cargo test --workspace
   files, the network, the `braid` command and any hub login saved in
   braid's configuration directory. To test code you do not trust, run
   verify in a container, a sandbox or as a user of its own.
-- It runs in a process group of its own. When it exits, or runs past
-  `--timeout` (10 minutes by default), the group is killed, with whatever
-  it started that is still in it; a process that left the group, as a
-  daemon does, is not. If braid itself is stopped, a watchdog process
-  kills the group and removes the copy.
+- On Unix it runs in a process group of its own. When it exits, or runs
+  past `--timeout` (10 minutes by default), the group is killed, with
+  whatever it started that is still in it; a process that left the group,
+  as a daemon does, is not. A watchdog process, started before the
+  command, kills the group and removes the copy if braid is killed or
+  exits while the tests run, and when the watchdog cannot start, or stops,
+  the run fails rather than go on unwatched. On other systems (Windows is
+  not verified) only the command itself is killed, and nothing watches
+  braid.
+- In a container, run braid under an init such as
+  [tini](https://github.com/krallin/tini) (`docker run --init`), not as
+  PID 1: PID 1 gets no default handling of signals, and has to reap the
+  processes others leave behind, which braid does not.
 - A failing run is run again (`--reruns`, once by default) before it counts.
   One that then passes is `flaky`, and leaves the green ref where it was
   unless `--flaky-moves-green`.
@@ -371,11 +379,13 @@ braid verify --branch main --revert --json -- cargo test --workspace
   from.
 - It never reverts a merge, nor a revert it made, which it tells by the
   revert's `reverts` field and its agent, `braid-verify`, and it lands at
-  most three reverts an hour (`--max-reverts-per-hour`), counted on the
-  branch by committer time. A clone without its local record in
-  `.braid/verify/` keeps both rules. The green ref does not move after a
-  revert: the next pass tests the new head. `--dry-run` reports, changes
-  nothing and does not fetch from a hub.
+  most three reverts an hour (`--max-reverts-per-hour`), counted by each
+  revert's committer time among the last 200 changesets of the branch (or
+  fewer, down to one made more than a day before). A clone without its
+  local record in `.braid/verify/` keeps both rules, and braid warns
+  anyone else who acts as `braid-verify`. The green ref does not move
+  after a revert: the next pass tests the new head. `--dry-run` reports,
+  changes nothing and does not fetch from a hub.
 - Bisecting tests each changeset as it is. When the first that fails was
   reverted later in the range, verify tests the revert and, if it passes,
   bisects again after it. A changeset whose files cannot be written on this

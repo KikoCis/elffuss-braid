@@ -181,11 +181,16 @@ on the same lines is a conflict. `braid verify` lands the reverts it makes
 the same way, with the agent `braid-verify`. Its limits are read from the
 branch, so that a fresh clone keeps them: it refuses to revert a changeset
 that has a `reverts` field and that agent, and counts the reverts of the
-last hour by committer time. Anyone can write that field and that label,
-but they are only ever reasons to refuse, never to act; a local record in
-`.braid/verify/` is a second source. Its green ref, `braid/green/<branch>`,
-lives in braid's own namespace: it is local to the repository and never
-exported or sent to a hub.
+last hour by each one's own committer time, looking a fixed depth down
+the branch. Anyone can write that field and that label: the label is only
+ever a reason to refuse. The field also tells bisecting where a culprit
+was reverted later in the range, but verify only acts on that by testing
+the changeset it names, and bisects on after it only if the tests pass
+there: a false field can make verify run one more test, never blame a
+changeset that passes, or one whose parent fails. A local record in
+`.braid/verify/` is a second source for both limits. Its green ref,
+`braid/green/<branch>`, lives in braid's own namespace: it is local to the
+repository and never exported or sent to a hub.
 
 **Invariants.** A branch only moves forward. A branch never contains a
 conflict. No value is overwritten except by a change whose base already
