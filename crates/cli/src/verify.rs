@@ -683,7 +683,9 @@ impl Watchdog {
 
 /// The braid command to start the watchdog with: on Linux this very binary,
 /// through `/proc/self/exe`, even if its file was replaced or removed since
-/// it started; elsewhere the file it was started from.
+/// it started; elsewhere the file it was started from; and where neither
+/// can be found, as on Linux without `/proc`, the name it was started by,
+/// looked up in `PATH`. The handshake turns away any other program.
 #[cfg(unix)]
 fn own_exe() -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
@@ -693,9 +695,34 @@ fn own_exe() -> Result<PathBuf> {
             return Ok(this);
         }
     }
-    std::env::current_exe().context(
+    if let Ok(path) = std::env::current_exe() {
+        return Ok(path);
+    }
+    let name = std::env::args_os().next().unwrap_or_default();
+    started_as(&name, std::env::var_os("PATH").as_deref()).context(
         "cannot find the braid command to start verify's watchdog, so the tests did not run",
     )
+}
+
+/// The file that a command started as `name` runs: `name` itself when it
+/// holds a `/`, or else the first executable file of that name in the
+/// directories of `path`, as a shell finds it.
+#[cfg(unix)]
+fn started_as(name: &std::ffi::OsStr, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    if name.is_empty() {
+        return None;
+    }
+    if name.as_bytes().contains(&b'/') {
+        return Some(PathBuf::from(name));
+    }
+    std::env::split_paths(path?)
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// The watchdog of one test run in `dir`, as [`Watchdog`] starts it.
@@ -1409,6 +1436,32 @@ mod tests {
         assert_eq!(found, HashSet::from([recent.to_hex()]));
         let found = reverts_in_last_hour(&repo, tip, now as u64, 5).unwrap();
         assert_eq!(found, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_its_own_file_braid_is_found_as_a_shell_finds_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let program = bin.join("braid-like");
+        fs::write(&program, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let plain = bin.join("not-a-program");
+        fs::write(&plain, "").unwrap();
+        let path = std::env::join_paths([temp.path().join("missing"), bin.clone()]).unwrap();
+        let found = |name: &str| started_as(name.as_ref(), Some(path.as_os_str()));
+        assert_eq!(found("braid-like"), Some(program.clone()));
+        assert_eq!(found("not-a-program"), None);
+        assert_eq!(found("absent"), None);
+        assert_eq!(found(""), None);
+        // A name with a slash is a path already.
+        assert_eq!(
+            found("./target/braid"),
+            Some(PathBuf::from("./target/braid"))
+        );
+        assert_eq!(started_as("braid-like".as_ref(), None), None);
     }
 
     /// A stand-in for the watchdog: `script`, run by `sh`.
