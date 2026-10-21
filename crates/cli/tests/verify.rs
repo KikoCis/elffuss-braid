@@ -654,6 +654,11 @@ fn an_error_after_the_revert_landed_keeps_it_in_the_report() {
     let record = r.dir.join(".braid/verify");
     std::fs::create_dir(&record).unwrap();
     std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(record.join("probe"), "").is_ok() {
+        // Modes do not hold here, as for root in a container: nothing to
+        // test.
+        return;
+    }
     let out = r.verify(&["--revert", "--reruns", "0"], 1);
     std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(out["outcome"], "error");
