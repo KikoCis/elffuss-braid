@@ -1,15 +1,21 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.svg">
-  <img src="docs/assets/hero-light.svg" width="100%" alt="Elffuss Braid: many agents, one main, no retry loop. Under it, a terminal shows three agents landing on main in turn: agent-a lands as a fast-forward, agent-b is rebased onto it, and agent-c, which changed the same line of shipping.toml as agent-a, gets a conflict, so main did not move and braid exits with status 2.">
+  <img src="docs/assets/hero-light.svg" width="100%" alt="Elffuss Braid logo: three strands braided together, above the tagline “Many agents. One main. No retry loop.” Below, a terminal shows three agents landing on main in turn: agent-a lands as a fast-forward, agent-b is rebased onto it, and agent-c, which changed the same line of shipping.toml as agent-a, gets a conflict, so main did not move and braid exits with status 2.">
 </picture>
 
 # ✳ Elffuss Braid
 
-**Many agents. One main. No retry loop.** Version control for repositories
-where many AI coding agents land changes at the same time, written from
-scratch in Rust. It installs with one `cargo install`, needs no server on
-one machine, and keeps git at the edges, so GitHub keeps working.
+**Version control for repositories where many AI coding agents land changes at the same time.**
+
+Braid works with Claude Code, Gemini CLI and any other coding agent that
+reads `AGENTS.md`. It is written from scratch in Rust, installs with one
+`cargo install`, and on one machine needs no server and no daemon. Each
+agent commits in parallel, in a workspace of its own, and landing on
+one main branch is a short step the agents take in turn. Merge conflicts
+come back as data, in text or JSON, with exit status 2, and `main` does
+not move. Git stays at the edges: `braid git import` brings a history in
+bit for bit, and `braid git sync` keeps GitHub in step.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square&logo=apache&logoColor=white)](LICENSE)
@@ -17,11 +23,11 @@ one machine, and keeps git at the edges, so GitHub keeps working.
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-8272ff?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Format v1: frozen](https://img.shields.io/badge/format%20v1-frozen-c8a06a?style=flat-square)](docs/spec/format-v1.md)
 
-[Quick start](#quick-start) · [Ask your agent](#use-it-from-your-agent) · [Scion's ideas](#scions-ideas-in-braid) · [How it works](#how-it-works) · [BraidHub](#braidhub) · [Measured against git](#measured-against-git) · [braid.elffuss.com](https://braid.elffuss.com) · [En castellano](#en-castellano)
+[Quick start](#quick-start) · [Ask your agent](#use-it-from-your-agent) · [Scion's ideas](#scions-ideas-in-braid) · [How it works](#how-it-works) · [BraidHub](#braidhub) · [Measured against git](#measured-against-git) · [Questions](#questions) · [braid.elffuss.com](https://braid.elffuss.com) · [En castellano](#en-castellano)
 
 Anthropic described Scion, the version control system it built in-house
 with agents in mind, in
-[Redesigning source control at Anthropic](https://www.anthropic.com/engineering/redesigning-source-control).
+[Redesigning source control at Anthropic](https://www.anthropic.com/research/redesigning-source-control).
 Scion is internal. Braid is an independent, open-source take on several of
 its ideas, and you can run it today:
 [ask your coding agent](#use-it-from-your-agent) to set it up in a
@@ -495,6 +501,35 @@ store first. The ratios show none of that, and leave out
 
 </details>
 
+## Questions
+
+**Is braid an open-source Scion?** No. Scion is internal to Anthropic.
+Braid is an independent implementation of the ideas Anthropic published
+about it, contains no code from Anthropic, and on one machine needs no
+server. The site's [page on Scion's ideas](https://braid.elffuss.com/scion.html)
+says what braid takes from Scion and where it differs.
+
+**Does braid need a server?** Not on one machine: the agents' workspaces
+share one store, and landings take their turn with no server and no
+daemon. When agents on several machines share a repository,
+[BraidHub](#braidhub) is the server, and `braid land` lands there, in turn
+with every other landing.
+
+**Why not a git worktree per agent?** A git worktree gives each agent its
+own files and index, but landing works as before: each branch still has
+to be rebased or merged onto `main`, and when the agents push to one
+remote, every agent that loses the race fetches, rebases and pushes again,
+and stops at conflict markers when two changes clash. `braid land` rebases
+a change onto whatever landed first, in one short step taken in turn, and
+a conflict comes back as data while `main` stays put.
+
+**Do coding agents need a merge queue?** Not to land. Agents land in turn
+and never wait for CI; [`braid verify`](#keeping-main-green) tests after
+landing, bisects a failure and, with `--revert`, lands the revert, and
+`main` can be red in between. Where people review each change before it
+lands, pull requests and a merge queue still make sense, and
+`braid git sync` keeps the GitHub repository they use in step.
+
 ## Part of Elffuss
 
 Braid is part of [Elffuss](https://elffuss.com), a family of tools for
@@ -518,7 +553,7 @@ too.
 
 ## Prior art and credits
 
-- Anthropic, [Redesigning source control at Anthropic](https://www.anthropic.com/engineering/redesigning-source-control):
+- Anthropic, [Redesigning source control at Anthropic](https://www.anthropic.com/research/redesigning-source-control):
   changesets stored against the first parent, server-side merges, minimal
   branch state, immutable objects served by any cache tier, and testing
   after merging instead of a merge queue. The article credits many of its
