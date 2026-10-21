@@ -8,6 +8,7 @@ mod history;
 mod hub;
 mod revert;
 mod sync;
+mod verify;
 mod work;
 
 use std::collections::HashMap;
@@ -318,6 +319,11 @@ enum Command {
     /// conflicts).
     #[command(long_about = revert::REVERT_HELP)]
     Revert(revert::RevertArgs),
+    /// Run the tests on a branch's head, keep braid/green/<branch> at the
+    /// newest changeset that passed, and find what broke them (exit status
+    /// 4 when the branch is red).
+    #[command(long_about = verify::VERIFY_HELP)]
+    Verify(verify::VerifyArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -521,6 +527,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Track { paths } => work::track(cli, paths),
         Command::Change { action } => work::change(cli, action),
         Command::Revert(args) => revert::revert(cli, args),
+        Command::Verify(args) => verify::verify(cli, args),
     }
 }
 

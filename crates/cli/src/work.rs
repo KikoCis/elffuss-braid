@@ -84,6 +84,8 @@ With --json, status prints one object:
   branch           the branch it lands on and updates from
   base             the changeset its working copy is at, or null
   head             the branch's head, or null when the branch does not exist
+  green            the newest changeset of the branch that passed `braid
+                   verify`, braid/green/<branch>, or null
   behind           whether the branch has changesets the workspace does not
   behind_by        how many: the changesets from the branch's head down to
                    the one the workspace's own start from, along first
@@ -564,12 +566,18 @@ pub(crate) fn status(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
                 })).collect::<Vec<_>>(),
             })
         });
+        let green = target
+            .repo
+            .store()
+            .refs()?
+            .get(&crate::verify::green_ref(&state.branch));
         print_json(&json!({
             "workspace": workspace.name(),
             "path": workspace.dir().to_string_lossy(),
             "branch": state.branch,
             "base": hex(state.base),
             "head": hex(report.head),
+            "green": hex(green),
             "behind": report.behind(),
             "behind_by": report.behind_by,
             "clean": status.is_clean(),

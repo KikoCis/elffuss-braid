@@ -511,6 +511,7 @@ dependencies = [
  "elffuss-braid-repo",
  "elffuss-braid-store",
  "elffuss-braid-wc",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",
