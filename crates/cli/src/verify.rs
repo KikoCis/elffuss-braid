@@ -68,9 +68,11 @@ const SCRATCH_PREFIX: &str = "braid-verify-";
 /// the last hour, at most.
 const HISTORY_DEPTH: usize = 10_000;
 
-/// The longest record file name made of the branch's name in hex; a longer
-/// name is hashed instead.
-const MAX_HEX_NAME: usize = 200;
+/// The longest branch name in hex that a record file is named with; a
+/// longer name is hashed instead. With `.json`, and the `.new` of the
+/// scratch file the record is written through, a file name stays under 143
+/// bytes, the most some encrypted file systems take.
+const MAX_HEX_NAME: usize = 128;
 
 /// What the watchdog says once it runs, before braid starts any test. The
 /// number changes with the protocol, so that another braid's watchdog is
@@ -1407,8 +1409,12 @@ mod tests {
             format!("b3-{}.json", blake3::hash(longer.as_bytes()).to_hex())
         );
         assert_ne!(name(&format!("{longest}y")), hashed);
-        // Even the longest branch name a ref can have fits a file name.
-        assert!(name(&"z".repeat(4096)).len() < 100);
+        // The longest file names, with the scratch file's `.new`, stay under
+        // 143 bytes, whatever the length of the branch's name.
+        for branch in [longest, longer, "z".repeat(4096)] {
+            let scratch = format!("{}.new", name(&branch));
+            assert!(scratch.len() < 143, "{scratch}");
+        }
     }
 
     #[test]
