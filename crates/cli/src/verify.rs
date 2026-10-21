@@ -441,7 +441,7 @@ impl Tester<'_> {
     fn run(&mut self, changeset: ObjectId) -> Result<Option<bool>> {
         let dir = scratch_dir()?;
         let result = self.run_in(changeset, &dir);
-        // Whatever the command left goes too.
+        // Gone already, unless the watchdog did not start.
         let _ = fs::remove_dir_all(&dir);
         let Some(end) = result? else {
             return Ok(None);
@@ -461,6 +461,9 @@ impl Tester<'_> {
     fn run_in(&mut self, changeset: ObjectId, dir: &Path) -> Result<Option<RunEnd>> {
         let mut watchdog = Watchdog::start(dir)?;
         let end = self.watched(changeset, dir, &mut watchdog);
+        // Whatever the command left goes too, while the watchdog still
+        // watches: braid ending now leaves nothing behind either.
+        let _ = fs::remove_dir_all(dir);
         watchdog.done();
         end
     }
@@ -611,7 +614,7 @@ impl Watchdog {
     /// waits up to `wait` for it to say [`READY`].
     #[cfg(unix)]
     fn spawn(mut command: Command, wait: Duration) -> Result<Watchdog> {
-        use std::io::BufReader;
+        use std::io::{BufReader, Read};
         use std::os::unix::process::CommandExt;
         let mut child = command
             .stdin(Stdio::piped())
@@ -622,15 +625,26 @@ impl Watchdog {
             .process_group(0)
             .spawn()
             .context("cannot start verify's watchdog, so the tests did not run")?;
-        let said = match child.stdout.take() {
-            Some(stdout) => {
-                let (sender, receiver) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = child.stdout.take().map(|stdout| {
+            std::thread::Builder::new()
+                .name("verify watchdog".to_owned())
+                .spawn(move || {
+                    // No more than the line it must say: a program that says
+                    // more is not this braid's watchdog anyway.
                     let mut line = Vec::new();
-                    let read = BufReader::new(stdout).read_until(b'\n', &mut line);
+                    let read = BufReader::new(stdout.take(READY.len() as u64))
+                        .read_until(b'\n', &mut line);
                     let _ = sender.send(read.map(|_| line));
-                });
-                receiver.recv_timeout(wait)
+                })
+        });
+        let said = match reader {
+            Some(Ok(_)) => receiver.recv_timeout(wait),
+            Some(Err(err)) => {
+                kill_group(&mut child);
+                let _ = child.wait();
+                return Err(err)
+                    .context("cannot listen to verify's watchdog, so the tests did not run");
             }
             None => Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
         };
@@ -641,7 +655,8 @@ impl Watchdog {
             Ok(Err(err)) => format!("it could not be read: {err}"),
             Err(_) => format!("it said nothing for {wait:?}"),
         };
-        let _ = child.kill();
+        // It runs in a group of its own: whatever it started goes too.
+        kill_group(&mut child);
         let _ = child.wait();
         bail!(
             "verify's watchdog did not start ({why}), so the tests did not run; is the braid command being replaced, or another braid in its place?"
@@ -1476,9 +1491,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn no_test_runs_unless_the_watchdog_says_it_runs() {
-        let quick = Duration::from_millis(300);
+        // Long enough for any start: these end on their own first.
+        let ample = Duration::from_secs(30);
         // An older braid, which has no such command, or another program.
-        let err = Watchdog::spawn(fake_watchdog("echo 'no such command' >&2; exit 2"), quick)
+        let err = Watchdog::spawn(fake_watchdog("echo 'no such command' >&2; exit 2"), ample)
             .err()
             .unwrap();
         let err = format!("{err:#}");
@@ -1488,11 +1504,18 @@ mod tests {
         );
         // One that answers with another protocol.
         let older = fake_watchdog("echo 'braid verify watchdog 1 ready'; exec cat");
-        let err = format!("{:#}", Watchdog::spawn(older, quick).err().unwrap());
+        let err = format!("{:#}", Watchdog::spawn(older, ample).err().unwrap());
         assert!(err.contains("it said"), "{err}");
-        // One that never answers: it echoes its input, and gets none.
+        // One that says far more than the line, all on one: it is not read
+        // past the line's length.
+        let chatty = fake_watchdog("yes braid | tr -d '\\n'");
+        let err = format!("{:#}", Watchdog::spawn(chatty, ample).err().unwrap());
+        assert!(err.contains("it said \"braidbraid"), "{err}");
+        // One that never answers: it echoes its input, and gets none. Here
+        // the wait runs out, whatever it is.
         let silent = fake_watchdog("exec cat");
-        let err = format!("{:#}", Watchdog::spawn(silent, quick).err().unwrap());
+        let wait = Duration::from_secs(1);
+        let err = format!("{:#}", Watchdog::spawn(silent, wait).err().unwrap());
         assert!(err.contains("said nothing"), "{err}");
     }
 
