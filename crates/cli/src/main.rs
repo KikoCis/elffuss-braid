@@ -327,8 +327,11 @@ enum Command {
     /// Kill a test run's process group when verify goes away (internal).
     #[command(name = verify::WATCHDOG, hide = true)]
     VerifyWatchdog {
-        /// The run's scratch directory.
-        dir: PathBuf,
+        /// The run's scratch directory; or first the test's process group,
+        /// as braid 0.1.1 starts its watchdog.
+        first: std::ffi::OsString,
+        /// The run's scratch directory, after the process group.
+        dir: Option<PathBuf>,
     },
 }
 
@@ -542,7 +545,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Change { action } => work::change(cli, action),
         Command::Revert(args) => revert::revert(cli, args),
         Command::Verify(args) => verify::verify(cli, args),
-        Command::VerifyWatchdog { dir } => verify::watchdog(dir),
+        Command::VerifyWatchdog { first, dir } => match dir {
+            None => verify::watchdog(None, Path::new(first)),
+            Some(dir) => verify::watchdog(Some(first), dir),
+        },
     }
 }
 

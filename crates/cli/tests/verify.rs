@@ -911,3 +911,61 @@ fn a_run_cut_short_counts_and_its_report_is_printed() {
         "the test's shell {shell} outlived its watchdog"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn the_watchdog_still_takes_the_arguments_braid_0_1_1_gives() {
+    use std::io::Write;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    // As braid 0.1.1 starts it: after the test, with the test's process
+    // group and then the directory, and told nothing but `done`.
+    let start = |test: &std::process::Child, dir: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_braid"))
+            .arg("__verify-watchdog")
+            .arg(test.id().to_string())
+            .arg(dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    };
+    let sleeper = || {
+        Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    };
+    let base = std::env::temp_dir();
+    let dir = |n: u32| {
+        let dir = base.join(format!("braid-verify-old-{}-{n}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    };
+
+    // That braid went away.
+    let gone = dir(1);
+    let mut test = sleeper();
+    let mut watchdog = start(&test, &gone);
+    drop(watchdog.stdin.take());
+    watchdog.wait().unwrap();
+    assert_eq!(test.wait().unwrap().signal(), Some(9));
+    assert!(!gone.exists());
+
+    // That braid finished its run.
+    let kept = dir(2);
+    let mut test = sleeper();
+    let mut watchdog = start(&test, &kept);
+    let mut input = watchdog.stdin.take().unwrap();
+    input.write_all(b"done\n").unwrap();
+    drop(input);
+    watchdog.wait().unwrap();
+    assert!(test.try_wait().unwrap().is_none());
+    assert!(kept.is_dir());
+    // This test's own process, by its id.
+    test.kill().unwrap();
+    test.wait().unwrap();
+    std::fs::remove_dir(&kept).unwrap();
+}

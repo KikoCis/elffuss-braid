@@ -741,23 +741,23 @@ fn started_as(name: &std::ffi::OsStr, path: Option<&std::ffi::OsStr>) -> Option<
         })
 }
 
-/// The watchdog of one test run in `dir`, as [`Watchdog`] starts it.
-pub(crate) fn watchdog(dir: &Path) -> Result<ExitCode> {
+/// The watchdog of one test run in `dir`, as [`Watchdog`] starts it. Braid
+/// 0.1.1 started its watchdog with the test's process group, `given`,
+/// before the directory, after the test, and said nothing but `done`: a
+/// newer braid put in its place mid-run still watches that run.
+pub(crate) fn watchdog(given: Option<&std::ffi::OsStr>, dir: &Path) -> Result<ExitCode> {
     {
         let mut out = io::stdout().lock();
         let _ = out.write_all(READY).and_then(|()| out.flush());
     }
-    let mut group = None;
+    let mut group = given.and_then(|id| group_id(id.as_encoded_bytes()));
     for line in io::stdin().lock().split(b'\n') {
         let Ok(line) = line else { break };
         if line == b"done" {
             return Ok(ExitCode::SUCCESS);
         }
         if let Some(id) = line.strip_prefix(b"group ") {
-            group = std::str::from_utf8(id)
-                .ok()
-                .and_then(|id| id.parse::<i32>().ok())
-                .filter(|id| *id > 1);
+            group = group_id(id);
         }
     }
     // Braid went away while the tests ran, or before they started.
@@ -781,6 +781,14 @@ pub(crate) fn watchdog(dir: &Path) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A process group's id, as the watchdog is given it: a number above 1.
+fn group_id(text: &[u8]) -> Option<i32> {
+    std::str::from_utf8(text)
+        .ok()
+        .and_then(|id| id.parse::<i32>().ok())
+        .filter(|id| *id > 1)
 }
 
 /// Whether an environment variable is one of the hub's credentials or
