@@ -1,0 +1,8 @@
+# Elffuss Braid · braid.elffuss.com
+#
+# Everything here is public and meant to be read, by search engines and by
+# AI crawlers alike. llms.txt and agents.md are plain text for agents.
+User-agent: *
+Allow: /
+
+Sitemap: https://braid.elffuss.com/sitemap.xml

@@ -299,14 +299,70 @@ fn the_guide_for_agents_is_the_same_in_agents_md_and_on_the_site() {
 
 #[test]
 fn the_prompt_for_agents_is_the_same_everywhere() {
-    for path in ["README.md", "site/index.html", "site/llms.txt"] {
+    for path in [
+        "README.md",
+        "site/index.html",
+        "site/scion.html",
+        "site/llms.txt",
+    ] {
         assert!(repository_file(path).contains(PROMPT), "{path}");
     }
-    for path in ["README.md", "site/index.html"] {
+    for path in ["README.md", "site/index.html", "site/scion.html"] {
         assert!(repository_file(path).contains(PROMPT_ES), "{path}");
     }
     assert!(PROMPT.contains(" https://braid.elffuss.com/agents.md "));
     assert!(repository_file("site/llms.txt").contains("(https://braid.elffuss.com/agents.md)"));
+}
+
+#[test]
+fn the_site_names_the_version_of_the_code() {
+    // The home page's structured data says which braid it describes.
+    let version = env!("CARGO_PKG_VERSION");
+    let page = repository_file("site/index.html");
+    for field in ["version", "softwareVersion"] {
+        let pair = format!("\"{field}\": \"{version}\"");
+        assert!(page.contains(&pair), "site/index.html: {pair}");
+    }
+}
+
+#[test]
+fn the_sitemap_lists_every_page_of_the_site() {
+    let sitemap = repository_file("site/sitemap.xml");
+    let site = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site");
+    for entry in fs::read_dir(&site).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if !name.ends_with(".html") {
+            continue;
+        }
+        let url = match name.as_str() {
+            "index.html" => "https://braid.elffuss.com/".to_owned(),
+            other => format!("https://braid.elffuss.com/{other}"),
+        };
+        assert!(sitemap.contains(&format!("<loc>{url}</loc>")), "{url}");
+    }
+    assert!(
+        repository_file("site/robots.txt")
+            .contains("Sitemap: https://braid.elffuss.com/sitemap.xml")
+    );
+}
+
+#[test]
+fn every_text_that_names_scion_says_braid_is_independent() {
+    for path in [
+        "README.md",
+        "site/index.html",
+        "site/scion.html",
+        "site/llms.txt",
+    ] {
+        let text = repository_file(path);
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.contains("Scion") {
+            assert!(
+                flat.contains("not affiliated with or endorsed by Anthropic"),
+                "{path}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -11,9 +11,11 @@
 
   var KEY = 'braid-lang';
   var root = document.documentElement;
+  // Each page's own titles: the English one is its <title>, which comes
+  // before this file in <head>; the Spanish one is data-title-es on <html>.
   var TITLE = {
-    en: 'Elffuss Braid · version control for many agents at once',
-    es: 'Elffuss Braid · control de versiones para muchos agentes a la vez'
+    en: document.title,
+    es: root.getAttribute('data-title-es') || document.title
   };
   var SAID = {
     en: { copied: 'Copied', failed: 'Could not copy: the text is selected instead' },
