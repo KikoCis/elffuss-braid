@@ -721,6 +721,8 @@ details.run .code { margin: 12px; }
 .points li::marker { color: var(--brass); font-family: var(--serif); font-weight: 600; }
 .points strong { font-weight: 650; }
 .credit { margin-top: 24px; max-width: 72ch; color: var(--text-dim); font-size: .95rem; }
+/* the heading over the Scion credit in #how sits close to it, in both languages */
+.grid-title + .credit, .grid-title + .credit + .credit { margin-top: 8px; }
 
 /* ------------------------------------------------------------- agents */
 .grid-title { margin-top: 34px; }
@@ -892,3 +894,12 @@ tbody tr:hover { background: var(--surface-soft); }
   .foot-row .dot { display: none; }
 }
 .foot-note { margin-top: 14px; max-width: 76ch; font-size: .86rem; }
+
+/* ------------------------------------------------------------- scion.html */
+/* the prior art list, after its lead paragraph */
+.honest.prior { margin-top: 18px; }
+/* the questions: each language is one block of headings and answers */
+.qa h3 { margin-top: 30px; font-size: clamp(1.15rem, 2vw, 1.32rem); }
+.qa h3:first-child { margin-top: 0; }
+.qa h3 + p { margin-top: 8px; }
+.qa p { max-width: 72ch; color: var(--text-dim); }

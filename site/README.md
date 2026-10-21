@@ -1,17 +1,20 @@
 # braid.elffuss.com
 
-The site of Elffuss Braid: one static page, in English and Spanish, with no
-build step and no requests to anything but its own files.
+The site of Elffuss Braid: two static pages, in English and Spanish, with no
+build step and no requests to anything but their own files.
 
 | File | What it is |
 |---|---|
-| `index.html` | The page. The logo, the diagram and the git loop are inline SVG. |
+| `index.html` | The home page. The logo, the diagram and the git loop are inline SVG. |
+| `scion.html` | What braid takes from the ideas Anthropic published about Scion, where it differs, the prior art it credits and other open implementations. It has the header, the footer, the CSS and the JavaScript of `index.html`; its links into the home page are `./#…`. |
 | `site.css` | Dark by default, as on elffuss.com; light under `prefers-color-scheme: light`. Terminals stay dark in both. |
 | `site.js` | The language toggle, the copy buttons, the faded edge of a code block that scrolls, which blocks take keyboard focus, and the markers of the ratio table. Without it the page is complete, in English, every block takes focus, and the toggle and the copy buttons stay hidden. |
 | `og.png`, `og/og.svg` | The Open Graph image, 1200 × 630, and its source. |
 | `favicon.svg`, `favicon-32.png`, `apple-touch-icon.png`, `favicon.ico` | The icons: the strands around one crossing of the logo. `favicon.ico` is for the clients that ask for it whatever the page declares. |
 | `agents.md` | The guide for coding agents: installing braid and setting it up in a project. It is part 1 of the repository's `AGENTS.md`, with a title and an introduction of its own, and the prompt under "Ask your agent" points at it. |
 | `llms.txt` | What braid is, in the [llms.txt](https://llmstxt.org) format, with links to `agents.md`, the README and the docs. |
+| `robots.txt` | Lets every crawler in and names the sitemap. |
+| `sitemap.xml` | Every page, `llms.txt` and `agents.md`. A new page goes in it in the same change. |
 
 The HTML, the CSS, the JavaScript and the SVGs open with
 `SPDX-License-Identifier: Apache-2.0` and `Copyright (c) 2026 UtopiaIA` in a
@@ -25,7 +28,7 @@ To look at it locally:
 python3 -m http.server --directory site 8000
 ```
 
-## Two languages in one page
+## Two languages in each page
 
 Every translated block is in the page twice, once with `data-l="en"
 lang="en"` and once with `data-l="es" lang="es"`. `site.css` hides the one
@@ -33,7 +36,9 @@ that does not match `html[lang]`. `site.js` sets `html[lang]` before the body
 is drawn, from the first of: `?lang=en` or `?lang=es`, the choice stored when
 someone pressed EN or ES, a browser language that starts with `es`, English.
 Elements with `data-aria-en` and `data-aria-es` get the matching
-`aria-label`; the page title and the "Copied" message follow too.
+`aria-label`; the page title and the "Copied" message follow too. The
+English title is the page's `<title>` and the Spanish one is `data-title-es`
+on `<html>`: a title is changed there, and nowhere else.
 
 Transcripts, commands and JSON are not translated, and carry `lang="en"`.
 In the ratio table, what each row compares is written in both languages;
@@ -95,24 +100,37 @@ stay in English.
   on the run: the line about speed under "What is honest about this" only
   sends the reader to the table.
 
-## What the page may say
+## What the pages may say
 
 - Only what is true of the code today.
-- Ratios against git appear only between the ratios markers. No absolute
-  times, sizes or throughput, no description of any machine, no user names
-  and no disk paths.
+- Ratios against git appear only between the ratios markers; another page
+  sends the reader to `./#measured`. No absolute times, sizes or
+  throughput, no description of any machine, no user names and no disk
+  paths.
+- Wherever Scion is named, the page also says that braid is an independent
+  implementation, contains no Anthropic code and is not affiliated with or
+  endorsed by Anthropic.
+- `scion.html` quotes Anthropic's post word for word, or says plainly what
+  the post says, and what it says of another project comes from that
+  project's own README or docs. It compares and does not judge: what both
+  projects do is said of both.
 - The story is braid's own test, `crates/cli/tests/three_agents.rs`, run as
   the "Run it yourself" script does. If the transcripts are made again, leave
   out the op log's times and blame's dates, never paste what `workspace add`
   prints (it names the directory), and change the hero card and the story
   together.
 - The prompt under "Ask your agent" is the same, word for word, in the
-  English page, in the README and in `llms.txt`, and so is its Spanish in
-  the Spanish page and in the README's Spanish part. `agents.md` is part 1
-  of `AGENTS.md`, and its install command names the tag of the version in
-  `Cargo.toml`. `crates/cli/tests/guides.rs` checks all of this, and that
-  every braid command `agents.md` gives exists with its flags; every
-  command it gives runs as written.
+  English page, in the README, in `llms.txt` and under "Try it" in
+  `scion.html`, and so is its Spanish in the Spanish pages and in the
+  README's Spanish part. `agents.md` is part 1 of `AGENTS.md`, and its
+  install command names the tag of the version in `Cargo.toml`.
+  `crates/cli/tests/guides.rs` checks all of this, and that every braid
+  command `agents.md` gives exists with its flags; every command it gives
+  runs as written.
+- The structured data in the head of `index.html` (JSON-LD) names the
+  version in `Cargo.toml`, so a release bumps it too, and every page is in
+  `sitemap.xml`. `crates/cli/tests/guides.rs` checks both, and that every
+  text that names Scion says braid is independent.
 - The quick start and the agent's commands under "Many agents on one
   repository" run as one session, top to bottom. `braid undo` comes after the
   agent lands, so it takes that landing back; before it, it would take the
@@ -152,7 +170,11 @@ all of this is true:
    `text/markdown; charset=utf-8` and `https://braid.elffuss.com/llms.txt`
    as `text/plain; charset=utf-8`, so that an agent reads them as text:
    `curl -sI` shows the type. A server that does not know `.md` may send
-   `application/octet-stream` instead.
+   `application/octet-stream` instead. `https://braid.elffuss.com/robots.txt`
+   answers 200 as `text/plain`, `https://braid.elffuss.com/sitemap.xml` as
+   `text/xml` or `application/xml`, and every page in the sitemap answers
+   200. A new page is then submitted again with the sitemap, in Google
+   Search Console and Bing Webmaster Tools.
 
 ## Images
 
