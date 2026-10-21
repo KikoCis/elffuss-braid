@@ -722,6 +722,8 @@ each in a braid workspace of its own. Git stays the source of truth, and
   standard error, even with `--json`.
 - **Before a new task**, `braid --agent agent-1 update` brings your
   workspace onto `{branch}`.
+- If `braid verify` reverted a changeset of yours, fix it and land a new
+  changeset.
 - **On a hub:** when `braid hub status` names a hub (the repository was
   published on [BraidHub](https://braidhub.elffuss.com) or cloned from it;
   elsewhere it says the repository is not linked), `land` and `update` go

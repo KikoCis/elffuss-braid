@@ -326,6 +326,47 @@ New files that look like secrets (`.env*`, `*.pem`, `id_*`) or are larger than
 1 MiB are not committed until `braid track <path>` says so: `braid commit`
 refuses while they wait, naming them, and `--force` leaves them out.
 
+A changeset that landed and should not have is undone with another:
+`braid revert <rev>` makes a changeset that puts its files back, modes and
+links included, names the one it undoes in a `reverts` field, and lands it,
+rebased over whatever landed since. When later work touched the same lines,
+it stops with conflicts and exit status 2, as `land` does, and nothing
+moves. `--no-land` only makes the changeset, and a merge needs
+`--mainline 1`.
+
+### Keeping main green
+
+`braid verify` runs the project's tests on the head of a branch and keeps
+`braid/green/<branch>` at the newest changeset that passed. When they fail,
+it bisects the changesets since the green one, along first parents, to find
+the first that fails, and with `--revert` it reverts that one and lands the
+revert. One run is one pass: run it after landings, or on a schedule.
+
+```bash
+braid verify --branch main --revert --json -- cargo test --workspace
+```
+
+- The command runs as given, with no shell, in a fresh copy of the
+  changeset's files in the system's temporary directory: outside the
+  repository, so every run builds from scratch. `BRAID_TOKEN` and the other
+  `BRAID_HUB` variables are taken out of its environment, and
+  `BRAID_VERIFY_CHANGESET` and `BRAID_VERIFY_BRANCH` say what it tests.
+  After `--timeout` (10 minutes by default) it is killed with every process
+  it started.
+- A failing run is run again (`--reruns`, once by default) before it counts;
+  one that then passes is `flaky`. With no green ref yet, verify tests only
+  the head, unless `--from` names a changeset to bisect from.
+- It never reverts a merge, nor a revert it made itself, which it keeps in
+  `.braid/verify/<branch>.json`, and it lands at most three reverts an hour
+  (`--max-reverts-per-hour`). The green ref does not move after a revert:
+  the next pass tests the new head. `--dry-run` reports and changes nothing.
+- Bisecting tests each changeset as it is: an earlier revert in the range is
+  not undone first, so a culprit found among reverted work needs a look.
+- Exit status 0 means green (`pass` or `flaky`), 4 red (`red`, `reverted`,
+  `refused` or `no_culprit`), 2 a revert that conflicts, and 1 an error.
+  `braid status --json` shows the green changeset as `green`, and
+  `braid verify --help` describes every JSON field.
+
 ## Working with git
 
 Repositories come in with their whole history and keep a git mirror.

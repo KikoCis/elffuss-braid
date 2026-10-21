@@ -172,6 +172,16 @@ against a directory, two names that differ only in case or Unicode
 normalisation, a directory removed under a new file, and the same file renamed
 two ways.
 
+A revert is a landing like any other. The revert `R` of a changeset `C` has
+`C` as its only parent, the change list from `C`'s tree back to its first
+parent's, and a `reverts` extra field naming `C`. Landed on a head that moved
+past `C`, it is rebased path by path with `C` as the base, the head as ours
+and `C`'s parent as theirs: later work on other lines stays, and later work
+on the same lines is a conflict. `braid verify` lands the reverts it makes
+the same way; which reverts it made, it keeps in a file of its own rather
+than trusting the `reverts` field, which anyone can write. Its green ref,
+`braid/green/<branch>`, lives in braid's own namespace and is never exported.
+
 **Invariants.** A branch only moves forward. A branch never contains a
 conflict. No value is overwritten except by a change whose base already
 contained it. An acknowledged landing is durable. Readers only see durable

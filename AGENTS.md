@@ -396,8 +396,11 @@ in, publish a project, clone one, and when to ask the user first.
   first. A landing undone leaves its changeset in the workspace that made
   it, ready to land again. A sync undone moves braid's refs back, but not
   the git remote: what it pushed stays there.
-- A change that landed under other changes cannot be undone that way.
-  There is no revert command yet: land a change that puts the files back.
+- A change that landed under other changes cannot be undone that way:
+  `braid --agent agent-1 revert <changeset> --json` lands a changeset that
+  puts its files back, rebased over what landed since. When later changes
+  touched the same lines, it exits with status 2, `land` in its JSON has
+  the conflicts, and nothing moves: undo the change by hand in a workspace.
 - To take braid out of a project: land what the workspaces hold, sync it
   and run `git pull --ff-only`; remove each workspace
   (`braid workspace remove <name>`, which refuses while work has not
