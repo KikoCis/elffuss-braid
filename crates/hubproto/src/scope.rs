@@ -3,13 +3,23 @@
 
 //! Token scopes: which repositories a token reaches, and what it may do
 //! there. A scope's `repo` is `owner/name`, `owner/*` or `*`; a right is
-//! `read`, `interact`, `write`, `land:<ref glob>` or `admin`.
+//! `read`, `interact`, `write`, `land:<ref glob>`, `verify:<ref glob>` or
+//! `admin`.
 //!
 //! `write` includes `read`, and `admin` includes both. `interact` covers the
 //! social writes (stars, watching, following, issues, comments, reviews and
 //! forks) on what the account may read; `write` and `admin` include it, and
 //! it gives no read of its own. A `land:<glob>` right lets a token land on
 //! the refs its glob matches, and only together with `write`.
+//!
+//! A `verify:<glob>` right lets a token post verdicts on the branches its
+//! glob matches (section 25), and nothing else: it counts only where the
+//! token's account may write, and only on a token that reads the repository
+//! but holds no `write`, `admin`, `land:` or `interact` there, so that the
+//! token of a CI job can say how its tests went and do nothing more.
+//!
+//! [`Right`] may gain rights: a client keeps a scope it cannot read out of
+//! what it decides, as [`ParsedScope::parse`] refuses it whole.
 
 use std::fmt;
 
@@ -23,15 +33,18 @@ pub enum ScopeError {
     #[error("{0:?} is not a repository pattern: expected \"owner/name\", \"owner/*\" or \"*\"")]
     Repo(String),
     /// A right that does not exist.
-    #[error("{0:?} is not a right: expected read, interact, write, admin or land:<ref glob>")]
+    #[error(
+        "{0:?} is not a right: expected read, interact, write, admin, land:<ref glob> or verify:<ref glob>"
+    )]
     Right(String),
     /// A scope without rights.
     #[error("the scope for {0:?} grants no right")]
     NoRights(String),
 }
 
-/// One right of a scope.
+/// One right of a scope. More may come: a `match` on it ends with `_`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Right {
     /// Every `GET` and `HEAD`, `lacks`, `missing` and the ref watch.
     Read,
@@ -46,27 +59,38 @@ pub enum Right {
     /// Landing on the refs the glob matches (see
     /// [`glob_matches`](crate::names::glob_matches)), with `write`.
     Land(String),
+    /// Posting verdicts on the branches the glob matches (section 25),
+    /// where the account may write, on a token that holds nothing more
+    /// there than `read`.
+    Verify(String),
+}
+
+/// The glob of a `land:` or `verify:` right: not empty, at most 4,096
+/// bytes, and without control characters.
+fn glob(text: &str) -> Option<String> {
+    (!text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control))
+        .then(|| text.to_owned())
 }
 
 impl Right {
-    /// Reads `read`, `interact`, `write`, `admin` or `land:<glob>`. A glob
-    /// is not empty and holds no control character.
+    /// Reads `read`, `interact`, `write`, `admin`, `land:<glob>` or
+    /// `verify:<glob>`. A glob is not empty and holds no control character.
     pub fn parse(text: &str) -> Result<Right, ScopeError> {
+        let refused = || ScopeError::Right(text.to_owned());
         match text {
             "read" => Ok(Right::Read),
             "interact" => Ok(Right::Interact),
             "write" => Ok(Right::Write),
             "admin" => Ok(Right::Admin),
-            _ => match text.strip_prefix("land:") {
-                Some(glob)
-                    if !glob.is_empty()
-                        && glob.len() <= 4096
-                        && !glob.chars().any(char::is_control) =>
-                {
-                    Ok(Right::Land(glob.to_owned()))
+            _ => {
+                if let Some(rest) = text.strip_prefix("land:") {
+                    glob(rest).map(Right::Land).ok_or_else(refused)
+                } else if let Some(rest) = text.strip_prefix("verify:") {
+                    glob(rest).map(Right::Verify).ok_or_else(refused)
+                } else {
+                    Err(refused())
                 }
-                _ => Err(ScopeError::Right(text.to_owned())),
-            },
+            }
         }
     }
 }
@@ -79,6 +103,7 @@ impl fmt::Display for Right {
             Right::Write => f.write_str("write"),
             Right::Admin => f.write_str("admin"),
             Right::Land(glob) => write!(f, "land:{glob}"),
+            Right::Verify(glob) => write!(f, "verify:{glob}"),
         }
     }
 }
@@ -183,6 +208,8 @@ mod tests {
             ("admin", Right::Admin),
             ("land:*", Right::Land("*".into())),
             ("land:release/*", Right::Land("release/*".into())),
+            ("verify:main", Right::Verify("main".into())),
+            ("verify:*", Right::Verify("*".into())),
         ] {
             assert_eq!(Right::parse(text), Ok(right.clone()));
             assert_eq!(right.to_string(), text);
@@ -196,9 +223,27 @@ mod tests {
             "land",
             "push",
             "land:a\nb",
+            "verify:",
+            "verify",
+            "VERIFY:main",
+            "Verify:main",
+            "verify:a\nb",
         ] {
-            assert!(Right::parse(bad).is_err(), "{bad:?}");
+            assert_eq!(
+                Right::parse(bad),
+                Err(ScopeError::Right(bad.to_owned())),
+                "{bad:?}"
+            );
         }
+        let long = format!("verify:{}", "a".repeat(4096));
+        assert!(Right::parse(&long).is_ok());
+        assert!(Right::parse(&format!("{long}a")).is_err());
+        // The error names every right there is.
+        let said = ScopeError::Right("push".into()).to_string();
+        assert!(
+            said.contains("land:<ref glob>") && said.contains("verify:<ref glob>"),
+            "{said}"
+        );
     }
 
     #[test]
@@ -235,6 +280,23 @@ mod tests {
         assert_eq!(
             ParsedScope::parse(&empty),
             Err(ScopeError::NoRights("*".into()))
+        );
+        // The scope of a CI job's token: it reads, and posts verdicts.
+        let ci = Scope {
+            repo: "ada/demo".into(),
+            rights: vec!["read".into(), "verify:main".into()],
+        };
+        let parsed = ParsedScope::parse(&ci).unwrap();
+        assert_eq!(parsed.rights, [Right::Read, Right::Verify("main".into())]);
+        assert_eq!(parsed.to_scope(), ci);
+        // A right this crate cannot read refuses its scope whole.
+        let later = Scope {
+            repo: "ada/demo".into(),
+            rights: vec!["read".into(), "someday:main".into()],
+        };
+        assert_eq!(
+            ParsedScope::parse(&later),
+            Err(ScopeError::Right("someday:main".into()))
         );
     }
 }

@@ -2119,6 +2119,29 @@ mod tests {
         assert_eq!(prefix_on(&elsewhere, &target, &info("admin"), "fix"), None);
         let main_only = me(&[("ada/demo", &["write", "land:main"])]);
         assert_eq!(prefix_on(&main_only, &target, &info("write"), "fix"), None);
+        // The token of a CI job, which posts verdicts, lands nowhere.
+        let verdicts = me(&[("ada/demo", &["read", "verify:main"])]);
+        assert_eq!(prefix_on(&verdicts, &target, &info("write"), "fix"), None);
+        // Beside a scope that lands it takes nothing away. Nor does a scope
+        // with a right this braid cannot read, as a braid older than
+        // `verify:` rights reads one: that scope is left out, and the
+        // others count.
+        let both = me(&[
+            ("ada/demo", &["read", "verify:main"]),
+            ("ada/demo", &["write", "land:request/*"]),
+        ]);
+        assert_eq!(
+            prefix_on(&both, &target, &info("write"), "fix").as_deref(),
+            Some("request/")
+        );
+        let unread = me(&[
+            ("ada/demo", &["read", "someday:main"]),
+            ("ada/demo", &["write", "land:request/*"]),
+        ]);
+        assert_eq!(
+            prefix_on(&unread, &target, &info("write"), "fix").as_deref(),
+            Some("request/")
+        );
     }
 
     /// A request read off a connection: its `Idempotency-Key` and its body.

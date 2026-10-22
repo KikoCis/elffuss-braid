@@ -173,7 +173,8 @@ pub enum DevicePoll {
 pub struct Scope {
     /// `owner/name`, `owner/*`, or `*`.
     pub repo: String,
-    /// `read`, `write`, `land:<glob>`, `admin`.
+    /// `read`, `interact`, `write`, `land:<glob>`, `verify:<glob>`, `admin`
+    /// (see [`crate::scope`]).
     pub rights: Vec<String>,
 }
 
