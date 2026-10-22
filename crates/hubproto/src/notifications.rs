@@ -43,7 +43,15 @@ pub const LANDED: &str = "landed";
 pub const SUBSCRIBED: &str = "subscribed";
 
 /// A notice of the hub about the account's own requests, such as a fork
-/// made or a grant to renew.
+/// made or a grant to renew, or about the default branch of a repository
+/// it administers or landed on: [`verify_red`], [`verify_fixed`] and
+/// [`verify_stuck`] (section 25), whose `url` is the repository's
+/// verification page. The reason of each notice is this one, whatever its
+/// code.
+///
+/// [`verify_red`]: crate::verify::NOTICE_RED
+/// [`verify_fixed`]: crate::verify::NOTICE_FIXED
+/// [`verify_stuck`]: crate::verify::NOTICE_STUCK
 pub const SYSTEM: &str = "system";
 
 /// Why an account is told about a thread, strongest first: a notification
@@ -115,7 +123,8 @@ pub struct Notification {
     /// What happened last: in a thread, `opened`, `commented`, `closed`,
     /// `reopened`, `assigned`, `mentioned`, `review_requested`, `reviewed`
     /// or `landed`; in a notice of the hub, what it says, such as
-    /// `fork_done`.
+    /// `fork_done`, or `verify_red`, `verify_fixed` and `verify_stuck` for
+    /// a repository's default branch.
     #[serde(default)]
     pub code: Option<String>,
     /// When it last changed.
@@ -224,6 +233,15 @@ mod tests {
         assert!(notice["notifications"][1]["actor"].is_null());
         assert_eq!(REASONS[0], MENTION);
         assert!(!REASONS.contains(&SYSTEM));
+        // A notice of a red branch names its repository, and leads to the
+        // page of its verification.
+        let red: Notification = serde_json::from_str(
+            r#"{"id":9,"repo":{"owner":"ada","name":"demo"},"thread":null,"reason":"system","actor":null,"code":"verify_red","updated":"2026-10-22T12:03:00Z","unread":true,"url":"https://hub.example/ada/demo/verify"}"#,
+        )
+        .unwrap();
+        assert_eq!(red.reason, SYSTEM);
+        assert_eq!(red.code.as_deref(), Some(crate::verify::NOTICE_RED));
+        assert!(red.thread.is_none() && red.url.ends_with("/verify"));
     }
 
     #[test]

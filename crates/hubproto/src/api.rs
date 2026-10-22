@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cards::RepoRef;
 use crate::hex;
+use crate::verify::LandVerify;
 
 /// An error body: `{"error", "detail"}`, with `ids` for `missing`,
 /// `retry_after` for `rate_limited`, and `head` for `not_on_branch`.
@@ -37,14 +38,28 @@ pub struct ErrorBody {
     pub head: Option<String>,
 }
 
-/// `GET /v1`: the protocol version the hub speaks, and the sizes a client
-/// keeps its requests within.
+/// `GET /v1`: the protocol version the hub speaks, the sizes a client
+/// keeps its requests within, and the parts of the protocol the hub serves
+/// beyond its core.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Root {
     /// The protocol version: 1.
     pub version: u32,
     /// What one request may carry or ask for.
     pub limits: RootLimits,
+    /// The parts of the protocol the hub serves beyond its core, such as
+    /// [`verify::FEATURE`](crate::verify::FEATURE). A client calls their
+    /// routes, and sends their fields, only when the hub lists them; empty
+    /// from a hub that lists none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+impl Root {
+    /// Whether the hub lists `feature`.
+    pub fn serves(&self, feature: &str) -> bool {
+        self.features.iter().any(|listed| listed == feature)
+    }
 }
 
 /// The sizes of section 12 a hub enforces, as `GET /v1` gives them.
@@ -638,6 +653,10 @@ pub struct LandResponse {
     /// move.
     #[serde(default)]
     pub operation: Option<u64>,
+    /// How the default branch stands, for a landing on it in a repository
+    /// whose verification is on (section 25); `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<LandVerify>,
 }
 
 // ---------------------------------------------------------------- section 9
@@ -764,8 +783,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(root.limits.social, None);
+        // A hub that lists no feature serves none of them, and a root that
+        // lists none says nothing of them.
+        assert!(root.features.is_empty() && !root.serves(crate::verify::FEATURE));
+        assert!(!serde_json::to_string(&root).unwrap().contains("features"));
         let me: Me = serde_json::from_str(r#"{"login":"ada"}"#).unwrap();
         assert_eq!((me.settings, me.github_scope), (None, None));
+        // A landing without `verify` is a landing on a branch the hub does
+        // not verify, and says nothing of it written again.
+        let id = ObjectId::hash(Kind::Changeset, b"z");
+        let land: LandResponse = serde_json::from_str(&format!(
+            r#"{{"ref":"main","outcome":"fast-forward","head_before":null,"head":"{id}","landed":[]}}"#
+        ))
+        .unwrap();
+        assert_eq!(land.verify, None);
+        assert!(!serde_json::to_string(&land).unwrap().contains("verify"));
+    }
+
+    #[test]
+    fn what_a_newer_hub_sends_still_reads_in_an_older_client() {
+        // The answers as a client before verification read them: these
+        // structs hold every field they had, and none since.
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct OldLanding {
+            #[serde(rename = "ref")]
+            reference: String,
+            outcome: String,
+            #[serde(with = "hex::opt_id")]
+            head_before: Option<ObjectId>,
+            #[serde(with = "hex::opt_id")]
+            head: Option<ObjectId>,
+            landed: Vec<Placed>,
+            #[serde(default)]
+            merged_paths: Vec<String>,
+            #[serde(default)]
+            conflicts: Vec<serde_json::Value>,
+            #[serde(default, with = "hex::opt_id")]
+            change: Option<ObjectId>,
+            #[serde(default)]
+            git_commit: Option<String>,
+            #[serde(default)]
+            operation: Option<u64>,
+        }
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct OldRoot {
+            version: u32,
+            limits: RootLimits,
+        }
+        let (green, red) = (
+            ObjectId::hash(Kind::Changeset, b"green"),
+            ObjectId::hash(Kind::Changeset, b"red"),
+        );
+        let land = LandResponse {
+            reference: "main".into(),
+            outcome: "rebased".into(),
+            head_before: Some(green),
+            head: Some(red),
+            landed: vec![Placed {
+                from: green,
+                to: Some(red),
+            }],
+            merged_paths: Vec::new(),
+            conflicts: Vec::new(),
+            change: None,
+            git_commit: None,
+            operation: Some(7),
+            verify: Some(LandVerify {
+                state: crate::verify::STATE_RED.into(),
+                green: Some(green),
+                red: Some(red),
+                culprit: Some(red),
+                reverted: Vec::new(),
+            }),
+        };
+        let text = serde_json::to_string(&land).unwrap();
+        assert!(text.contains(r#""verify":{"state":"red""#), "{text}");
+        assert_eq!(serde_json::from_str::<LandResponse>(&text).unwrap(), land);
+        let old: OldLanding = serde_json::from_str(&text).unwrap();
+        assert_eq!((old.head, old.operation), (Some(red), Some(7)));
+
+        let root = Root {
+            version: 1,
+            limits: RootLimits {
+                max_body: 1,
+                max_put: 1,
+                max_json: 1,
+                max_ids: 1,
+                max_paths: 1,
+                missing_page: 1,
+                missing_page_max: 1,
+                missing_objects: 1,
+                tree_entries: 1,
+                tree_depth: 1,
+                max_list: 1,
+                social: None,
+            },
+            features: vec![crate::verify::FEATURE.into()],
+        };
+        let text = serde_json::to_string(&root).unwrap();
+        assert!(text.contains(r#""features":["verify"]"#), "{text}");
+        assert_eq!(serde_json::from_str::<Root>(&text).unwrap(), root);
+        assert!(root.serves("verify") && !root.serves("verify.github"));
+        let old: OldRoot = serde_json::from_str(&text).unwrap();
+        assert_eq!(old.version, 1);
     }
 
     #[test]

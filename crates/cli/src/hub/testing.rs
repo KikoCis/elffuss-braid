@@ -201,6 +201,7 @@ fn response(report: &LandReport) -> LandResponse {
         change,
         git_commit: None,
         operation: report.operation,
+        verify: None,
     }
 }
 

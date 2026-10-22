@@ -14,6 +14,7 @@
 //! - [`browse`], [`history`], [`explore`], [`social`], [`issues`],
 //!   [`requests`], [`forks`], [`notifications`], [`moderation`] and
 //!   [`onboard`]: the bodies of sections 15 to 23.
+//! - [`verify`]: keeping a default branch green, section 25.
 //! - [`json`]: conflicts and changes as the CLI prints them, so a landing on
 //!   the hub reports exactly what a local landing does.
 //! - [`limits`]: what one request may carry or ask for.
@@ -38,6 +39,7 @@ pub mod scope;
 pub mod social;
 pub mod stream;
 pub mod token;
+pub mod verify;
 
 mod hex;
 

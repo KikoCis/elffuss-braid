@@ -620,6 +620,7 @@ fn an_answer_whose_head_lacks_the_stack_moves_nothing() {
             change: None,
             git_commit: None,
             operation: Some(7),
+            verify: None,
         });
         let before = Snapshot::of(&s.local.repo, &ws);
         let err = format!("{:#}", s.land(&faulty, &ws).unwrap_err());
@@ -669,6 +670,7 @@ fn a_head_that_lacks_a_local_changeset_does_not_take_the_branch_back() {
         change: None,
         git_commit: None,
         operation: Some(7),
+        verify: None,
     });
     let err = format!("{:#}", s.land(&faulty, &w2).unwrap_err());
     assert!(err.contains("does not hold"), "{err}");
@@ -705,6 +707,7 @@ fn a_refused_or_unknown_outcome_is_an_error() {
             change: None,
             git_commit: None,
             operation: None,
+            verify: None,
         });
         let before = Snapshot::of(&s.local.repo, &ws);
         let err = format!("{:#}", s.land(&faulty, &ws).unwrap_err());
