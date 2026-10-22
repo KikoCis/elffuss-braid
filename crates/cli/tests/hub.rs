@@ -421,6 +421,30 @@ fn a_damaged_link_is_an_error_that_names_it() {
     assert!(out.status.success(), "{}", text(&out.stderr));
 }
 
+/// `braid status --json` gives the hub's green and red of the branch as a
+/// fetch last recorded them, and null where none was.
+#[test]
+fn status_gives_the_hubs_green_and_red_as_last_seen() {
+    let p = Place::new();
+    let ws = p.workspace_with_a_commit("w1");
+    let landed = json(&p.braid(&ws, &["land", "--local", "--json"], &[]));
+    let head = landed["head"].as_str().unwrap().to_owned();
+    let status = json(&p.braid(&ws, &["status", "--json"], &[]));
+    assert_eq!(
+        (&status["hub_green"], &status["hub_red"]),
+        (&Value::Null, &Value::Null)
+    );
+    for name in ["remote/hub/braid/green/main", "remote/hub/braid/red/main"] {
+        let out = p.braid(&p.root, &["ref", "set", name, &head], &[]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    }
+    let status = json(&p.braid(&ws, &["status", "--json"], &[]));
+    assert_eq!(status["hub_green"], head.as_str());
+    assert_eq!(status["hub_red"], head.as_str());
+    // The local green of `braid verify` is another ref.
+    assert_eq!(status["green"], Value::Null);
+}
+
 /// A request a stand-in hub read: its request line, its `Idempotency-Key`
 /// and its body.
 #[derive(Debug, Default, PartialEq, Eq)]

@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use braid_engine::{Conflict, ConflictKind, HunkSide};
 use braid_format::{ChangeOp, EntryKind, ObjectId};
 use braid_hubproto::api::LandResponse;
+use braid_hubproto::verify::LandVerify;
 use braid_repo::{Location, Repo};
 use braid_store::Refs;
 use braid_wc::{
@@ -69,6 +70,11 @@ change create --land prints it as \"land\", without base and updated_paths.
                  new change create on the branch after change create;
                  otherwise null. It repeats the --repo, --agent and
                  --workspace given on the command line
+  hub_verify     after a landing on a hub that verifies the branch, how
+                 the hub says it stands: {state, green, red, culprit,
+                 reverted}, as `braid hub verify --help` describes them;
+                 otherwise null. While it is red or stuck, braid also
+                 says so on standard error
 
 Ids in JSON are full; text output shows their first 12 hex digits."
     };
@@ -86,6 +92,13 @@ With --json, status prints one object:
   head             the branch's head, or null when the branch does not exist
   green            the newest changeset of the branch that passed `braid
                    verify`, braid/green/<branch>, or null
+  hub_green        in a repository linked to a hub that verifies the
+                   branch, the hub's green as the last fetch saw it: the
+                   newest changeset of the branch with a pass the hub
+                   accepts; otherwise null
+  hub_red          the hub's red as the last fetch saw it: while the hub
+                   holds the branch red, the changeset it blames, or the
+                   first fail it cannot explain; otherwise null
   behind           whether the branch has changesets the workspace does not
   behind_by        how many: the changesets from the branch's head down to
                    the one the workspace's own start from, along first
@@ -566,11 +579,10 @@ pub(crate) fn status(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
                 })).collect::<Vec<_>>(),
             })
         });
-        let green = target
-            .repo
-            .store()
-            .refs()?
-            .get(&crate::verify::green_ref(&state.branch));
+        let refs = target.repo.store().refs()?;
+        let green = refs.get(&crate::verify::green_ref(&state.branch));
+        // Where a fetch last saw the hub's own refs of the branch.
+        let seen = |name: String| hex(refs.get(&hub::fetch::remote_ref(&name)));
         print_json(&json!({
             "workspace": workspace.name(),
             "path": workspace.dir().to_string_lossy(),
@@ -578,6 +590,8 @@ pub(crate) fn status(cli: &Cli, args: &IdentityArgs) -> Result<ExitCode> {
             "base": hex(state.base),
             "head": hex(report.head),
             "green": hex(green),
+            "hub_green": seen(braid_hubproto::verify::green_ref(&state.branch)),
+            "hub_red": seen(braid_hubproto::verify::red_ref(&state.branch)),
             "behind": report.behind(),
             "behind_by": report.behind_by,
             "clean": status.is_clean(),
@@ -790,6 +804,8 @@ pub(crate) struct Report {
     /// For a workspace: its base afterwards, and the paths of its working
     /// copy written or removed.
     workspace: Option<(Option<ObjectId>, Vec<String>)>,
+    /// What a hub that verifies the branch says of it after the landing.
+    hub_verify: Option<LandVerify>,
 }
 
 impl Report {
@@ -814,6 +830,7 @@ impl Report {
             conflicts: conflicts.iter().map(conflict_json).collect(),
             next: None,
             workspace: None,
+            hub_verify: None,
         }
     }
 
@@ -838,6 +855,7 @@ impl Report {
             conflicts: response.conflicts.clone(),
             next: None,
             workspace: None,
+            hub_verify: response.verify.clone(),
         }
     }
 
@@ -858,6 +876,7 @@ impl Report {
                 conflicts: Vec::new(),
                 next: None,
                 workspace: None,
+                hub_verify: None,
             },
         };
         report.workspace = Some((
@@ -892,6 +911,7 @@ impl Report {
                 report.base,
                 report.updated_paths.iter().map(|p| show(p)).collect(),
             )),
+            hub_verify: None,
         }
     }
 
@@ -914,12 +934,23 @@ impl Report {
             "change": hex(self.change),
             "conflicts": self.conflicts,
             "next": self.next,
+            "hub_verify": self.hub_verify,
         });
         if let Some((base, updated)) = &self.workspace {
             value["base"] = hex(*base);
             value["updated_paths"] = updated.iter().map(|p| Value::String(p.clone())).collect();
         }
         value
+    }
+
+    /// Says on standard error, in one line, that the hub holds the branch
+    /// red, when its answer says so.
+    pub(crate) fn note_red(&self) {
+        if let Some(verify) = &self.hub_verify
+            && let Some(note) = hub::verify::land_note(&self.branch, verify, None)
+        {
+            eprintln!("braid: {note}");
+        }
     }
 
     pub(crate) fn exit_code(&self) -> ExitCode {
@@ -1031,6 +1062,7 @@ pub(crate) fn land(cli: &Cli, args: &LandArgs) -> Result<ExitCode> {
     } else {
         report.print_landing(cli);
     }
+    report.note_red();
     Ok(report.exit_code())
 }
 
@@ -1241,6 +1273,7 @@ pub(crate) fn change(cli: &Cli, action: &ChangeAction) -> Result<ExitCode> {
                     crate::shell_word(&report.branch)
                 )));
             }
+            report.note_red();
             report.json()
         }
         None => Value::Null,

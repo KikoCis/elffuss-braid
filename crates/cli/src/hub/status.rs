@@ -2,12 +2,13 @@
 // Copyright (c) 2026 UtopiaIA
 
 //! How each branch of a linked repository compares with the hub's, for
-//! `braid hub status`.
+//! `braid hub status`, and how the hub verifies it: its green and its red.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use braid_format::{Kind, ObjectId, Objects};
+use braid_hubproto::verify::{green_ref, red_ref};
 use braid_repo::Repo;
 
 use super::fetch::remote_ref;
@@ -50,6 +51,11 @@ pub(crate) struct BranchState {
     pub(crate) hub: Option<ObjectId>,
     /// How they compare.
     pub(crate) state: State,
+    /// The hub's green of the branch, when it verifies the branch: the
+    /// newest changeset with a pass it accepts.
+    pub(crate) green: Option<ObjectId>,
+    /// The hub's red of the branch, while it holds the branch red.
+    pub(crate) red: Option<ObjectId>,
 }
 
 /// Compares every branch of `repo` and of the hub, whose refs are `hub`.
@@ -105,6 +111,8 @@ pub(crate) fn compare(repo: &Repo, hub: &BTreeMap<String, ObjectId>) -> Result<V
             local: here,
             hub: there,
             state,
+            green: hub.get(&green_ref(name)).copied(),
+            red: hub.get(&red_ref(name)).copied(),
         });
     }
     history.flush()?;
@@ -145,6 +153,9 @@ mod tests {
             ("moved", unknown),
             ("lost", unknown),
             ("tags/v1", two),
+            // The hub verifies `behind`: green at root, red at two.
+            ("braid/green/behind", root),
+            ("braid/red/behind", two),
         ]
         .into_iter()
         .map(|(name, id)| (name.to_owned(), id))
@@ -164,5 +175,11 @@ mod tests {
                 ("same", State::Same),
             ]
         );
+        let verified: Vec<(&str, Option<ObjectId>, Option<ObjectId>)> = states
+            .iter()
+            .filter(|s| s.green.is_some() || s.red.is_some())
+            .map(|s| (s.name.as_str(), s.green, s.red))
+            .collect();
+        assert_eq!(verified, [("behind", Some(root), Some(two))]);
     }
 }

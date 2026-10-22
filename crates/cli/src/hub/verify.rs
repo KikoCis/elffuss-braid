@@ -30,7 +30,7 @@ use braid_format::ObjectId;
 use braid_hubproto::RepoPath;
 use braid_hubproto::names::is_owner;
 use braid_hubproto::verify::{
-    FEATURE, MAX_REPORTERS, MODE_OFF, MODE_REPORT, SOURCE_REPORT, STATE_OFF, STATE_RED,
+    FEATURE, LandVerify, MAX_REPORTERS, MODE_OFF, MODE_REPORT, SOURCE_REPORT, STATE_OFF, STATE_RED,
     STATE_STUCK, VerifyEvents, VerifyPolicy, VerifyReport, VerifyReportAnswer, VerifyReset,
     VerifyStatus, is_git_commit, is_suite,
 };
@@ -833,6 +833,30 @@ fn log_text(events: &VerifyEvents) -> String {
     out.trim_end().to_owned()
 }
 
+/// What braid notes on standard error after a landing whose answer says
+/// that `branch` is red: one line, or `None` when there is nothing to say.
+/// `repo`, when given, is the repository to name with `-R` in the hint.
+pub(crate) fn land_note(
+    branch: &str,
+    verify: &LandVerify,
+    repo: Option<&RepoPath>,
+) -> Option<String> {
+    if !is_red(&verify.state) {
+        return None;
+    }
+    let blame = match (verify.culprit, verify.red) {
+        (Some(culprit), _) => format!(", culprit {}", culprit.short()),
+        (None, Some(red)) => format!(" at {}, no culprit named", red.short()),
+        (None, None) => String::new(),
+    };
+    let flag = repo.map_or_else(String::new, |repo| format!(" -R {repo}"));
+    Some(format!(
+        "note: {} is {} on the hub{blame}: `braid hub verify status{flag}` says more",
+        shown(branch),
+        shown(&verify.state)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1415,5 +1439,41 @@ mod tests {
             asked(&status, no_rev).unwrap(),
             Asked::Status { fail_on_red: true }
         ));
+    }
+
+    #[test]
+    fn a_landing_on_a_red_branch_says_so() {
+        let id = ObjectId::hash(braid_format::Kind::Changeset, b"x");
+        let mut verify = LandVerify {
+            state: STATE_RED.into(),
+            green: None,
+            red: Some(id),
+            culprit: Some(id),
+            reverted: Vec::new(),
+        };
+        let note = land_note("main", &verify, None).unwrap();
+        assert_eq!(
+            note,
+            format!(
+                "note: main is red on the hub, culprit {}: `braid hub verify status` says more",
+                id.short()
+            )
+        );
+        verify.culprit = None;
+        verify.state = STATE_STUCK.into();
+        let note = land_note("main", &verify, Some(&path())).unwrap();
+        assert!(note.contains("is stuck on the hub at"), "{note}");
+        assert!(
+            note.ends_with("`braid hub verify status -R ada/demo` says more"),
+            "{note}"
+        );
+        for state in [STATE_GREEN, STATE_PENDING, "unknown", "later"] {
+            verify.state = state.into();
+            assert_eq!(land_note("main", &verify, None), None, "{state}");
+        }
+        // What the hub says is shown, never raw.
+        verify.state = STATE_RED.into();
+        let note = land_note("ma\u{1b}in", &verify, None).unwrap();
+        assert!(!note.contains('\u{1b}'), "{note}");
     }
 }

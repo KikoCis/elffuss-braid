@@ -59,6 +59,7 @@ use super::social_common::{
     CONFLICTS, REFUSED, agent, body_text, exit_for, idempotency_key, print,
 };
 use super::transfer::store_stream;
+use super::verify::land_note;
 use crate::work::count;
 use crate::{Cli, open_repo, print_json};
 
@@ -203,7 +204,9 @@ author settles them; 3 the hub could not be reached, or failed.
     "
 
 With --json it prints {request, land}: the request as it is now, and the
-landing as `POST …/land` answers it."
+landing as `POST …/land` answers it, with verify when the hub verifies the
+base. While the hub holds the base red, braid also says so on standard
+error, as `braid land` does."
 );
 
 /// The long help of `hub request checkout`.
@@ -1897,6 +1900,12 @@ fn land_request(cli: &Cli, args: &LandArgs) -> Result<ExitCode> {
     print(cli, &serde_json::to_value(&landed)?, || {
         landed_text(target, number, &landed)
     })?;
+    // The base, red on a hub that verifies it, as `braid land` says.
+    if let Some(verify) = &landed.land.verify
+        && let Some(note) = land_note(&landed.land.reference, verify, Some(target))
+    {
+        eprintln!("braid: {note}");
+    }
     Ok(code)
 }
 

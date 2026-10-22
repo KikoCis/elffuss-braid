@@ -1083,6 +1083,7 @@ fn land_and_update_print_the_same_fields() {
         "conflicts",
         "head",
         "head_before",
+        "hub_verify",
         "landed",
         "merged_paths",
         "next",
@@ -1126,6 +1127,8 @@ fn land_and_update_print_the_same_fields() {
     let landed = json(&ws, &["land"]);
     assert_eq!(keys(&landed), fields);
     assert_eq!(landed["outcome"], "fast-forward");
+    // No hub verifies a local landing.
+    assert_eq!(landed["hub_verify"], Value::Null);
     assert_eq!(landed["head_before"], head.as_str());
     assert_eq!(landed["head"], rebased.as_str());
     assert_eq!(landed["base"], rebased.as_str());

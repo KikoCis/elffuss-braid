@@ -523,6 +523,33 @@ mod tests {
     }
 
     #[test]
+    fn a_landing_reports_what_the_hub_says_of_the_branch() {
+        let s = Setup::new();
+        let ws = s.workspace("w1");
+        let mine = edit_and_commit(&ws, "c.txt", "c\n");
+        s.hub.verify.borrow_mut().landing = Some(braid_hubproto::verify::LandVerify {
+            state: braid_hubproto::verify::STATE_RED.to_owned(),
+            green: None,
+            red: Some(mine),
+            culprit: Some(mine),
+            reverted: Vec::new(),
+        });
+        let landing = s.land(&ws).unwrap();
+        let report = crate::work::Report::hub(landing.response.as_ref().unwrap());
+        let json = report.json();
+        assert_eq!(json["hub_verify"]["state"], "red");
+        assert_eq!(json["hub_verify"]["culprit"], mine.to_hex());
+        assert_eq!(json["hub_verify"]["reverted"], serde_json::json!([]));
+        // A hub that says nothing of the branch: null.
+        s.hub.verify.borrow_mut().landing = None;
+        let two = edit_and_commit(&ws, "d.txt", "d\n");
+        let landing = s.land(&ws).unwrap();
+        let report = crate::work::Report::hub(landing.response.as_ref().unwrap());
+        assert_eq!(report.head, Some(two));
+        assert_eq!(report.json()["hub_verify"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn a_rebase_on_the_hub_brings_the_others_work_into_the_workspace() {
         let s = Setup::new();
         let ws = s.workspace("w1");

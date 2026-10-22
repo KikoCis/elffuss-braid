@@ -160,6 +160,9 @@ pub(crate) fn revert(cli: &Cli, args: &RevertArgs) -> Result<ExitCode> {
         )?)
     };
     let code = report.as_ref().map_or(ExitCode::SUCCESS, Report::exit_code);
+    if let Some(report) = &report {
+        report.note_red();
+    }
     if cli.json {
         print_json(&json!({
             "revert": change.to_hex(),

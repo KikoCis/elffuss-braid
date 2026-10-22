@@ -12,7 +12,9 @@
 //! changesets the hub does not have stays where it is, and is reported. A
 //! tag is created, and never moved. `remote/hub/<ref>` records where each
 //! of the hub's refs was seen, so that a branch kept back still has a name
-//! for the hub's head.
+//! for the hub's head. Of the hub's own refs, only `braid/green/<branch>`
+//! and `braid/red/<branch>` are recorded so, when the store holds what they
+//! name: they say how the hub verifies a branch, and are never carried.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -23,6 +25,7 @@ use braid_format::changeset::Changes;
 use braid_format::tree::{EntryKind, Node};
 use braid_format::{Kind, ObjectId, Objects, Signature};
 use braid_hubproto::api::MissingRequest;
+use braid_hubproto::verify::{GREEN_PREFIX, RED_PREFIX};
 use braid_repo::{Repo, RepoHistory};
 use braid_store::{RefUpdate, Refs, Store, TransactError};
 
@@ -47,6 +50,13 @@ pub(crate) fn is_tag(name: &str) -> bool {
 /// Whether a hub ref is brought in: a branch or a tag.
 pub(crate) fn is_carried(name: &str) -> bool {
     braid_repo::is_branch(name) || is_tag(name)
+}
+
+/// Whether a hub ref says how the hub verifies a branch (section 25 of
+/// `docs/hub.md`): `braid/green/<branch>` or `braid/red/<branch>`. Never
+/// carried, it is only recorded where it was seen.
+pub(crate) fn is_verdict(name: &str) -> bool {
+    name.starts_with(GREEN_PREFIX) || name.starts_with(RED_PREFIX)
 }
 
 /// What became of a local ref.
@@ -505,11 +515,26 @@ pub(crate) fn fetch(
         Err(err) => return Err(err),
     }
 
+    // How the hub verifies its branches, where the store holds what its
+    // refs name: a changeset of a branch, which the branch brought.
+    let mut verdicts: Vec<(String, ObjectId)> = Vec::new();
+    for (name, id) in hub.refs.iter().filter(|(name, _)| is_verdict(name)) {
+        if holds_changeset(store, id)? {
+            verdicts.push((name.clone(), *id));
+        }
+    }
+
     let mut history = repo.history();
     let mut decided = Vec::new();
     let description = format!("hub fetch {} from {}", link.repo, link.url);
     let result = store.transact_with(agent, |current| -> Result<_, Option<anyhow::Error>> {
         let mut updates = Vec::new();
+        for (name, id) in &verdicts {
+            let seen = remote_ref(name);
+            if current.get(&seen) != Some(*id) {
+                updates.push(RefUpdate::new(seen.clone(), current.get(&seen), Some(*id)));
+            }
+        }
         for (name, hub_head) in &carried {
             let before = current.get(name);
             let outcome = match skipped.get(name) {
@@ -542,11 +567,12 @@ pub(crate) fn fetch(
             });
         }
         // A ref the hub no longer has, or that cannot be carried, has no
-        // place where it was seen.
+        // place where it was seen, unless it says how a branch is verified.
         for (name, id) in current.iter() {
             if let Some(rest) = name.strip_prefix(REMOTE_PREFIX)
                 && (!carried.iter().any(|(carried, _)| carried == rest)
                     || skipped.contains_key(rest))
+                && !verdicts.iter().any(|(verdict, _)| verdict == rest)
             {
                 updates.push(RefUpdate::new(name, Some(id), None));
             }
@@ -724,6 +750,52 @@ mod tests {
         .unwrap();
         assert_eq!(outcome(&fourth, "diverged"), Outcome::Moved);
         assert_eq!(outcome(&fourth, "behind"), Outcome::Diverged);
+    }
+
+    #[test]
+    fn the_hubs_green_and_red_are_recorded_where_they_were_seen() {
+        let hub = FakeHub::new();
+        let local = Fixture::linked(&hub);
+        let root = ada_change(&hub.repo, None, &[("a.txt", "a\n")]);
+        let two = ada_change(&hub.repo, Some(root), &[("b.txt", "b\n")]);
+        set_ref(&hub.repo, "main", two);
+        set_ref(&hub.repo, "braid/green/main", root);
+        set_ref(&hub.repo, "braid/red/main", two);
+        // One that names what the hub's branches do not bring is not
+        // recorded: the store would not hold what it names.
+        let elsewhere = ada_change(&hub.repo, None, &[("z.txt", "z\n")]);
+        set_ref(&hub.repo, "braid/green/gone", elsewhere);
+
+        let first = fetch(&local.repo, &hub, &local.link, "tester", None).unwrap();
+        let refs = local.repo.store().refs().unwrap();
+        assert_eq!(refs.get("remote/hub/braid/green/main"), Some(root));
+        assert_eq!(refs.get("remote/hub/braid/red/main"), Some(two));
+        assert_eq!(refs.get("remote/hub/braid/green/gone"), None);
+        // They are never carried, nor reported as branches.
+        assert_eq!(refs.get("braid/green/main"), None);
+        assert_eq!(refs.get("braid/red/main"), None);
+        assert!(first.refs.iter().all(|r| !r.name.starts_with("braid/")));
+        assert_eq!(first.hub_refs.get("braid/red/main"), Some(&two));
+
+        // Red cleared and green moved on the hub: the next fetch follows,
+        // and nothing else moves.
+        hub.repo
+            .store()
+            .transact("tester", "verify", |refs| {
+                Ok::<_, std::convert::Infallible>(vec![
+                    RefUpdate::new("braid/red/main", refs.get("braid/red/main"), None),
+                    RefUpdate::new("braid/green/main", refs.get("braid/green/main"), Some(two)),
+                ])
+            })
+            .unwrap();
+        let second = fetch(&local.repo, &hub, &local.link, "tester", None).unwrap();
+        assert!(second.operation.is_some());
+        let refs = local.repo.store().refs().unwrap();
+        assert_eq!(refs.get("remote/hub/braid/green/main"), Some(two));
+        assert_eq!(refs.get("remote/hub/braid/red/main"), None);
+        assert_eq!(refs.get("main"), Some(two));
+        let third = fetch(&local.repo, &hub, &local.link, "tester", None).unwrap();
+        assert_eq!(third.operation, None);
     }
 
     #[test]

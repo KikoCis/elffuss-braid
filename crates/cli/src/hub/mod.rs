@@ -155,7 +155,10 @@ does not have stays where it is, and is reported as ahead or diverged. A
 tag is created, and never moved. remote/hub/<ref> records where each of the
 hub's refs was seen, so `braid log remote/hub/main` shows the hub's main
 even when the local one was kept back. Tags that name no changeset are
-skipped: the hub protocol carries changesets only.
+skipped: the hub protocol carries changesets only. Of the hub's own refs,
+only braid/green/<branch> and braid/red/<branch>, which say how the hub
+verifies a branch, are recorded so (remote/hub/braid/green/<branch>), and
+`braid status --json` gives them as hub_green and hub_red.
 
 `braid land` and `braid update` fetch by themselves in a linked repository.
 
@@ -177,10 +180,14 @@ A repository with a mirror shows where the hub publishes its default
 branch, and how the last sync ended: diverged means someone pushed to the
 mirror directly, and the hub's owner takes those commits in on the hub.
 
+A branch the hub verifies shows its green, the newest changeset with a pass
+the hub accepts, and while the hub holds it red, its red (`braid hub verify
+status` says more).
+
 With --json it prints hub, repo, paths, login (null when not signed in),
 token (environment, file or null), mirror (url, last_sync, outcome and
 detail, or null), seq (the hub's op log sequence number) and branches, each
-with name, local, hub and state.";
+with name, local, hub, state, green and red (null when the hub has none).";
 
 /// The long help of `hub whoami`.
 pub(crate) const WHOAMI_HELP: &str =
@@ -1216,6 +1223,8 @@ fn status_command(cli: &Cli) -> Result<ExitCode> {
                 "local": hex(s.local),
                 "hub": hex(s.hub),
                 "state": s.state.code(),
+                "green": hex(s.green),
+                "red": hex(s.red),
             })).collect::<Vec<_>>(),
         }))?;
         return Ok(ExitCode::SUCCESS);
@@ -1258,10 +1267,17 @@ fn status_command(cli: &Cli) -> Result<ExitCode> {
         }
     }
     for s in &states {
-        let heads = match (s.local, s.hub) {
+        let mut heads = match (s.local, s.hub) {
             (Some(here), Some(there)) if here == there => here.short(),
             (here, there) => format!("here {}, hub {}", short(here), short(there)),
         };
+        // How the hub verifies it, when it does.
+        if let Some(red) = s.red {
+            heads.push_str(&format!(", red at {}", red.short()));
+        }
+        if let Some(green) = s.green {
+            heads.push_str(&format!(", green at {}", green.short()));
+        }
         println!(
             "  {:<24} {:<9} {heads}",
             remote::shown(&s.name),

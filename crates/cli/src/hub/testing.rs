@@ -19,7 +19,7 @@ use braid_hubproto::api::{
 };
 use braid_hubproto::stream;
 use braid_hubproto::verify::{
-    self as verify, ReportPolicy, VerifyEvent, VerifyPolicy, VerifyReport, VerifyReset,
+    self as verify, LandVerify, ReportPolicy, VerifyEvent, VerifyPolicy, VerifyReport, VerifyReset,
     VerifyStatus,
 };
 use braid_repo::Repo;
@@ -349,7 +349,10 @@ impl Remote for FakeHub {
             agent,
             &committer,
         ) {
-            Ok(report) => Ok(response(&report)),
+            Ok(report) => Ok(LandResponse {
+                verify: self.verify.borrow().landing.clone(),
+                ..response(&report)
+            }),
             Err(braid_wc::Error::NotOnBranch { .. }) => Err(HubError::api(
                 409,
                 "not_on_branch",
@@ -412,6 +415,8 @@ pub(crate) struct FakeVerify {
     pub(crate) lose: usize,
     /// What every call answers instead, while it is set.
     pub(crate) refuse: Option<Refusal>,
+    /// What the answers of landings say of the branch, as `verify`.
+    pub(crate) landing: Option<LandVerify>,
     /// The answers given, by key: the same key gets the same answer.
     answers: HashMap<String, Value>,
 }
@@ -429,6 +434,7 @@ impl FakeVerify {
             verdicts: Vec::new(),
             lose: 0,
             refuse: None,
+            landing: None,
             answers: HashMap::new(),
         }
     }
