@@ -19,7 +19,7 @@ bit for bit, and `braid git sync` keeps GitHub in step.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square&logo=apache&logoColor=white)](LICENSE)
-[![Version 0.1.2](https://img.shields.io/badge/version-0.1.2-54dcc6?style=flat-square)](#status-and-roadmap)
+[![Version 0.1.3](https://img.shields.io/badge/version-0.1.3-54dcc6?style=flat-square)](#status-and-roadmap)
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-8272ff?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Format v1: frozen](https://img.shields.io/badge/format%20v1-frozen-c8a06a?style=flat-square)](docs/spec/format-v1.md)
 
@@ -41,10 +41,10 @@ endorsed by Anthropic.*
 
 ## Scion's ideas, in braid
 
-Each row is an idea from the article, what braid 0.1.2 does with it, and
+Each row is an idea from the article, what braid 0.1.3 does with it, and
 how far along that is.
 
-| Scion's idea | In braid 0.1.2 | State |
+| Scion's idea | In braid 0.1.3 | State |
 |---|---|---|
 | A changeset lists the files changed against its first parent | The same, plus the root tree id; the bytes are [frozen](docs/spec/format-v1.md) | ✅ done |
 | Data is content-addressed and never changes, so any cache can serve it | BLAKE3 ids; BraidHub serves every object by id as immutable | ✅ done |
@@ -91,7 +91,7 @@ compiler and git. CI tests Linux and other Unix-like systems; Windows is
 not tested yet.
 
 ```bash
-cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.2 elffuss-braid-cli
+cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.3 elffuss-braid-cli
 ```
 
 To set braid up in a project you already have,
@@ -450,6 +450,13 @@ matters, keep a GitHub mirror as the source of truth.
 New in 0.1.1: `braid revert`, and `braid verify`, which runs when you run
 it: one run tests a branch's head, bisects a failure to the changeset that
 caused it and, with `--revert`, lands that changeset's revert.
+
+New in 0.1.3: the client side of verification on a hub. `braid hub verify`
+reads and sets a repository's verification policy, posts the outcome of a
+CI run for a pushed head with a token that may only report, and shows the
+hub's green and red changesets; landings say when the branch is red. The
+hub keeps `braid/green` and `braid/red` from those reports and never runs a
+repository's code (docs/hub.md, section 25).
 
 New in 0.1.2: a sturdier `braid verify`. On Unix its watchdog starts
 before the tests, and when it cannot, or stops, verify ends with an error
