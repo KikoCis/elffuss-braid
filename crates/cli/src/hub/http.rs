@@ -20,9 +20,11 @@ use braid_hubproto::api::{
     LandRequest, LandResponse, Me, MissingRequest, Refs, RepoCreate, RepoInfo, Root, RootLimits,
     Stored,
 };
+use braid_hubproto::verify::{VerifyReport, VerifyReset};
 use braid_hubproto::{KIND_HEADER, OBJECTS_MEDIA_TYPE, RepoPath, Token};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use ureq::http::{HeaderValue, Response};
 use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
 use ureq::{Agent, Body, RequestBuilder, SendBody};
@@ -30,6 +32,7 @@ use ureq::{Agent, Body, RequestBuilder, SendBody};
 use super::creds::{TokenSource, authority, is_loopback, redact};
 use super::device::DeviceFlow;
 use super::remote::{HubError, LACKS_BATCH, MAX_BODY, Remote, shown};
+use super::verify::VerifyApi;
 
 /// What braid says it is.
 const USER_AGENT: &str = concat!("braid/", env!("CARGO_PKG_VERSION"));
@@ -114,6 +117,11 @@ impl HttpHub {
     /// Whether requests carry a token.
     pub(crate) fn has_token(&self) -> bool {
         self.token.is_some()
+    }
+
+    /// The hub's URL.
+    pub(crate) fn url(&self) -> &str {
+        &self.url
     }
 
     /// One of the hub's repositories.
@@ -565,6 +573,63 @@ impl Remote for HttpRepo<'_> {
     }
 }
 
+/// The routes of section 25, each a call of [`HttpHub::call_json`] whose
+/// answer comes as the hub gave it.
+impl VerifyApi for HttpRepo<'_> {
+    fn features(&self) -> Result<Vec<String>, HubError> {
+        Ok(self.hub.root()?.features)
+    }
+
+    fn status(&self) -> Result<Value, HubError> {
+        self.hub.call_json("GET", &self.route("/verify"), &[], None)
+    }
+
+    fn report(&self, report: &VerifyReport, key: &str) -> Result<Value, HubError> {
+        let body =
+            serde_json::to_value(report).map_err(|err| HubError::Protocol(err.to_string()))?;
+        self.hub.call_json(
+            "POST",
+            &self.route("/verify/report"),
+            &[("Idempotency-Key", key)],
+            Some(&body),
+        )
+    }
+
+    fn policy(&self) -> Result<Value, HubError> {
+        self.hub
+            .call_json("GET", &self.route("/verify/policy"), &[], None)
+    }
+
+    fn put_policy(&self, policy: &Value) -> Result<Value, HubError> {
+        self.hub
+            .call_json("PUT", &self.route("/verify/policy"), &[], Some(policy))
+    }
+
+    fn log(&self, after: Option<u64>, limit: Option<u32>) -> Result<Value, HubError> {
+        let query: Vec<String> = after
+            .map(|after| format!("after={after}"))
+            .into_iter()
+            .chain(limit.map(|limit| format!("limit={limit}")))
+            .collect();
+        let mut route = self.route("/verify/log");
+        if !query.is_empty() {
+            route = format!("{route}?{}", query.join("&"));
+        }
+        self.hub.call_json("GET", &route, &[], None)
+    }
+
+    fn reset(&self, reset: &VerifyReset, key: &str) -> Result<Value, HubError> {
+        let body =
+            serde_json::to_value(reset).map_err(|err| HubError::Protocol(err.to_string()))?;
+        self.hub.call_json(
+            "POST",
+            &self.route("/verify/reset"),
+            &[("Idempotency-Key", key)],
+            Some(&body),
+        )
+    }
+}
+
 /// The largest body to send, given the size this client was given and the
 /// one the hub says it takes, if it said.
 fn upload_limit(given: u64, hub: Option<u64>) -> u64 {
@@ -739,5 +804,74 @@ mod tests {
             assert!(request.body.is_empty(), "request {n}");
             assert_eq!(request.header("content-type"), None, "request {n}");
         }
+    }
+
+    #[test]
+    fn the_routes_of_verification() {
+        let (url, server) = fake_hub(vec![
+            (
+                "200 OK",
+                r#"{"version":1,"limits":{"max_body":1,"max_put":1,"max_json":1,"max_ids":1,"max_paths":1,"missing_page":1,"missing_page_max":1,"missing_objects":1,"tree_entries":1,"tree_depth":1,"max_list":1},"features":["verify"]}"#,
+            ),
+            ("200 OK", r#"{"mode":"report","state":"green","later":1}"#),
+            ("201 Created", r#"{"effect":"green_moved","status":{}}"#),
+            ("200 OK", r#"{"mode":"off"}"#),
+            ("200 OK", r#"{"mode":"report"}"#),
+            ("200 OK", r#"{"events":[],"next":null}"#),
+            ("200 OK", r#"{"events":[],"next":null}"#),
+            ("200 OK", r#"{"state":"pending"}"#),
+        ]);
+        let hub = HttpHub::new(&url, Some(Token::from_random([1; 5], [2; 32]))).unwrap();
+        let repo = hub.repo("ada/demo".parse().unwrap());
+        assert_eq!(repo.features().unwrap(), ["verify"]);
+        // What the hub answers comes whole, fields braid does not know
+        // included.
+        assert_eq!(repo.status().unwrap()["later"], 1);
+        let report = VerifyReport {
+            git_commit: Some("0a".repeat(20)),
+            changeset: None,
+            outcome: "pass".into(),
+            suite: "ci".into(),
+        };
+        assert_eq!(repo.report(&report, "k1").unwrap()["effect"], "green_moved");
+        assert_eq!(repo.policy().unwrap()["mode"], "off");
+        let policy = json!({"mode": "report", "github": {"sources": []}});
+        repo.put_policy(&policy).unwrap();
+        repo.log(Some(17), Some(5)).unwrap();
+        repo.log(None, None).unwrap();
+        repo.reset(&VerifyReset::default(), "k2").unwrap();
+
+        let seen = server.join().unwrap();
+        let lines: Vec<&str> = seen.iter().map(|request| request.line.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /v1 HTTP/1.1",
+                "GET /v1/r/ada/demo/verify HTTP/1.1",
+                "POST /v1/r/ada/demo/verify/report HTTP/1.1",
+                "GET /v1/r/ada/demo/verify/policy HTTP/1.1",
+                "PUT /v1/r/ada/demo/verify/policy HTTP/1.1",
+                "GET /v1/r/ada/demo/verify/log?after=17&limit=5 HTTP/1.1",
+                "GET /v1/r/ada/demo/verify/log HTTP/1.1",
+                "POST /v1/r/ada/demo/verify/reset HTTP/1.1",
+            ]
+        );
+        // A report and a reset carry their key, and nothing else does.
+        let keys: Vec<Option<&str>> = seen
+            .iter()
+            .map(|request| request.header("idempotency-key"))
+            .collect();
+        assert_eq!(
+            keys,
+            [None, None, Some("k1"), None, None, None, None, Some("k2")]
+        );
+        let body = |n: usize| serde_json::from_slice::<Value>(&seen[n].body).unwrap();
+        assert_eq!(
+            body(2),
+            json!({"git_commit": "0a".repeat(20), "outcome": "pass", "suite": "ci"})
+        );
+        assert_eq!(body(4), policy);
+        assert_eq!(body(7), json!({"green": null, "expect": null}));
+        assert_eq!(seen[4].header("content-type"), Some("application/json"));
     }
 }

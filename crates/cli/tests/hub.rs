@@ -4,13 +4,16 @@
 //! The hub commands of the `braid` binary where no hub answers: what is
 //! refused before anything goes over the network, what a linked repository
 //! does when its hub cannot be reached, and how `--local` and
-//! `BRAID_HUB=off` keep landing and updating local. Every test gets a
+//! `BRAID_HUB=off` keep landing and updating local; and `braid hub verify`
+//! against a stand-in that gives the answers a hub would. Every test gets a
 //! configuration directory of its own, and a token is never printed.
 
 use std::fs;
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread::JoinHandle;
 
 use serde_json::Value;
 
@@ -416,4 +419,211 @@ fn a_damaged_link_is_an_error_that_names_it() {
     // --local does not read it.
     let out = p.braid(&ws, &["land", "--local"], &[]);
     assert!(out.status.success(), "{}", text(&out.stderr));
+}
+
+/// A request a stand-in hub read: its request line, its `Idempotency-Key`
+/// and its body.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Seen {
+    line: String,
+    key: Option<String>,
+    body: String,
+}
+
+/// What `GET /v1` answers on a hub that verifies branches.
+const VERIFYING: &str = r#"{"version":1,"limits":{"max_body":1,"max_put":1,"max_json":1,"max_ids":1,"max_paths":1,"missing_page":1,"missing_page_max":1,"missing_objects":1,"tree_entries":1,"tree_depth":1,"max_list":1},"features":["verify"]}"#;
+
+/// A stand-in for a hub on this machine: it reads one request per
+/// connection and gives each of `answers` in turn, a status and a JSON
+/// body, or closes the connection without a word for an empty status, as
+/// when an answer is lost. It hands back what it was sent.
+fn stand_in(answers: Vec<(&'static str, &'static str)>) -> (String, JoinHandle<Vec<Seen>>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (status, body) in answers {
+            let (mut stream, _) = listener.accept().unwrap();
+            seen.push(read_request(&stream));
+            if !status.is_empty() {
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        }
+        seen
+    });
+    (url, server)
+}
+
+fn read_request(stream: &TcpStream) -> Seen {
+    let mut reader = BufReader::new(stream);
+    let mut seen = Seen::default();
+    reader.read_line(&mut seen.line).unwrap();
+    seen.line.truncate(seen.line.trim_end().len());
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let Some((name, value)) = line.trim_end().split_once(':') else {
+            break;
+        };
+        match name.trim().to_ascii_lowercase().as_str() {
+            "idempotency-key" => seen.key = Some(value.trim().to_owned()),
+            "content-length" => length = value.trim().parse().unwrap(),
+            _ => {}
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    seen.body = String::from_utf8(body).unwrap();
+    seen
+}
+
+/// `braid hub verify` and its exit statuses, against a stand-in hub.
+#[test]
+fn verify_commands_and_their_exit_statuses() {
+    let p = Place::new();
+    let token = "brd_aaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let verify = |url: &str, args: &[&str]| -> Output {
+        let mut line = vec!["hub", "verify"];
+        line.extend(args);
+        p.braid(
+            &p.base,
+            &line,
+            &[("BRAID_HUB_URL", url), ("BRAID_TOKEN", token)],
+        )
+    };
+    let red = r#"{"mode":"report","branch":"main","state":"red","red":null,"later":[1]}"#;
+
+    // Red: 4 with --fail-on-red, and the answer printed whole.
+    let (url, server) = stand_in(vec![("200 OK", VERIFYING), ("200 OK", red)]);
+    let out = verify(
+        &url,
+        &["status", "-R", "ada/demo", "--fail-on-red", "--json"],
+    );
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let printed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(printed, serde_json::from_str::<Value>(red).unwrap());
+    let lines: Vec<String> = server
+        .join()
+        .unwrap()
+        .into_iter()
+        .map(|seen| seen.line)
+        .collect();
+    assert_eq!(
+        lines,
+        ["GET /v1 HTTP/1.1", "GET /v1/r/ada/demo/verify HTTP/1.1"]
+    );
+    // Without the flag, 0, and words.
+    let (url, _server) = stand_in(vec![("200 OK", VERIFYING), ("200 OK", red)]);
+    let out = verify(&url, &["status", "-R", "ada/demo"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).starts_with("ada/demo main: red"));
+
+    // A hub that does not verify is asked nothing more.
+    let (url, server) = stand_in(vec![(
+        "200 OK",
+        r#"{"version":1,"limits":{"max_body":1,"max_put":1,"max_json":1,"max_ids":1,"max_paths":1,"missing_page":1,"missing_page_max":1,"missing_objects":1,"tree_entries":1,"tree_depth":1,"max_list":1}}"#,
+    )]);
+    fails_with(
+        &verify(&url, &["status", "-R", "ada/demo"]),
+        "does not verify branches",
+    );
+    assert_eq!(server.join().unwrap().len(), 1);
+
+    // A refusal is 1, with the hub's reason.
+    let (url, _server) = stand_in(vec![
+        ("200 OK", VERIFYING),
+        (
+            "403 Forbidden",
+            r#"{"error":"forbidden","detail":"use a token with read and verify:<glob> only"}"#,
+        ),
+    ]);
+    let out = verify(
+        &url,
+        &[
+            "report",
+            "-R",
+            "ada/demo",
+            "--outcome",
+            "pass",
+            "--git-commit",
+            &"0a".repeat(20),
+            "--suite",
+            "ci",
+        ],
+    );
+    fails_with(&out, "use a token with read and verify:<glob> only");
+    assert!(!text(&out.stderr).contains("bbbbbbbbbbbbbbbb"));
+
+    // A hub out of reach is 3.
+    let nowhere = {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+    let out = verify(&nowhere, &["status", "-R", "ada/demo"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("cannot reach the hub"));
+
+    // A report whose answer is lost goes again with the same key, and the
+    // hub's first answer is printed.
+    let answer =
+        r#"{"effect":"green_moved","status":{"mode":"report","branch":"main","state":"green"}}"#;
+    let (url, server) = stand_in(vec![
+        ("200 OK", VERIFYING),
+        ("", ""),
+        ("201 Created", answer),
+    ]);
+    let commit = "0a".repeat(20);
+    let out = verify(
+        &url,
+        &[
+            "report",
+            "-R",
+            "ada/demo",
+            "--outcome",
+            "pass",
+            "--git-commit",
+            &commit,
+            "--suite",
+            "ci",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        serde_json::from_str::<Value>(answer).unwrap()
+    );
+    let seen = server.join().unwrap();
+    assert_eq!(seen[1], seen[2], "the same request, with the same key");
+    assert_eq!(seen[1].line, "POST /v1/r/ada/demo/verify/report HTTP/1.1");
+    assert_eq!(seen[1].key.as_ref().map(String::len), Some(32));
+    assert_eq!(
+        serde_json::from_str::<Value>(&seen[1].body).unwrap(),
+        serde_json::json!({"git_commit": commit, "outcome": "pass", "suite": "ci"})
+    );
+
+    // What the hub would refuse is refused before anything is sent.
+    fails_with(
+        &verify(
+            &nowhere,
+            &[
+                "report",
+                "-R",
+                "ada/demo",
+                "--outcome",
+                "pass",
+                "--changeset",
+                "abc",
+                "--suite",
+                "ci",
+            ],
+        ),
+        "64 hex digits",
+    );
 }

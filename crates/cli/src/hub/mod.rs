@@ -20,6 +20,7 @@
 //!   watching and following, issues, the inbox, forks, change requests,
 //!   GitHub sync and settings; [`social_common`]: what they share; [`api`]:
 //!   any route of the API.
+//! - [`mod@verify`]: keeping a repository's default branch green.
 
 pub(crate) mod api;
 pub(crate) mod browse;
@@ -47,6 +48,7 @@ pub(crate) mod status;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod transfer;
+pub(crate) mod verify;
 
 use std::fs;
 use std::io;
@@ -295,6 +297,10 @@ pub(crate) enum HubAction {
     Unblock(settings::UnblockArgs),
     /// Show or change your account's settings.
     Account(settings::AccountArgs),
+    /// Keep a repository's default branch green: its status, what CI
+    /// reports, the policy, the log and resets.
+    #[command(long_about = verify::VERIFY_HELP)]
+    Verify(verify::VerifyArgs),
     /// Send a request to the hub's API and print its answer.
     #[command(long_about = api::API_HELP)]
     Api(api::ApiArgs),
@@ -384,6 +390,7 @@ pub(crate) fn hub(cli: &Cli, action: &HubAction) -> Result<ExitCode> {
         HubAction::Block(args) => settings::block(cli, args),
         HubAction::Unblock(args) => settings::unblock(cli, args),
         HubAction::Account(args) => settings::account(cli, args),
+        HubAction::Verify(args) => verify::verify(cli, args),
         HubAction::Api(args) => api::api(cli, args),
     }
 }
