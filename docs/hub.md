@@ -15,20 +15,25 @@ Sections 1 to 14 are the core: accounts, repositories, objects, landing,
 git, mirrors, limits, the client and the web. Sections 15 to 24 are what
 grows around the repositories: browsing, discovery, stars and following,
 issues, change requests, forks, the inbox, blocks, syncing with GitHub,
-and the terms.
+and the terms. Section 25 is verification: keeping a repository's default
+branch green with the verdicts of its CI.
 
 ## 1. Conventions
 
 - `GET /v1` → `{"version": 1, "limits": {"max_body", "max_put",
   "max_json", "max_ids", "max_paths", "missing_page", "missing_page_max",
   "missing_objects", "tree_entries", "tree_depth", "max_list",
-  "social"}}`: the protocol version, and the sizes of section 12 this hub
-  enforces, in bytes or entries, so that a client sizes its requests to
-  them. `social` holds those of browsing and of the social features:
-  `{"title", "text", "page", "topics", "topic", "labels",
-  "thread_labels", "assignees", "comments_per_thread", "review_comments",
-  "mentions", "references", "request_changesets", "request_bytes",
-  "dir_page", "text_view"}`. Anyone may ask.
+  "social"}, "features": ["verify"]}`: the protocol version, and the sizes
+  of section 12 this hub enforces, in bytes or entries, so that a client
+  sizes its requests to them. `social` holds those of browsing and of the
+  social features: `{"title", "text", "page", "topics", "topic",
+  "labels", "thread_labels", "assignees", "comments_per_thread",
+  "review_comments", "mentions", "references", "request_changesets",
+  "request_bytes", "dir_page", "text_view"}`. `features` lists the parts
+  of the protocol the hub serves beyond its core: `verify` when it
+  verifies branches (section 25). It is left out when the hub lists none,
+  and a client calls the routes of such a part, or sends a field of it,
+  only when the hub lists it. Anyone may ask.
 - JSON bodies are UTF-8, `Content-Type: application/json`. Ids are 64
   lowercase hex digits (braid) or 40 (git SHA-1). Times are RFC 3339 in UTC.
 - Every error is a JSON object `{"error": "<code>", "detail": "<text>"}`
@@ -72,7 +77,8 @@ and the terms.
   what was left out.
 - **`Idempotency-Key`.** A request that creates something (each route that
   takes the header says so: opening an issue or a change request,
-  commenting, reviewing, forking, and a sync of GitHub repositories) may
+  commenting, reviewing, forking, a sync of GitHub repositories, and a
+  verdict or a reset of verification) may
   send `Idempotency-Key: <key>`, 1 to 64 of `A-Z a-z 0-9 _ -`, a new key
   for each new request; any other value, or the header twice, is 400
   `invalid`. The hub keeps the first answer for a day, for the account
@@ -174,9 +180,15 @@ constant time.
 
 A token has an expiry (required, at most one year) and scopes. A scope is
 `{"repo": "<owner>/<name>" | "<owner>/*" | "*", "rights": [<right>…]}`, where
-a right is `read`, `interact`, `write`, `land:<ref glob>` or `admin`.
-`write` includes `read` and `interact`, and `admin` includes all three; a
-`land:<glob>` right counts only together with `write`. `interact` lets a
+a right is `read`, `interact`, `write`, `land:<ref glob>`,
+`verify:<ref glob>` or `admin`. `write` includes `read` and `interact`, and
+`admin` includes all three; a `land:<glob>` right counts only together
+with `write`. A `verify:<glob>` right lets a token post verdicts on the
+default branch when its glob matches it (section 25), and nothing else: it
+counts only where the token's account may write, on a token that reads the
+repository, through a scope or because anyone may read it, and that holds
+no `write`, `admin`, `land:` or `interact` there, so that the token of a
+CI job can say how its tests went and do nothing more. `interact` lets a
 token take part where its account reads (section 5): star, watch, open
 issues and change requests, comment, review, and mark its notifications;
 on `*`, it also follows and blocks accounts and changes the account's
@@ -495,7 +507,11 @@ watch, and checking a change request; `interact` covers taking part
 (below); `write` covers uploads and managing issues and change requests
 (sections 18 and 19); landing on a ref needs `write` and a `land:<glob>`
 right whose glob matches the ref (`*` matches anything, `release/*` one
-level); `admin` covers the settings, the collaborators, the repository's
+level); posting a verdict needs a `verify:<glob>` right whose glob matches
+the default branch, of an account that may write to the repository, as the
+rules above say, GitHub's answer included, on a token that holds nothing
+more there than `read` (section 25); `admin` covers the settings, the
+policy of verification and its resets, the collaborators, the repository's
 blocks and deleting. A token's rights are cut down to its account's
 permission, never below what anyone may do: any token reads a public
 repository, where the rules above let anyone read it. A web session has
@@ -590,7 +606,16 @@ it.
 
 - `GET /v1/r/{owner}/{name}/refs` → `{"seq": n, "refs": {"<name>":
   "<id>"}}`: the op log sequence number (0 before the first operation) and
-  every ref, the hub's own included.
+  every ref, the hub's own included. Of those, `braid/green/<branch>` and
+  `braid/red/<branch>` say how the hub verifies a repository's default
+  branch (section 25): green at the newest changeset with a pass the hub
+  accepts and, while the branch is red, red at the changeset the hub
+  blames, or at the first fail it cannot explain. Only the hub moves them,
+  each move an operation of its own: a client can neither land on them nor
+  delete them, they are never exported to git, and forks never copy them.
+  `braid hub fetch` records where it saw them, as
+  `remote/hub/braid/green/<branch>` and `remote/hub/braid/red/<branch>`,
+  and never takes them as refs of its own.
 - `GET /v1/r/{owner}/{name}/refs/watch` → `text/event-stream`. Each change
   is an event `refs` with `id: <seq>` and the same body as `GET refs`:
 
@@ -672,6 +697,21 @@ it.
   head, such as history whose git trees are not canonical (only the map of
   the repository that imported them reproduces those), and never a commit
   the head would not export to.
+
+  A landing on the default branch of a repository whose verification is
+  on (section 25), a change request's landing included, also carries
+  `verify`: how the branch stands once the landing is done.
+
+  ```json
+  "verify": {"state": "red", "green": "<id>|null", "red": "<id>|null",
+             "culprit": "<id>|null", "reverted": []}
+  ```
+
+  Its fields are those of `GET …/verify`; `reverted` is empty in this
+  version of the protocol. `verify` is left out of any other landing, and
+  out of every landing on a hub that does not verify branches. braid gives
+  it as `hub_verify` with `--json`, and says on standard error when the
+  branch is red or stuck.
 
   Changesets the hub rebases keep their author, message and extras, with
   `rebased-from` added, and name the hub as their committer: `BraidHub
@@ -856,8 +896,9 @@ the work they cost the hub: explore, search and topics, their pages and
 their routes (`GET /v1/explore`, `/v1/topics`, `/v1/topics/{topic}`), 10;
 diffs and comparisons (`…/changesets/{rev}/diff`, `…/compare`, the diff of
 a change request, the pages that compare a head for a new request, and
-their pages), 10; the log (`…/log`) and the pages of commits, 5; checking
-and landing a change request (`…/requests/{n}/check`,
+their pages), 10; the log (`…/log`) and the pages of commits, 5; a verdict
+(`…/verify/report`) and the log of verification (`…/verify/log`), 5;
+checking and landing a change request (`…/requests/{n}/check`,
 `…/requests/{n}/land`), 20. A request that costs more than a whole minute's
 limit waits for the whole minute's budget, and then goes through. Webhook
 deliveries (`POST /v1/hooks/github/{key}`) are not limited per address,
@@ -926,6 +967,11 @@ between them, so that many accounts cannot bury its issues. Accounts with
 The 429 says how long until the repository takes another. Such an account
 has at most 100 open threads in one repository (403 `forbidden` past it,
 until it closes some).
+
+**Verdicts** (section 25) count apart from the social writes: a repository
+takes at most 60 a minute, from all its reporters together, and an account
+posts at most 600 an hour, whatever its tokens. Past either, 429
+`rate_limited`, with `retry_after`.
 
 **Sizes.** A body whose `Content-Length` is over its route's size is
 refused at once, before the hub reads any of it. The sizes, each answered
@@ -1199,6 +1245,34 @@ whole flow.
   changes them, as `PATCH /v1/me` does. With `--json` it prints what `GET
   /v1/me` gives.
 
+**Verification** (section 25). Each of these asks `GET /v1` first, and
+asks nothing more of a hub that does not list `verify` (exit status 1).
+
+- `braid hub verify status [-R OWNER/NAME] [--fail-on-red]` shows how the
+  default branch stands: its state and code, its head, green and red, the
+  culprit and the window. With `--fail-on-red` the exit status is 4 while
+  the branch is red or stuck.
+- `braid hub verify report --outcome pass|fail|flaky (--git-commit SHA |
+  --changeset ID) --suite SUITE [-R OWNER/NAME]` posts a verdict, as a CI
+  job does, with a token made for it (`BRAID_TOKEN`, and the hub in
+  `BRAID_HUB_URL`). It sends an `Idempotency-Key`.
+- `braid hub verify policy [-R OWNER/NAME] [--mode off|report] [--suite
+  SUITE] [--reporter LOGIN]… [--green-from report]…`: with no flags it
+  prints the policy; with flags it reads it, changes what they name, keeps
+  every other field as the hub gave it, and puts the whole of it back. A
+  policy that names no source takes `report` once it has reporters.
+- `braid hub verify log [-R OWNER/NAME] [--limit N] [--after ID]` lists the
+  events, newest first, and `braid hub verify reset [-R OWNER/NAME]
+  [--green REV]` resets, sending an `Idempotency-Key`; `REV` is an id, or a
+  revision of the repository braid runs in.
+
+`braid land`, `braid change create --land`, `braid revert` and `braid hub
+request land` give a landing's `verify` (section 8) as `hub_verify` with
+`--json`, and say on standard error, in one line, when the hub holds the
+branch red. `braid status --json` gives the hub's green and red of the
+workspace's branch as the last fetch saw them (`hub_green`, `hub_red`),
+and `braid hub status` gives each branch's.
+
 **Any route.** `braid hub api METHOD PATH [--data JSON | --data-file FILE]
 [--hub URL]` sends one request to the hub's API, with the token braid
 holds for the hub, and prints its answer's body as it came. `METHOD` is
@@ -1258,7 +1332,8 @@ links `/agents.md`, `/terms`, braid's site and the hub's version.
   route that does not exist: a page for a browser, the JSON 404 of
   section 1 otherwise.
 - `GET /tokens`: the account's tokens, a form to make one (repositories,
-  rights, expiry, note), shown once, and revoking.
+  rights, the branch glob of a `verify:` right, expiry, note), shown once,
+  and revoking.
 - `GET /settings`, for a browser signed in (one signed out is sent to
   `/login`): the account's settings: the accounts it blocked, each with a
   form that lifts the block, and a form to block one more; whether its
@@ -1314,7 +1389,12 @@ repository's are, whatever the path.
   and how many changesets its default branch is behind the upstream's, up
   to 1,000, with a form that syncs it for whoever may land on that branch,
   where a sync may bring the upstream in (section 20). Its admins find a
-  Settings tab.
+  Settings tab. While its verification is on (section 25), the header
+  shows the state of the default branch as a badge, and a Verify tab.
+- `GET /{owner}/{name}/verify`: how the default branch stands (its state
+  and code, its head, green and red, the culprit and the window) and the
+  log of verification, newest first, for its readers; who did what shows
+  to its admins only. While verification is off, it says so.
 - `GET /{owner}/{name}/tree/{REV}/{path}?after`: a directory, `dir_page`
   entries a page, with its README.
 - `GET /{owner}/{name}/blob/{REV}/{path}?plain`: a file: its text, escaped,
@@ -1382,9 +1462,10 @@ repository's are, whatever the path.
   its topics, its features (issues, who may open change requests, forks,
   the approvals a change request needs before it lands), text and data
   mining, its mirror (with the follow policy, the outcome and what it says,
-  `synced`, how the hub hears of pushes and when it looked last), its
-  collaborators, the accounts it blocked, and deleting it (typing its name
-  again). Making a repository public asks for its name typed again, under a
+  `synced`, how the hub hears of pushes and when it looked last), a Verify
+  box with its policy of verification (section 25), its collaborators, the
+  accounts it blocked, and deleting it (typing its name again). Making a
+  repository public asks for its name typed again, under a
   warning: everything it ever stored becomes readable by anyone who knows
   its id (section 4), so a fresh public repository is the way to publish
   only what it holds now.
@@ -1398,8 +1479,9 @@ to the page named in `back`, where a form takes one and it is a path of
 the hub, else to the page or the section they belong to. The forms:
 
 - the account: `/new` (`name`, `private`, `description`, `mirror`);
-  `/tokens` (repositories, rights, expiry, note), which answers the tokens
-  page with the token made, shown that once; `/tokens/{id}/revoke`;
+  `/tokens` (repositories, rights, the branch glob of a `verify:` right,
+  expiry, note), which answers the tokens page with the token made, shown
+  that once; `/tokens/{id}/revoke`;
   `/logout`; `/settings/blocks` (`login`) and
   `/settings/blocks/{login}/remove`; `/settings/stars` (`stars_public`);
   `/settings/tdm` (`tdm_default`).
@@ -1430,6 +1512,9 @@ the hub, else to the page or the section they belong to. The forms:
   to remove it); `/{owner}/{name}/mirror/settings` (`follow`: `off`,
   `ff-only` or `merge`); `/{owner}/{name}/mirror/sync`, held to the minute
   of the API (section 23); `/{owner}/{name}/mirror/follow`;
+  `/{owner}/{name}/settings/verify` (`mode`, `suite`, `reporters`, the
+  logins parted by commas or spaces, and `flaky_moves_green`), which
+  changes the policy of verification as `PUT …/verify/policy` does;
   `/{owner}/{name}/collaborators` (`login`, `permission`) and
   `/{owner}/{name}/collaborators/{login}/remove`; `/{owner}/{name}/blocks`
   (`login`) and `/{owner}/{name}/blocks/{login}/remove`; and
@@ -2366,9 +2451,18 @@ what happened last, `null` for the hub. `code` is what happened last:
 `review_requested`, `reviewed` or `landed`; for a notice, what it says:
 `fork_done`, `fork_failed` and `fork_retired` (section 20), `import_done`
 and `import_failed` (section 23), `needs_grant`, `mirror_conflicts`,
-`mirror_diverged`, `mirror_rewritten` or `mirror_gone` (section 11). `url`
-is the page of the hub it leads to. A thread's title is read when the inbox
-is listed, as it is then.
+`mirror_diverged`, `mirror_rewritten` or `mirror_gone` (section 11), or
+`verify_red`, `verify_fixed` and `verify_stuck` (section 25). `url` is the
+page of the hub it leads to. A thread's title is read when the inbox is
+listed, as it is then.
+
+The notices of verification say that a repository's default branch turned
+red, is no longer red, or is stuck, and lead to its verification page
+(`/{owner}/{name}/verify`). They go to the repository's admins, and, for
+`verify_red` with a culprit named, to the account that landed it too; a
+repository gives at most one every ten minutes, and only when the state
+changes. Each has a place of its own in the inbox, beside the other
+notices about the same repository, which it never replaces.
 
 A notification of a repository the account may no longer read (it was
 removed as a collaborator, or the repository was made private), or that
@@ -2745,3 +2839,220 @@ it ends in `$`, so a page's location ends in `$`, and covers no other
 repository whose name starts with that one's. It follows a change as
 `robots.txt` does, and holds at most 400 KiB, its rules a part of those of
 `robots.txt` when not all fit.
+
+## 25. Verification (main stays green)
+
+The hub can keep a repository's default branch green. A reporter, such as
+a CI job, tells the hub how a suite of tests went on a changeset of the
+branch; the hub keeps two refs that say where the branch stands, names the
+changeset that broke it when it can, and tells the people concerned. The
+hub runs no code of a repository, for this or anything else: every verdict
+comes from a reporter, outside the hub, and the hub only records it,
+moves its two refs and sends notices. A verdict cannot land, revert or
+change anything else.
+
+A hub that verifies branches lists `verify` in the `features` of `GET /v1`
+(section 1). One that does not answers every route of this section 404,
+and its landings carry no `verify`. Only the default branch of a
+repository is verified, and only once an admin turns its policy on.
+
+**The refs.**
+
+- `braid/green/<branch>`: the newest changeset of the branch with a pass
+  the hub accepts. It only moves forward, along the branch's first-parent
+  chain, but for a reset.
+- `braid/red/<branch>`: while the branch is red, the culprit the hub named
+  or, when it named none, the first fail it cannot explain. It exists only
+  while the branch is red.
+
+Only the hub moves them, each move an operation of its own, by compare
+and swap, and never in the way of a landing; section 8 says what clients
+may do with them. A client that watches the refs (`…/refs/watch`) sees
+`braid/red/<branch>` come when the branch turns red, and go when it is no
+longer red.
+
+**The policy.** `GET /v1/r/{owner}/{name}/verify/policy` (`admin`) → the
+policy:
+
+```json
+{"mode": "report", "green_from": ["report"], "flaky_moves_green": false,
+ "report": {"suite": "ci", "reporters": ["ci-bot"]}}
+```
+
+or `{"mode": "off", "green_from": [], "flaky_moves_green": false}` when
+none was ever set. `PUT /v1/r/{owner}/{name}/verify/policy` (`admin`, a
+body of at most 16 KiB) takes the whole policy, in place of the one
+before, and answers with it as the hub keeps it:
+
+- `mode`: `off`, or `report`, which takes the verdicts of the reporters.
+- `green_from`: the sources whose passes move green: `report`, the one
+  source of this version of the protocol.
+- `flaky_moves_green`: whether a flaky changeset moves green too; `false`
+  when left out.
+- `report`: `suite`, the label of the suite reported on, 1 to 32 of
+  `a-z 0-9 . _ -` that start with a letter or a digit; and `reporters`,
+  the logins whose verdicts count, 1 to 10, kept lowercase.
+
+A field the hub does not know, a `mode` other than `off` and `report`, a
+`green_from` that is empty or names a source the policy has no block for,
+a suite or reporters outside those bounds, and `report` missing with mode
+`report` are 400 `invalid`, with a detail that says which: nothing is
+dropped without a word. A change counts toward the account's limits as an
+edit (section 12), and the log records it with the admin's login. Turning
+the policy `off` deletes both refs and forgets how the branch stood;
+turning it on again starts from `unknown`.
+
+**Reporting.** `POST /v1/r/{owner}/{name}/verify/report` takes
+`Idempotency-Key` (section 1) and a body of at most 4 KiB:
+
+```json
+{"git_commit": "<40 hex>", "outcome": "pass", "suite": "ci"}
+```
+
+`outcome` is `pass`, `fail` or `flaky` (it failed, then passed when run
+again). The changeset is named by the git commit it exports to, as a
+mirror holds it, or by its id, as `"changeset": "<id>"`: exactly one of
+the two. The hub checks, in this order:
+
+1. A token: 401 without one; a web session is 403.
+2. That the caller may read the repository: 404 otherwise, as for one
+   that does not exist.
+3. A `verify:<glob>` right whose glob matches the default branch, of an
+   account that may write to the repository (section 5, GitHub's answer
+   included): 403 otherwise.
+4. That no scope of the token that reaches the repository holds `write`,
+   `admin`, `land:` or `interact`: 403 otherwise, saying to use a token
+   with `read` and `verify:<glob>` only.
+5. A policy whose mode is not `off`, with `report`, that names the
+   account among its reporters: 403 otherwise.
+
+Then the suite must be the policy's (400 `invalid`), the git commit one
+the repository knows (404 `not_found`), and the changeset on the
+first-parent chain of the default branch's head, within 10,000 changesets
+(409 `not_on_branch`, with `head`). A changeset at or below green records
+nothing (`stale`). Otherwise the hub keeps the verdict, one per changeset,
+suite and reporter: the same verdict again is a `duplicate`, and another
+one marks the changeset flaky. It then decides how the branch stands, as
+below, and answers 201 when it kept a new verdict, 200 otherwise:
+
+```json
+{"effect": "red_set | green_moved | red_cleared | recorded | duplicate | stale",
+ "status": <the status, below>}
+```
+
+A report weighs 5; a repository takes at most 60 verdicts a minute, and an
+account posts at most 600 an hour (section 12).
+
+**How the hub decides.** After each verdict, reset and change of policy,
+and whenever the branch moves, the hub looks at the changesets above green
+along the head's first-parent chain:
+
+- A changeset's verdict is what its reporters said of the policy's suite:
+  a fail with no pass is a fail; a pass with no fail is a pass; reporters
+  that disagree, a flaky report, or a reporter that changed its verdict
+  make it flaky. Verdicts of another suite do not count.
+- Green moves to the newest changeset with a pass, or with a flaky verdict
+  under `flaky_moves_green`, and never backward but by a reset.
+- A fail that a later revert explains does not count: a changeset whose
+  `reverts` field names an earlier changeset above green, and whose
+  changes are exactly the inverse of that one's, explains every fail from
+  the changeset it reverts up to the revert, the revert left out. A field
+  that names a changeset without undoing it exactly explains nothing.
+  Fails at or below a dismissal (a reset without `green`) do not count
+  either.
+- The first fail left is where the branch is red. The newest of green, of
+  a pass below the fail and of a revert at or below it is the lower bound
+  of the window where the culprit is looked for. When the fail comes right
+  after green or after a pass, the window holds it alone, and it is the
+  culprit (`decided_by: single`). Otherwise the hub names none, and red
+  marks the first fail; a revert as the lower bound names none either,
+  until the revert itself passes. A flaky changeset is never a culprit.
+- With no fail left, red goes: the branch is `green` when green is its
+  head, and `pending` until the changesets above green have a verdict.
+
+| State | What it means |
+|---|---|
+| `off` | the policy's mode is `off`: the hub verifies nothing |
+| `unknown` | the hub has not looked at the branch since the policy was turned on, or since it dropped green |
+| `green` | green is the head of the branch |
+| `pending` | no fail is left unexplained, and changesets above green wait for a verdict |
+| `red` | a fail is left unexplained: red is the culprit, or the first such fail |
+| `stuck` | red, and the hub can go no further by itself: `code` says why; a reset moves it on |
+
+A client takes any other state, such as `reverting`, `reverted` or
+`paused`, which this version of the protocol does not set, for one that
+is not green.
+
+| Code | What it means |
+|---|---|
+| `culprit_unknown` | more than one changeset separates the last pass from the first fail: no culprit is named |
+| `no_green` | the same, with no green to start from |
+| `hidden` | a revert fails itself, and so hides what it reverted: `stuck` |
+| `range_too_long` | more than 10,000 changesets are above green: `stuck`, red at the newest fail |
+| `green_off_chain` | green was no longer on the branch's first-parent chain, as when the branch was deleted and made again: both refs went, and the branch is `unknown` |
+| `flaky` | the newest verdict is flaky |
+
+**The status.** `GET /v1/r/{owner}/{name}/verify` (`read`, `Cache-Control:
+no-store`, weight 1) → how the default branch stands:
+
+```json
+{"mode": "report", "branch": "main", "state": "red", "code": null,
+ "head": "<id>", "green": "<id>", "red": "<id>", "culprit": "<id>",
+ "decided_by": "single", "since": "<time>",
+ "window": {"lower": "<id>", "lower_kind": "green", "upper": "<id>",
+            "candidates": 1},
+ "pending": [], "round": null, "revert": null, "hold": null,
+ "admin": {"lander": "<login>"}}
+```
+
+`head` is the head the hub last looked at; `green` and `red` are its refs,
+or `null`; `culprit` the changeset it blames, and `decided_by` how it
+named it (`single`), or both `null`; `since` when the branch turned red.
+`window`, while the branch is red, is where the culprit is looked for: the
+`candidates` changesets above `lower` (`lower_kind` says what it is:
+`green`, `pass`, `revert`, or `none` when there is no lower bound) up to
+`upper`. `admin` names who landed the culprit, to the repository's admins
+only, and is `null` for anyone else. `pending`, `round`, `revert` and
+`hold` are empty or `null` in this version of the protocol. With mode
+`off`, the answer is `{"mode": "off", "state": "off", …}`, every other
+field `null` or empty. The status reads what the hub keeps, and walks no
+history.
+
+**The log.** `GET /v1/r/{owner}/{name}/verify/log?after&limit` (`read`,
+weight 5) → `{"events": [{"id", "at", "code", "changeset", "other",
+"actor"}], "next"}`: what verification did, newest first, `limit` (1 to
+100, 30 when it is left out) at a time. `after` is the `next` of the page
+before, the id of its last event, and `next` is `null` on the last page.
+`code` is `policy`, `green`, `red`, `culprit`, `fixed`, `stuck`, `reset`
+or `flaky`; `changeset` the changeset it is about, or `null`; `other` an
+id or a code that goes with it, or `null`; `actor` the login that did it,
+`null` for the hub, and for callers who are not the repository's admins.
+
+**Resets.** `POST /v1/r/{owner}/{name}/verify/reset` (`admin`, takes
+`Idempotency-Key`):
+
+```json
+{"green": "<id> | null",
+ "expect": {"green": "<id> | null", "red": "<id> | null"} | null}
+```
+
+With `green`, green moves to that changeset, backward too; it must be on
+the first-parent chain of the head (400 `invalid` otherwise). Without it,
+the fails there are now are dismissed: they no longer count, and only a
+new one turns the branch red again. Either way red is cleared, and the log
+records a `reset` with the admin's login. With `expect`, the hub resets
+only while green and red are what it says, `null` for a ref that does not
+exist (409 `moved` otherwise). It answers the status.
+
+**Notices.** `verify_red`, `verify_fixed` and `verify_stuck` tell the
+repository's admins, and for a red branch with a culprit the account that
+landed it, in their inbox (section 21).
+
+**From CI.** A CI job reports with a token made for that alone, on the
+tokens page (section 14): `read` and `verify:<branch glob>` on the
+repository, and nothing more, of an account that may write to it and that
+the policy names as a reporter. It passes the token in `BRAID_TOKEN`, and
+the hub in `BRAID_HUB_URL`, from its secrets, and runs `braid hub verify
+report` (section 13) once its tests ran, with the git commit they ran on.
+Such a token reads the repository and says how its tests went, and does
+nothing more: it cannot upload, land, comment or approve.

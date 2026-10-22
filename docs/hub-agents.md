@@ -138,6 +138,52 @@ Nothing changes from braid's own rules (the braid section of the project's
   closes issue 12 of the repository when it lands on the default branch:
   say so in the message of the changeset that fixes an issue.
 
+## Keeping main green
+
+A repository's admins may have the hub verify its main branch: the
+repository's CI tells the hub how its tests went on what lands, and the
+hub keeps two refs, `braid/green/main` at the newest changeset that
+passed, and, while main is red, `braid/red/main` at the changeset it
+blames, or at the first failure it cannot explain. The hub runs none of
+the repository's code: the verdicts come from the CI.
+
+- After `braid land`, read what the hub says of main. With `--json`,
+  `hub_verify` holds its `state`, `green`, `red` and `culprit` (null when
+  the hub does not verify main), and while main is red or stuck braid says
+  so in one line on standard error, naming the culprit.
+- Before you build on main, and whenever a landing says it is red, ask:
+
+  ```bash
+  braid hub verify status --fail-on-red    # exit 4 while main is red
+  ```
+
+- A red main means stop and look. Tell the user, with the changeset the
+  hub blames, and do not keep landing on top of it as if nothing happened.
+  When the culprit is a changeset you landed, fix it, or, if the user
+  agrees, revert it with `braid revert <id> --json`. `braid/red/main`
+  appearing on the hub's ref watch means the same.
+- `braid hub verify log` shows what happened, newest first, and `braid hub
+  status` each branch's green and red.
+
+**CI** reports with a token made for it alone, on the hub's website under
+"Tokens": `read` and `verify:main` on the repository and nothing more, for
+an account that may write to it and that the repository's policy names as
+a reporter. The job passes it in `BRAID_TOKEN`, and the hub's address in
+`BRAID_HUB_URL`, from its secrets, and never signs in with `braid login`.
+After the tests, with the git commit they ran on:
+
+```bash
+braid hub verify report -R <owner>/<name> --git-commit "$GITHUB_SHA" --suite ci --outcome pass
+```
+
+`--outcome fail` when they failed, `flaky` when they passed only when run
+again. An admin of the repository turns verification on once, naming the
+suite and the CI's account:
+
+```bash
+braid hub verify policy -R <owner>/<name> --mode report --suite ci --reporter <ci-login>
+```
+
 ## Finding repositories
 
 ```bash
@@ -343,7 +389,8 @@ notifications are.
   doing it twice. When the answer is lost twice, the error says that the
   hub may have done it, and which command shows whether it did: look
   before you run the command again, since a new run is a new request.
-  `braid hub fork` and `braid hub github sync` send one too.
+  `braid hub fork`, `braid hub github sync`, `braid hub verify report` and
+  `braid hub verify reset` send one too.
 - A landing whose answer was lost says so; `braid hub request show <n>`
   then tells whether a request landed, and `braid hub status` whether a
   branch moved.
