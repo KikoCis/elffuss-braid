@@ -700,7 +700,10 @@ it.
 
   A landing on the default branch of a repository whose verification is
   on (section 25), a change request's landing included, also carries
-  `verify`: how the branch stands once the landing is done.
+  `verify`: how the branch stands once the landing is done, from the
+  hub's last decision, which the landing does not wait for: `green` turns
+  to `pending` when the landing put changesets above green, and a red
+  branch stays red.
 
   ```json
   "verify": {"state": "red", "green": "<id>|null", "red": "<id>|null",
@@ -2894,13 +2897,18 @@ before, and answers with it as the hub keeps it:
   the logins whose verdicts count, 1 to 10, kept lowercase.
 
 A field the hub does not know, a `mode` other than `off` and `report`, a
-`green_from` that is empty or names a source the policy has no block for,
-a suite or reporters outside those bounds, and `report` missing with mode
-`report` are 400 `invalid`, with a detail that says which: nothing is
-dropped without a word. A change counts toward the account's limits as an
-edit (section 12), and the log records it with the admin's login. Turning
-the policy `off` deletes both refs and forgets how the branch stood;
-turning it on again starts from `unknown`.
+`green_from` that names a source the policy has no block for, a suite or
+reporters outside those bounds, and, with mode `report`, a `green_from`
+that is empty or `report` missing are 400 `invalid`, with a detail that
+says which: nothing is dropped without a word. With mode `off`, an empty
+`green_from` is accepted, as the hub gives it. A change counts toward the
+account's limits as an edit (section 12), and the log records it with the
+admin's login. Turning the policy `off` deletes both refs and forgets how
+the branch stood; turning it on again starts from `unknown`. A change of
+the suite or of the reporters clears red, as a reset does (the log records
+a `reset` whose `other` is `policy`), since the verdicts that set it no
+longer count; the branch turns red again only on verdicts under the new
+policy, and no `verify_fixed` notice goes out.
 
 **Reporting.** `POST /v1/r/{owner}/{name}/verify/report` takes
 `Idempotency-Key` (section 1) and a body of at most 4 KiB:
@@ -2945,7 +2953,9 @@ account posts at most 600 an hour (section 12).
 
 **How the hub decides.** After each verdict, reset and change of policy,
 and whenever the branch moves, the hub looks at the changesets above green
-along the head's first-parent chain:
+along the head's first-parent chain. With no green yet, it looks at the
+newest 10,000 changesets of the branch: a fail older than those is never
+seen, and `no_green` and the naming of a culprit work within them.
 
 - A changeset's verdict is what its reporters said of the policy's suite:
   a fail with no pass is a fail; a pass with no fail is a pass; reporters
@@ -3029,7 +3039,8 @@ id or a code that goes with it, or `null`; `actor` the login that did it,
 `null` for the hub, and for callers who are not the repository's admins.
 
 **Resets.** `POST /v1/r/{owner}/{name}/verify/reset` (`admin`, takes
-`Idempotency-Key`):
+`Idempotency-Key`, a body of at most 4 KiB; 400 `invalid` while the
+policy is `off`, since there is nothing to reset):
 
 ```json
 {"green": "<id> | null",
@@ -3037,16 +3048,22 @@ id or a code that goes with it, or `null`; `actor` the login that did it,
 ```
 
 With `green`, green moves to that changeset, backward too; it must be on
-the first-parent chain of the head (400 `invalid` otherwise). Without it,
-the fails there are now are dismissed: they no longer count, and only a
-new one turns the branch red again. Either way red is cleared, and the log
-records a `reset` with the admin's login. With `expect`, the hub resets
+the first-parent chain of the head (400 `invalid` otherwise). The verdicts
+given before the reset on the changesets above it are forgotten, so that
+the reset holds: green moves on, and red comes back, only on verdicts
+given after it. Without `green`, the fails there are now are dismissed:
+they no longer count, and only a new one turns the branch red again.
+Either way red is cleared, and the log records a `reset` with the admin's
+login. With `expect`, the hub resets
 only while green and red are what it says, `null` for a ref that does not
 exist (409 `moved` otherwise). It answers the status.
 
 **Notices.** `verify_red`, `verify_fixed` and `verify_stuck` tell the
 repository's admins, and for a red branch with a culprit the account that
-landed it, in their inbox (section 21).
+landed it, in their inbox (section 21). A repository sends at most one
+every 10 minutes: a change within them is told once they are over, as the
+branch then stands. When the hub names a culprit, or another one, while
+the branch stays red, `verify_red` tells the account that landed it.
 
 **From CI.** A CI job reports with a token made for that alone, on the
 tokens page (section 14): `read` and `verify:<branch glob>` on the

@@ -495,7 +495,9 @@ pub struct VerifyEvents {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VerifyReset {
-    /// Where green goes, on the head's first-parent chain, backward too;
+    /// Where green goes, on the head's first-parent chain, backward too:
+    /// the verdicts given before the reset on the changesets above it are
+    /// forgotten, so that only new ones move green or bring red back.
     /// `None` dismisses the fails there are now instead.
     #[serde(with = "hex::opt_id")]
     pub green: Option<ObjectId>,

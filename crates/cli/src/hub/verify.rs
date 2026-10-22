@@ -138,9 +138,12 @@ shows the events before that one: the next of the page before. With
 pub(crate) const RESET_HELP: &str =
     "Its admins only. With --green REV, move green to that changeset of the
 default branch, backward too: it must be on the first-parent chain of the
-branch's head. Without --green, dismiss the fails there are now: they no
-longer count, and only a new one turns the branch red again. Either way
-red is cleared, and the log records who did it. REV is a changeset's id
+branch's head. The verdicts given before the reset on the changesets above
+it are forgotten, so the reset holds: green moves on, and red comes back,
+only on verdicts given after it. Without --green, dismiss the fails there
+are now: they no longer count, and only a new one turns the branch red
+again. Either way red is cleared, and the log records who did it. A reset
+needs the policy on. REV is a changeset's id
 or, in a repository that holds it, any revision braid resolves there.
 
 The reset goes with an Idempotency-Key, and once more with the same key
