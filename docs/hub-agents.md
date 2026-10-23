@@ -13,7 +13,7 @@ the hub pushes it there as a fast-forward, so the people who work with git
 keep doing so. Around the code, the hub keeps the conversation about it:
 issues, change requests and their reviews, stars, and an inbox for each
 account. More at <https://braid.elffuss.com>, and the protocol in
-[docs/hub.md](https://github.com/KikoCis/elffuss-braid/blob/main/docs/hub.md).
+[docs/hub.md](https://github.com/utopia-ia/elffuss-braid/blob/main/docs/hub.md).
 
 Repositories are private unless their owner makes them public. For
 anything that matters, keep a GitHub mirror: it holds every change that

@@ -8,7 +8,7 @@ grants more than it should.
 ## Reporting a vulnerability
 
 Please report it privately through GitHub:
-[**Report a vulnerability**](https://github.com/KikoCis/elffuss-braid/security/advisories/new).
+[**Report a vulnerability**](https://github.com/utopia-ia/elffuss-braid/security/advisories/new).
 Do not open a public issue for it.
 
 Include what you can: the version or commit, the steps or a minimal repository

@@ -59,10 +59,10 @@
       "alternateName": "braid",
       "description": "The source of Elffuss Braid, version control for repositories where many AI coding agents land changes at the same time, written from scratch in Rust with git at the edges.",
       "url": "https://braid.elffuss.com/",
-      "codeRepository": "https://github.com/KikoCis/elffuss-braid",
+      "codeRepository": "https://github.com/utopia-ia/elffuss-braid",
       "programmingLanguage": { "@type": "ComputerLanguage", "name": "Rust" },
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "copyrightHolder": { "@id": "https://braid.elffuss.com/#utopiaia" },
       "copyrightYear": 2026,
       "targetProduct": { "@id": "https://braid.elffuss.com/#app" }
@@ -77,7 +77,7 @@
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "Version control system",
       "operatingSystem": "Linux and other Unix-like systems",
-      "softwareVersion": "0.1.3",
+      "softwareVersion": "0.1.4",
       "softwareRequirements": "Rust 1.89 or newer, a C compiler (cc), git, and a POSIX shell such as bash",
       "installUrl": "https://braid.elffuss.com/agents.md",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
@@ -94,7 +94,7 @@
       ],
       "publisher": { "@id": "https://braid.elffuss.com/#utopiaia" },
       "sameAs": [
-        "https://github.com/KikoCis/elffuss-braid",
+        "https://github.com/utopia-ia/elffuss-braid",
         "https://huggingface.co/spaces/KikoCis/elffuss-braid"
       ]
     }
@@ -117,7 +117,7 @@
 <li><a href="#git">Git</a></li>
 <li><a href="#measured"><span data-l="en" lang="en">Measured</span><span data-l="es" lang="es">Medido</span></a></li>
 <li><a href="#honest"><span data-l="en" lang="en">Honest</span><span data-l="es" lang="es">Sin letra pequeña</span></a></li>
-<li><a href="https://github.com/KikoCis/elffuss-braid">GitHub</a></li>
+<li><a href="https://github.com/utopia-ia/elffuss-braid">GitHub</a></li>
 </ul>
 </nav>
 <a class="btn btn-primary btn-head" href="https://braidhub.elffuss.com/login"><span data-l="en" lang="en">Sign up<span class="sr-only"> for BraidHub</span></span><span data-l="es" lang="es">Regístrate<span class="sr-only"> en BraidHub</span></span></a>
@@ -147,7 +147,7 @@
 <div class="cta">
 <a class="btn" href="#story"><span data-l="en" lang="en">Watch three agents land</span><span data-l="es" lang="es">Mira cómo aterrizan tres agentes</span></a>
 <a class="btn" href="#start"><span data-l="en" lang="en">Quick start</span><span data-l="es" lang="es">Primeros pasos</span></a>
-<a class="btn" href="https://github.com/KikoCis/elffuss-braid">GitHub</a>
+<a class="btn" href="https://github.com/utopia-ia/elffuss-braid">GitHub</a>
 </div>
 <p class="fine"><span data-l="en" lang="en">Version 0.1: keep your git repository as the source of truth.</span><span data-l="es" lang="es">Versión 0.1: tu repositorio de git sigue siendo la fuente de verdad.</span></p>
 </div>
@@ -372,8 +372,8 @@ Pushed main (<span class="id">4938acdd0794</span>) to main as <span class="id">b
 rebased-from <span class="id">65bb04180402</span><span class="el">…</span>
 <span class="el">…</span></code></pre>
 </figure>
-<p data-l="en" lang="en">This scene is one of braid's tests, <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>crates/cli/tests/three_agents.rs</code></a>, which checks each landing, the conflict, the file all three end with, the op log and the push. CI runs it on every push to main and every pull request. Ids change on every run, because every signature carries its time.</p>
-<p data-l="es" lang="es">Esta escena es uno de los tests de braid, <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>crates/cli/tests/three_agents.rs</code></a>, que comprueba cada aterrizaje, el conflicto, el fichero con el que acaban los tres, el registro de operaciones y el push. La integración continua lo ejecuta en cada push a main y en cada pull request. Los ids cambian en cada ejecución, porque cada firma lleva su hora.</p>
+<p data-l="en" lang="en">This scene is one of braid's tests, <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>crates/cli/tests/three_agents.rs</code></a>, which checks each landing, the conflict, the file all three end with, the op log and the push. CI runs it on every push to main and every pull request. Ids change on every run, because every signature carries its time.</p>
+<p data-l="es" lang="es">Esta escena es uno de los tests de braid, <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>crates/cli/tests/three_agents.rs</code></a>, que comprueba cada aterrizaje, el conflicto, el fichero con el que acaban los tres, el registro de operaciones y el push. La integración continua lo ejecuta en cada push a main y en cada pull request. Los ids cambian en cada ejecución, porque cada firma lleva su hora.</p>
 <details class="run">
 <summary><span data-l="en" lang="en">Run it yourself</span><span data-l="es" lang="es">Repítela tú</span></summary>
 <div class="code" lang="en">
@@ -455,14 +455,14 @@ git init --quiet --bare remote.git
 </ol>
 </figure>
 <ol class="points" data-l="en" lang="en">
-<li><strong>Everything is an immutable object named by its BLAKE3 hash:</strong> file contents, directories and changesets. Objects are never rewritten in place; the exact bytes are in <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, with golden vectors.</li>
+<li><strong>Everything is an immutable object named by its BLAKE3 hash:</strong> file contents, directories and changesets. Objects are never rewritten in place; the exact bytes are in <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, with golden vectors.</li>
 <li><strong>A changeset records the files that changed against its first parent,</strong> plus the root tree it produces. History, blame and rebase read that short list, and the root id still commits to the whole repository.</li>
 <li><strong>Agents commit in parallel, each in its own workspace.</strong> Landing is the one step they take in turn, and it is short: a fast-forward, or a rebase path by path that merges only the files both sides touched. Conflicts come back as data, and the branch does not move.</li>
 <li><strong>Many processes share one store without a daemon.</strong> Segments are leased with locks the kernel releases if a process dies, objects reach the disk before anything that refers to them, and an append-only op log records every ref change, so <code>braid undo</code> can step back.</li>
 <li><strong>The same API at every tier,</strong> so a local store, a per-machine daemon, a cache and a server all answer the same requests. The server has a first version, <a href="#hub">BraidHub</a>; the caches and the daemon are planned (milestones 6 and 7).</li>
 </ol>
 <ol class="points" data-l="es" lang="es">
-<li><strong>Todo es un objeto inmutable que se nombra por su hash BLAKE3:</strong> el contenido de los ficheros, los directorios y los changesets. Ningún objeto se reescribe en su sitio; los bytes exactos están en <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, con vectores de referencia.</li>
+<li><strong>Todo es un objeto inmutable que se nombra por su hash BLAKE3:</strong> el contenido de los ficheros, los directorios y los changesets. Ningún objeto se reescribe en su sitio; los bytes exactos están en <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/spec/format-v1.md"><code class="nw">docs/spec/format-v1.md</code></a>, con vectores de referencia.</li>
 <li><strong>Un changeset registra los ficheros que cambiaron respecto a su primer padre,</strong> más el árbol raíz que resulta. La historia, blame y el rebase leen esa lista corta, y el id de la raíz sigue fijando el estado de todo el repositorio.</li>
 <li><strong>Los agentes hacen commit en paralelo, cada uno en su propio espacio de trabajo.</strong> Aterrizar es el único paso que dan por turnos, y es corto: un fast-forward, o un rebase ruta a ruta que solo fusiona los ficheros que han tocado los dos lados. Los conflictos vuelven como datos, y la rama no se mueve.</li>
 <li><strong>Muchos procesos comparten un almacén sin daemon.</strong> Los segmentos se reservan con cerrojos que el kernel libera si un proceso muere, los objetos llegan al disco antes que lo que apunta a ellos, y un registro de operaciones que solo crece apunta cada cambio de ref, para que <code>braid undo</code> pueda dar marcha atrás.</li>
@@ -496,7 +496,7 @@ git init --quiet --bare remote.git
 <p data-l="es" lang="es">Los mismos pasos, en una copia de git que esté en su rama principal, sin nada pendiente de commit y con <code>user.name</code> y <code>user.email</code> configurados en git:</p>
 <div class="code" lang="en">
 <div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the setup commands" data-aria-en="Copy the setup commands" data-aria-es="Copiar los comandos para configurarlo" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
-<pre tabindex="0" role="region" aria-label="Setting braid up by hand" data-aria-en="Setting braid up by hand" data-aria-es="Configurar braid a mano"><code>cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.3 elffuss-braid-cli
+<pre tabindex="0" role="region" aria-label="Setting braid up by hand" data-aria-en="Setting braid up by hand" data-aria-es="Configurar braid a mano"><code>cargo install --locked --git https://github.com/utopia-ia/elffuss-braid --tag v0.1.4 elffuss-braid-cli
 braid init                       # .braid/: the store and the agents' workspaces
 mkdir -p "$(git rev-parse --git-path info)"
 echo .braid &gt;&gt; "$(git rev-parse --git-path info/exclude)"   # git ignores braid, in this checkout only
@@ -521,8 +521,8 @@ braid git import .               # braid's main takes that commit</code></pre>
 </ol>
 <p data-l="en" lang="en">The rules, in short: they apply only where the checkout has a <code>.braid</code> directory, so a fresh clone or CI works with git as before; never edit files or use git in the project root, your shared checkout; each session works in a workspace of its own under <code>.braid/work/</code>, and commits and lands with braid; on a conflict (exit status 2), <code>braid update</code>, fix the markers, commit and land again; <code>braid update</code> before a new task; and at the end, the session tells you and offers <code>braid git sync</code> to the git remote.</p>
 <p data-l="es" lang="es">Las reglas, en resumen: solo valen donde la copia tiene un directorio <code>.braid</code>, así que un clon nuevo o la integración continua siguen con git; nada de editar ficheros ni usar git en la raíz del proyecto, que es tu copia compartida; cada sesión trabaja en su propio espacio de trabajo, dentro de <code>.braid/work/</code>, y registra y aterriza sus cambios con braid; ante un conflicto (código de salida 2), <code>braid update</code>, se arreglan los marcadores y se vuelve a registrar y aterrizar; <code>braid update</code> antes de cada tarea nueva; y al terminar, la sesión te avisa y te ofrece <code>braid git sync</code> hacia el remoto de git.</p>
-<p class="note" data-l="en" lang="en">The instructions are <a href="agents.md">agents.md</a>, part 1 of the repository's <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a>; there is an <a href="llms.txt">llms.txt</a> too. <a href="agents.md">agents.md</a> also says what to check before setting braid up, and what to do when a step fails. <a href="#start">Quick start</a>, just below, tries braid on its own repository.</p>
-<p class="note" data-l="es" lang="es">Las instrucciones son <a href="agents.md">agents.md</a>, la primera parte del <a href="https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a> del repositorio, en inglés; también hay un <a href="llms.txt">llms.txt</a>. <a href="agents.md">agents.md</a> dice además qué comprobar antes de configurar braid y qué hacer si falla un paso. <a href="#start">«Primeros pasos»</a>, justo debajo, prueba braid con su propio repositorio.</p>
+<p class="note" data-l="en" lang="en">The instructions are <a href="agents.md">agents.md</a>, part 1 of the repository's <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a>; there is an <a href="llms.txt">llms.txt</a> too. <a href="agents.md">agents.md</a> also says what to check before setting braid up, and what to do when a step fails. <a href="#start">Quick start</a>, just below, tries braid on its own repository.</p>
+<p class="note" data-l="es" lang="es">Las instrucciones son <a href="agents.md">agents.md</a>, la primera parte del <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/AGENTS.md"><code>AGENTS.md</code></a> del repositorio, en inglés; también hay un <a href="llms.txt">llms.txt</a>. <a href="agents.md">agents.md</a> dice además qué comprobar antes de configurar braid y qué hacer si falla un paso. <a href="#start">«Primeros pasos»</a>, justo debajo, prueba braid con su propio repositorio.</p>
 </div>
 </section>
 
@@ -535,7 +535,7 @@ braid git import .               # braid's main takes that commit</code></pre>
 <p data-l="es" lang="es">Braid guarda historia, la mete y la saca de git bit a bit, y da a cada agente su propio espacio de trabajo. Compílalo e importa un repositorio de git; para empezar, este mismo:</p>
 <div class="code" lang="en">
 <div class="code-bar"><span>bash</span><button class="copy" type="button" aria-label="Copy the quick start commands" data-aria-en="Copy the quick start commands" data-aria-es="Copiar los comandos de primeros pasos" hidden><span class="c-idle" data-l="en" lang="en">Copy</span><span class="c-idle" data-l="es" lang="es">Copiar</span><span class="c-done" data-l="en" lang="en">Copied</span><span class="c-done" data-l="es" lang="es">Copiado</span></button></div>
-<pre tabindex="0" role="region" aria-label="Quick start commands" data-aria-en="Quick start commands" data-aria-es="Comandos de primeros pasos"><code>git clone https://github.com/KikoCis/elffuss-braid
+<pre tabindex="0" role="region" aria-label="Quick start commands" data-aria-en="Quick start commands" data-aria-es="Comandos de primeros pasos"><code>git clone https://github.com/utopia-ia/elffuss-braid
 cd elffuss-braid
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
@@ -721,8 +721,8 @@ braid git sync https://github.com/you/project.git --dry-run --json</code></pre>
 </div>
 <div class="row">
 <dt><span data-l="en" lang="en">Protocol</span><span data-l="es" lang="es">Protocolo</span><code lang="en">HTTP</code></dt>
-<dd><p data-l="en" lang="en">What braid and the hub say to each other is documented in <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/hub.md"><code>docs/hub.md</code></a>: signing in, tokens, repositories and their permissions, objects, landing, mirrors and limits.</p>
-<p data-l="es" lang="es">Lo que se dicen braid y el hub está documentado en <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/hub.md"><code>docs/hub.md</code></a>: la entrada con GitHub, los tokens, los repositorios y sus permisos, los objetos, los aterrizajes, los espejos y los límites.</p></dd>
+<dd><p data-l="en" lang="en">What braid and the hub say to each other is documented in <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/hub.md"><code>docs/hub.md</code></a>: signing in, tokens, repositories and their permissions, objects, landing, mirrors and limits.</p>
+<p data-l="es" lang="es">Lo que se dicen braid y el hub está documentado en <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/hub.md"><code>docs/hub.md</code></a>: la entrada con GitHub, los tokens, los repositorios y sus permisos, los objetos, los aterrizajes, los espejos y los límites.</p></dd>
 </div>
 </dl>
 <div class="code narrow-left" lang="en">
@@ -758,7 +758,7 @@ braid logout                     # revokes this machine's token on the hub</code
 <li>braid and git run in alternating order, with warm caches, and the result is the median.</li>
 <li>Each scenario checks both tools did the same work. A failed check is reported as an error, never as a number.</li>
 <li>Git runs with its defaults, with automatic gc and maintenance turned off.</li>
-<li>Only ratios and git's retry counts are published, never times or sizes, together with <a href="https://github.com/KikoCis/elffuss-braid/tree/main/bench">the script</a>.</li>
+<li>Only ratios and git's retry counts are published, never times or sizes, together with <a href="https://github.com/utopia-ia/elffuss-braid/tree/main/bench">the script</a>.</li>
 <li>Not measured: cold caches, git's fsmonitor daemon or <code>feature.manyFiles</code>, and, for now, transfers between machines through BraidHub.</li>
 </ul>
 <ul class="method" data-l="es" lang="es">
@@ -766,7 +766,7 @@ braid logout                     # revokes this machine's token on the hub</code
 <li>braid y git se ejecutan en orden alterno, con las cachés calientes, y el resultado es la mediana.</li>
 <li>Cada escenario comprueba que las dos herramientas hicieron el mismo trabajo. Una comprobación fallida sale como error, nunca como número.</li>
 <li>Git se ejecuta con su configuración por defecto, con el gc y el mantenimiento automáticos desactivados.</li>
-<li>Solo se publican ratios y los reintentos de git, nunca tiempos ni tamaños, junto con <a href="https://github.com/KikoCis/elffuss-braid/tree/main/bench">el script</a>.</li>
+<li>Solo se publican ratios y los reintentos de git, nunca tiempos ni tamaños, junto con <a href="https://github.com/utopia-ia/elffuss-braid/tree/main/bench">el script</a>.</li>
 <li>No se mide: cachés frías, el daemon fsmonitor de git o <code>feature.manyFiles</code>, ni, por ahora, las transferencias entre máquinas a través de BraidHub.</li>
 </ul>
 <p class="mk-legend" id="mk-legend" hidden><span data-l="en" lang="en">Each marker is drawn from its row's ratio, on a log scale. The line is 1: to its left braid is faster or smaller, to its right slower or larger.</span><span data-l="es" lang="es">Cada marca sale de la ratio de su fila, en escala logarítmica. La línea es el 1: a su izquierda braid es más rápido o más pequeño; a su derecha, más lento o más grande.</span></p>
@@ -820,29 +820,29 @@ braid logout                     # revokes this machine's token on the hub</code
 </thead>
 <tbody>
 <tr><td><span data-l="en" lang="en">Landing and importing only move a branch forward; <code>braid undo</code> and <code>braid ref set</code> can move it back.</span><span data-l="es" lang="es">Aterrizar e importar solo hacen avanzar la rama; <code>braid undo</code> y <code>braid ref set</code> pueden hacerla retroceder.</span></td>
-<td><span data-l="en" lang="en">Simulation invariant I1, checked after every step (<a href="https://github.com/KikoCis/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span><span data-l="es" lang="es">Invariante I1 de la simulación, comprobada tras cada paso (<a href="https://github.com/KikoCis/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span></td></tr>
+<td><span data-l="en" lang="en">Simulation invariant I1, checked after every step (<a href="https://github.com/utopia-ia/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span><span data-l="es" lang="es">Invariante I1 de la simulación, comprobada tras cada paso (<a href="https://github.com/utopia-ia/elffuss-braid/tree/main/crates/sim"><code>crates/sim</code></a>).</span></td></tr>
 <tr><td><span data-l="en" lang="en">A conflict leaves the branch where it was and exits 2.</span><span data-l="es" lang="es">Un conflicto deja la rama donde estaba y sale con 2.</span></td>
-<td><span data-l="en" lang="en">I5; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span><span data-l="es" lang="es">I5; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span></td></tr>
+<td><span data-l="en" lang="en">I5; <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span><span data-l="es" lang="es">I5; <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/cli/tests/three_agents.rs"><code>three_agents.rs</code></a>.</span></td></tr>
 <tr><td><span data-l="en" lang="en">No lost update.</span><span data-l="es" lang="es">Ninguna actualización se pierde.</span></td>
-<td><span data-l="en" lang="en">I3: the head's tree equals an <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/model.rs">independent reference model</a>, file by file.</span><span data-l="es" lang="es">I3: el árbol de la cabeza coincide, fichero a fichero, con un <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/model.rs">modelo de referencia independiente</a>.</span></td></tr>
+<td><span data-l="en" lang="en">I3: the head's tree equals an <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/sim/src/model.rs">independent reference model</a>, file by file.</span><span data-l="es" lang="es">I3: el árbol de la cabeza coincide, fichero a fichero, con un <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/sim/src/model.rs">modelo de referencia independiente</a>.</span></td></tr>
 <tr><td><span data-l="en" lang="en">A changeset lands at most once, even with lost answers or duplicate requests.</span><span data-l="es" lang="es">Un changeset aterriza como mucho una vez, aunque se pierdan respuestas o lleguen peticiones duplicadas.</span></td>
-<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/lib.rs">I4</a>, with those faults injected; every seed reproduces its run.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/sim/src/lib.rs">I4</a>, con esos fallos inyectados; cada semilla reproduce su ejecución.</span></td></tr>
+<td><span data-l="en" lang="en"><a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/sim/src/lib.rs">I4</a>, with those faults injected; every seed reproduces its run.</span><span data-l="es" lang="es"><a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/sim/src/lib.rs">I4</a>, con esos fallos inyectados; cada semilla reproduce su ejecución.</span></td></tr>
 <tr><td><span data-l="en" lang="en">Changes to unrelated paths land the same in either order.</span><span data-l="es" lang="es">Los cambios en rutas que no tienen que ver entre sí aterrizan igual en cualquier orden.</span></td>
-<td><span data-l="en" lang="en">I7, plus <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/engine/tests/properties.rs">property tests</a>.</span><span data-l="es" lang="es">I7, más <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/engine/tests/properties.rs">tests de propiedades</a>.</span></td></tr>
+<td><span data-l="en" lang="en">I7, plus <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/engine/tests/properties.rs">property tests</a>.</span><span data-l="es" lang="es">I7, más <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/engine/tests/properties.rs">tests de propiedades</a>.</span></td></tr>
 <tr><td><span data-l="en" lang="en">A crash or power loss leaves a consistent store.</span><span data-l="es" lang="es">Una caída o un corte de luz dejan el almacén coherente.</span></td>
-<td><span data-l="en" lang="en">The <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/store/src/power_loss.rs">power-loss model</a> and random process kills.</span><span data-l="es" lang="es">El <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/store/src/power_loss.rs">modelo de cortes de luz</a> y procesos matados al azar.</span></td></tr>
+<td><span data-l="en" lang="en">The <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/store/src/power_loss.rs">power-loss model</a> and random process kills.</span><span data-l="es" lang="es">El <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/store/src/power_loss.rs">modelo de cortes de luz</a> y procesos matados al azar.</span></td></tr>
 <tr><td><span data-l="en" lang="en">Ids can be recomputed from the spec alone.</span><span data-l="es" lang="es">Los ids se pueden recalcular solo con la especificación.</span></td>
-<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/check_vectors.py"><code>docs/spec/check_vectors.py</code></a> with <code>b3sum</code>, in CI.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/check_vectors.py"><code>docs/spec/check_vectors.py</code></a> con <code>b3sum</code>, en la integración continua.</span></td></tr>
+<td><span data-l="en" lang="en"><a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/spec/check_vectors.py"><code>docs/spec/check_vectors.py</code></a> with <code>b3sum</code>, in CI.</span><span data-l="es" lang="es"><a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/spec/check_vectors.py"><code>docs/spec/check_vectors.py</code></a> con <code>b3sum</code>, en la integración continua.</span></td></tr>
 <tr><td><span data-l="en" lang="en">Every imported git commit exports back to the same id.</span><span data-l="es" lang="es">Todo commit de git importado se exporta de vuelta con el mismo id.</span></td>
-<td><span data-l="en" lang="en">Checked on every import; CI round-trips <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/git/tests/this_repository.rs">this repository's own history</a>.</span><span data-l="es" lang="es">Se comprueba en cada importación; la integración continua hace la ida y vuelta con <a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/git/tests/this_repository.rs">la historia de este mismo repositorio</a>.</span></td></tr>
+<td><span data-l="en" lang="en">Checked on every import; CI round-trips <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/git/tests/this_repository.rs">this repository's own history</a>.</span><span data-l="es" lang="es">Se comprueba en cada importación; la integración continua hace la ida y vuelta con <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/git/tests/this_repository.rs">la historia de este mismo repositorio</a>.</span></td></tr>
 <tr><td><span data-l="en" lang="en"><code class="nw">log -- path</code>, merge bases and blame agree with git.</span><span data-l="es" lang="es"><code class="nw">log -- path</code>, las bases de fusión y blame coinciden con git.</span></td>
-<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/repo/tests/history_vs_git.rs">Differential tests</a>, apart from two documented differences in blame.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/repo/tests/history_vs_git.rs">Tests diferenciales</a>, salvo dos diferencias documentadas en blame.</span></td></tr>
+<td><span data-l="en" lang="en"><a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/repo/tests/history_vs_git.rs">Differential tests</a>, apart from two documented differences in blame.</span><span data-l="es" lang="es"><a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/repo/tests/history_vs_git.rs">Tests diferenciales</a>, salvo dos diferencias documentadas en blame.</span></td></tr>
 <tr><td><span data-l="en" lang="en">Checkouts write nothing outside the workspace.</span><span data-l="es" lang="es">Los checkouts no escriben nada fuera del espacio de trabajo.</span></td>
-<td><a href="https://github.com/KikoCis/elffuss-braid/blob/main/crates/wc/tests/hostile.rs"><code>crates/wc/tests/hostile.rs</code></a>.</td></tr>
+<td><a href="https://github.com/utopia-ia/elffuss-braid/blob/main/crates/wc/tests/hostile.rs"><code>crates/wc/tests/hostile.rs</code></a>.</td></tr>
 <tr><td><span data-l="en" lang="en">No unsafe Rust in braid's own crates.</span><span data-l="es" lang="es">Nada de Rust unsafe en los crates propios de braid.</span></td>
-<td><span data-l="en" lang="en"><code>#![forbid(unsafe_code)]</code> in every library crate; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/Cargo.toml">denied workspace-wide</a>.</span><span data-l="es" lang="es"><code>#![forbid(unsafe_code)]</code> en cada crate de biblioteca; <a href="https://github.com/KikoCis/elffuss-braid/blob/main/Cargo.toml">denegado en todo el workspace</a>.</span></td></tr>
+<td><span data-l="en" lang="en"><code>#![forbid(unsafe_code)]</code> in every library crate; <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/Cargo.toml">denied workspace-wide</a>.</span><span data-l="es" lang="es"><code>#![forbid(unsafe_code)]</code> en cada crate de biblioteca; <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/Cargo.toml">denegado en todo el workspace</a>.</span></td></tr>
 <tr><td><span data-l="en" lang="en">Trees, changesets, names, the git map and git objects are fuzzed.</span><span data-l="es" lang="es">Los árboles, los changesets, los nombres, el mapa de git y los objetos de git pasan por fuzzing.</span></td>
-<td><span data-l="en" lang="en"><a href="https://github.com/KikoCis/elffuss-braid/tree/main/fuzz/fuzz_targets">Five <span class="nw">cargo-fuzz</span> targets</a>, a minute each in CI.</span><span data-l="es" lang="es"><a href="https://github.com/KikoCis/elffuss-braid/tree/main/fuzz/fuzz_targets">Cinco objetivos de <span class="nw">cargo-fuzz</span></a>, un minuto cada uno en la integración continua.</span></td></tr>
+<td><span data-l="en" lang="en"><a href="https://github.com/utopia-ia/elffuss-braid/tree/main/fuzz/fuzz_targets">Five <span class="nw">cargo-fuzz</span> targets</a>, a minute each in CI.</span><span data-l="es" lang="es"><a href="https://github.com/utopia-ia/elffuss-braid/tree/main/fuzz/fuzz_targets">Cinco objetivos de <span class="nw">cargo-fuzz</span></a>, un minuto cada uno en la integración continua.</span></td></tr>
 </tbody>
 </table>
 </div>
@@ -904,10 +904,10 @@ braid logout                     # revokes this machine's token on the hub</code
 </ul>
 <h3 class="repos-title"><span data-l="en" lang="en">On GitHub</span><span data-l="es" lang="es">En GitHub</span></h3>
 <ul class="repos">
-<li><a href="https://github.com/KikoCis/elffuss"><code>elffuss</code></a> <span data-l="en" lang="en">the shared browser-agent core behind Code and Claw.</span><span data-l="es" lang="es">el núcleo de agente de navegador que comparten Code y Claw.</span></li>
-<li><a href="https://github.com/KikoCis/elffuss-code"><code class="nw">elffuss-code</code></a> <span data-l="en" lang="en">an IDE with an AI agent that runs entirely in your browser.</span><span data-l="es" lang="es">un IDE con un agente de IA que corre entero en tu navegador.</span></li>
-<li><a href="https://github.com/KikoCis/elffuss-claw"><code class="nw">elffuss-claw</code></a> <span data-l="en" lang="en">an agentic OS in your browser, with apps generated on demand.</span><span data-l="es" lang="es">un sistema operativo agéntico en tu navegador, con apps que se generan al pedirlas.</span></li>
-<li><a href="https://github.com/KikoCis/elffuss-translator"><code class="nw">elffuss-translator</code></a> <span data-l="en" lang="en">real-time conversation translation in the browser.</span><span data-l="es" lang="es">traducción de conversaciones en tiempo real, en el navegador.</span></li>
+<li><a href="https://github.com/utopia-ia/elffuss"><code>elffuss</code></a> <span data-l="en" lang="en">the shared browser-agent core behind Code and Claw.</span><span data-l="es" lang="es">el núcleo de agente de navegador que comparten Code y Claw.</span></li>
+<li><a href="https://github.com/utopia-ia/elffuss-code"><code class="nw">elffuss-code</code></a> <span data-l="en" lang="en">an IDE with an AI agent that runs entirely in your browser.</span><span data-l="es" lang="es">un IDE con un agente de IA que corre entero en tu navegador.</span></li>
+<li><a href="https://github.com/utopia-ia/elffuss-claw"><code class="nw">elffuss-claw</code></a> <span data-l="en" lang="en">an agentic OS in your browser, with apps generated on demand.</span><span data-l="es" lang="es">un sistema operativo agéntico en tu navegador, con apps que se generan al pedirlas.</span></li>
+<li><a href="https://github.com/utopia-ia/elffuss-translator"><code class="nw">elffuss-translator</code></a> <span data-l="en" lang="en">real-time conversation translation in the browser.</span><span data-l="es" lang="es">traducción de conversaciones en tiempo real, en el navegador.</span></li>
 </ul>
 </div>
 </section>
@@ -917,15 +917,17 @@ braid logout                     # revokes this machine's token on the hub</code
 <footer class="site-foot">
 <div class="wrap">
 <div class="foot-row">
-<a href="https://github.com/KikoCis/elffuss-braid/blob/main/LICENSE">Apache-2.0</a>
+<a href="https://github.com/utopia-ia/elffuss-braid/blob/main/LICENSE">Apache-2.0</a>
 <span class="dot" aria-hidden="true">·</span>
 <span>Copyright 2026 UtopiaIA</span>
 <span class="dot" aria-hidden="true">·</span>
-<a href="https://github.com/KikoCis/elffuss-braid">GitHub</a>
+<a href="https://github.com/utopia-ia/elffuss-braid">GitHub</a>
 <span class="dot" aria-hidden="true">·</span>
 <a href="#top"><span data-l="en" lang="en">Back to top</span><span data-l="es" lang="es">Volver arriba</span></a>
 <span class="lang lang-foot" role="group" aria-label="Language" data-aria-en="Language" data-aria-es="Idioma" hidden><button type="button" data-set-lang="en" lang="en" aria-pressed="true" title="English">EN</button><button type="button" data-set-lang="es" lang="es" aria-pressed="false" title="Español">ES</button></span>
 </div>
+<p class="foot-note" data-l="en" lang="en">Elffuss Braid now lives in the UtopiaIA organization on GitHub, at github.com/utopia-ia/elffuss-braid. It moved from github.com/KikoCis/elffuss-braid on 23 October 2026; the old address redirects.</p>
+<p class="foot-note" data-l="es" lang="es">Elffuss Braid vive ahora en la organización UtopiaIA de GitHub, en github.com/utopia-ia/elffuss-braid. Se mudó desde github.com/KikoCis/elffuss-braid el 23 de octubre de 2026; la dirección antigua redirige.</p>
 <p class="foot-note" data-l="en" lang="en">Braid is an independent implementation inspired by what Anthropic published about <a href="scion.html">Scion</a>. It contains no Anthropic code and is not affiliated with or endorsed by Anthropic.</p>
 <p class="foot-note" data-l="es" lang="es">Braid es una implementación independiente inspirada en lo que Anthropic publicó sobre <a href="scion.html">Scion</a>. No contiene código de Anthropic y no tiene relación con Anthropic ni cuenta con su respaldo.</p>
 </div>

@@ -17,9 +17,11 @@ come back as data, in text or JSON, with exit status 2, and `main` does
 not move. Git stays at the edges: `braid git import` brings a history in
 bit for bit, and `braid git sync` keeps GitHub in step.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/KikoCis/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/KikoCis/elffuss-braid/actions/workflows/ci.yml)
+Elffuss Braid now lives in the UtopiaIA organization on GitHub, at github.com/utopia-ia/elffuss-braid. It moved from github.com/KikoCis/elffuss-braid on 23 October 2026; the old address redirects.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/utopia-ia/elffuss-braid/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/utopia-ia/elffuss-braid/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-c8a06a?style=flat-square&logo=apache&logoColor=white)](LICENSE)
-[![Version 0.1.3](https://img.shields.io/badge/version-0.1.3-54dcc6?style=flat-square)](#status-and-roadmap)
+[![Version 0.1.4](https://img.shields.io/badge/version-0.1.4-54dcc6?style=flat-square)](#status-and-roadmap)
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-8272ff?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Format v1: frozen](https://img.shields.io/badge/format%20v1-frozen-c8a06a?style=flat-square)](docs/spec/format-v1.md)
 
@@ -41,10 +43,10 @@ endorsed by Anthropic.*
 
 ## Scion's ideas, in braid
 
-Each row is an idea from the article, what braid 0.1.3 does with it, and
+Each row is an idea from the article, what braid 0.1.4 does with it, and
 how far along that is.
 
-| Scion's idea | In braid 0.1.3 | State |
+| Scion's idea | In braid 0.1.4 | State |
 |---|---|---|
 | A changeset lists the files changed against its first parent | The same, plus the root tree id; the bytes are [frozen](docs/spec/format-v1.md) | ✅ done |
 | Data is content-addressed and never changes, so any cache can serve it | BLAKE3 ids; BraidHub serves every object by id as immutable | ✅ done |
@@ -91,7 +93,7 @@ compiler and git. CI tests Linux and other Unix-like systems; Windows is
 not tested yet.
 
 ```bash
-cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.3 elffuss-braid-cli
+cargo install --locked --git https://github.com/utopia-ia/elffuss-braid --tag v0.1.4 elffuss-braid-cli
 ```
 
 To set braid up in a project you already have,
@@ -447,6 +449,8 @@ matters, keep a GitHub mirror as the source of truth.
 | 6 | Server: [BraidHub](#braidhub) with GitHub sign-in, landing over HTTP, GitHub mirrors and sparse clones; caching tiers | first version; caching planned |
 | 7 | Daemon, virtual file system, WebAssembly core | planned |
 
+New in 0.1.4: the repository moved to the UtopiaIA organization; no change to the program.
+
 New in 0.1.1: `braid revert`, and `braid verify`, which runs when you run
 it: one run tests a branch's head, bisects a failure to the changeset that
 caused it and, with `--revert`, lands that changeset's revert.
@@ -612,11 +616,11 @@ building software with agents:
 Braid has a [Space on Hugging Face](https://huggingface.co/spaces/KikoCis/elffuss-braid)
 too.
 
-- [elffuss](https://github.com/KikoCis/elffuss): the shared browser-agent core behind Code and Claw.
-- [elffuss-code](https://github.com/KikoCis/elffuss-code): an IDE with an AI agent that runs entirely in your browser ([Space](https://huggingface.co/spaces/KikoCis/elffuss-code)).
-- [elffuss-claw](https://github.com/KikoCis/elffuss-claw): an agentic OS in your browser, with apps generated on demand ([Space](https://huggingface.co/spaces/KikoCis/elffuss-claw)).
-- [elffuss-engine](https://github.com/KikoCis/elffuss-engine): an LLM runtime that runs GGUF models on WebGPU.
-- [elffuss-translator](https://github.com/KikoCis/elffuss-translator): real-time conversation translation in the browser.
+- [elffuss](https://github.com/utopia-ia/elffuss): the shared browser-agent core behind Code and Claw.
+- [elffuss-code](https://github.com/utopia-ia/elffuss-code): an IDE with an AI agent that runs entirely in your browser ([Space](https://huggingface.co/spaces/KikoCis/elffuss-code)).
+- [elffuss-claw](https://github.com/utopia-ia/elffuss-claw): an agentic OS in your browser, with apps generated on demand ([Space](https://huggingface.co/spaces/KikoCis/elffuss-claw)).
+- [elffuss-engine](https://github.com/utopia-ia/elffuss-engine): an LLM runtime that runs GGUF models on WebGPU.
+- [elffuss-translator](https://github.com/utopia-ia/elffuss-translator): real-time conversation translation in the browser.
 
 ## Prior art and credits
 
@@ -660,6 +664,8 @@ tests cada vez que lo lanzas tras aterrizar; si fallan, localiza con bisect
 el changeset que los rompió y, con `--revert`, aterriza el cambio que lo
 deshace. Git se queda en los bordes, así que GitHub y Gitea siguen
 funcionando.
+
+Elffuss Braid vive ahora en la organización UtopiaIA de GitHub, en github.com/utopia-ia/elffuss-braid. Se mudó desde github.com/KikoCis/elffuss-braid el 23 de octubre de 2026; la dirección antigua redirige.
 
 Se inspira en las ideas que Anthropic publicó sobre Scion, su sistema
 interno de control de versiones. Es una implementación independiente: no

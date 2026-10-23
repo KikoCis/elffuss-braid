@@ -373,7 +373,7 @@ fn the_guide_installs_the_braid_it_describes() {
     let version = env!("CARGO_PKG_VERSION");
     let guide = part_one();
     let install = format!(
-        "cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v{version} elffuss-braid-cli\n"
+        "cargo install --locked --git https://github.com/utopia-ia/elffuss-braid --tag v{version} elffuss-braid-cli\n"
     );
     assert!(guide.contains(&install), "{install}");
     assert!(guide.contains(&format!("\"braid {version}\", or newer")));

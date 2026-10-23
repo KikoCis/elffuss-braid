@@ -45,7 +45,7 @@
       "description": "What Elffuss Braid takes from the ideas Anthropic published about Scion, where it differs, the prior art it credits, and other open implementations. Braid is independent and not affiliated with or endorsed by Anthropic.",
       "inLanguage": "en",
       "isPartOf": { "@type": "WebSite", "@id": "https://braid.elffuss.com/#website", "name": "Elffuss Braid", "url": "https://braid.elffuss.com/" },
-      "about": { "@type": "SoftwareSourceCode", "@id": "https://braid.elffuss.com/#source", "name": "Elffuss Braid", "codeRepository": "https://github.com/KikoCis/elffuss-braid" },
+      "about": { "@type": "SoftwareSourceCode", "@id": "https://braid.elffuss.com/#source", "name": "Elffuss Braid", "codeRepository": "https://github.com/utopia-ia/elffuss-braid" },
       "breadcrumb": { "@id": "https://braid.elffuss.com/scion.html#breadcrumb" }
     },
     {
@@ -74,7 +74,7 @@
 <li><a href="./#git">Git</a></li>
 <li><a href="./#hub">BraidHub</a></li>
 <li><a href="./#measured"><span data-l="en" lang="en">Measured</span><span data-l="es" lang="es">Medido</span></a></li>
-<li><a href="https://github.com/KikoCis/elffuss-braid">GitHub</a></li>
+<li><a href="https://github.com/utopia-ia/elffuss-braid">GitHub</a></li>
 </ul>
 </nav>
 <a class="btn btn-primary btn-head" href="https://braidhub.elffuss.com/login"><span data-l="en" lang="en">Sign up<span class="sr-only"> for BraidHub</span></span><span data-l="es" lang="es">Regístrate<span class="sr-only"> en BraidHub</span></span></a>
@@ -99,7 +99,7 @@
 <div class="cta">
 <a class="btn" href="./#how"><span data-l="en" lang="en">How braid works</span><span data-l="es" lang="es">Cómo funciona braid</span></a>
 <a class="btn" href="./#start"><span data-l="en" lang="en">Quick start</span><span data-l="es" lang="es">Primeros pasos</span></a>
-<a class="btn" href="https://github.com/KikoCis/elffuss-braid"><span data-l="en" lang="en">Source on GitHub</span><span data-l="es" lang="es">El código en GitHub</span></a>
+<a class="btn" href="https://github.com/utopia-ia/elffuss-braid"><span data-l="en" lang="en">Source on GitHub</span><span data-l="es" lang="es">El código en GitHub</span></a>
 </div>
 <p class="fine"><span data-l="en" lang="en">Version 0.1: keep your git repository as the source of truth.</span><span data-l="es" lang="es">Versión 0.1: tu repositorio de git sigue siendo la fuente de verdad.</span></p>
 </div>
@@ -117,10 +117,10 @@
 <dt><span data-l="en" lang="en">Changesets</span><span data-l="es" lang="es">Changesets</span><code lang="en">format v1</code></dt>
 <dd><div data-l="en" lang="en">
 <p><strong>In the post:</strong> “a changeset stores a list of the files that changed relative to its first parent”.</p>
-<p><strong>In braid:</strong> the same. A changeset records the files that changed against its first parent, plus the root tree it produces, so history, blame and rebase read a short list while the root id still commits to the whole repository. Files, directories and changesets are immutable objects named by their BLAKE3 hash, and <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md">format v1</a>, which fixes their bytes, is frozen.</p>
+<p><strong>In braid:</strong> the same. A changeset records the files that changed against its first parent, plus the root tree it produces, so history, blame and rebase read a short list while the root id still commits to the whole repository. Files, directories and changesets are immutable objects named by their BLAKE3 hash, and <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/spec/format-v1.md">format v1</a>, which fixes their bytes, is frozen.</p>
 </div><div data-l="es" lang="es">
 <p><strong>En el artículo:</strong> un changeset guarda la lista de los ficheros que cambiaron respecto a su primer padre.</p>
-<p><strong>En braid:</strong> lo mismo. Un changeset registra los ficheros que cambiaron respecto a su primer padre, más el árbol raíz que resulta, así que la historia, blame y el rebase leen una lista corta y el id de la raíz sigue fijando el estado de todo el repositorio. Ficheros, directorios y changesets son objetos inmutables que se nombran por su hash BLAKE3, y el <a href="https://github.com/KikoCis/elffuss-braid/blob/main/docs/spec/format-v1.md">formato v1</a>, que fija sus bytes, está congelado.</p>
+<p><strong>En braid:</strong> lo mismo. Un changeset registra los ficheros que cambiaron respecto a su primer padre, más el árbol raíz que resulta, así que la historia, blame y el rebase leen una lista corta y el id de la raíz sigue fijando el estado de todo el repositorio. Ficheros, directorios y changesets son objetos inmutables que se nombran por su hash BLAKE3, y el <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/docs/spec/format-v1.md">formato v1</a>, que fija sus bytes, está congelado.</p>
 </div></dd>
 </div>
 <div class="row">
@@ -166,12 +166,12 @@
 <p class="lead" data-l="es" lang="es">Scion gira en torno a un servidor: según el artículo, sus clientes están siempre conectados. Braid empieza por una sola máquina.</p>
 <ol class="points" data-l="en" lang="en">
 <li><strong>No server on one machine.</strong> In Scion, “every commit, rebase, or merge happens on the server, so there’s nothing to push”. In braid, the agents of one machine share one local store, each in a workspace of its own, and land on one main in turn. Many braid processes share that store: segments are leased with locks the kernel releases if a process dies, objects reach the disk before anything that refers to them, and an append-only op log records every change of a ref, so <code>braid undo</code> can step back. Agents on one machine commit, land and read history with no network. When agents on several machines share a repository, it lives on <a href="./#hub">BraidHub</a>, which is then the authority, as Scion's servers are, and <code>braid land</code> lands there with the output and exit statuses of a local landing. BraidHub is a first version: for anything that matters, keep a GitHub mirror as the source of truth.</li>
-<li><strong>Open source.</strong> Scion is “an in-house version control system”, and the post says “it’s difficult to offer Scion in a form that would be broadly useful to other organizations.” Braid is open source, under the <a href="https://github.com/KikoCis/elffuss-braid/blob/main/LICENSE"><span class="nw">Apache-2.0</span></a> license: anyone can read it, build it, run it and change it.</li>
+<li><strong>Open source.</strong> Scion is “an in-house version control system”, and the post says “it’s difficult to offer Scion in a form that would be broadly useful to other organizations.” Braid is open source, under the <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/LICENSE"><span class="nw">Apache-2.0</span></a> license: anyone can read it, build it, run it and change it.</li>
 <li><strong>Git at the edges.</strong> Anthropic moved its monorepo from git to Scion, and of Scion the post says: “It diverges significantly from git, meaning companies would need to migrate every piece of the development lifecycle”. Braid keeps git: <code>braid git import</code> brings in a git repository's whole history bit for bit: each commit is exported again as it is imported, and the import stops unless its id comes back the same. <code>braid git sync</code> keeps GitHub, Gitea or any git remote in step, and the remote only ever fast-forwards. In a clone where braid is not set up, agents work with git as before.</li>
 </ol>
 <ol class="points" data-l="es" lang="es">
 <li><strong>Sin servidor en una sola máquina.</strong> En Scion, todo commit, rebase o fusión ocurre en el servidor, así que no hay nada que subir con push. En braid, los agentes de una máquina comparten un único almacén local, cada uno en su propio espacio de trabajo, y aterrizan por turnos en un solo main. Muchos procesos de braid comparten ese almacén: los segmentos se reservan con cerrojos que el kernel libera si un proceso muere, los objetos llegan al disco antes que lo que apunta a ellos, y un registro de operaciones que solo crece apunta cada cambio de ref, para que <code>braid undo</code> pueda dar marcha atrás. Los agentes de una máquina hacen commit, aterrizan y leen la historia sin red. Cuando agentes de varias máquinas comparten un repositorio, este vive en <a href="./#hub">BraidHub</a>, que pasa a ser la autoridad, como los servidores de Scion, y <code>braid land</code> aterriza allí con la misma salida y los mismos códigos de salida que un aterrizaje local. BraidHub es una primera versión: para todo lo que importe, ten un espejo en GitHub como fuente de verdad.</li>
-<li><strong>Código abierto.</strong> Scion es un sistema de control de versiones interno, y el artículo dice que es difícil ofrecerlo de una forma que les sea útil a otras organizaciones en general. Braid es de código abierto, con licencia <a href="https://github.com/KikoCis/elffuss-braid/blob/main/LICENSE"><span class="nw">Apache-2.0</span></a>: cualquiera puede leerlo, compilarlo, ejecutarlo y cambiarlo.</li>
+<li><strong>Código abierto.</strong> Scion es un sistema de control de versiones interno, y el artículo dice que es difícil ofrecerlo de una forma que les sea útil a otras organizaciones en general. Braid es de código abierto, con licencia <a href="https://github.com/utopia-ia/elffuss-braid/blob/main/LICENSE"><span class="nw">Apache-2.0</span></a>: cualquiera puede leerlo, compilarlo, ejecutarlo y cambiarlo.</li>
 <li><strong>Git en los bordes.</strong> Anthropic pasó su monorepo de git a Scion, y el artículo dice que Scion se aparta tanto de git que una empresa tendría que migrar cada pieza de su ciclo de desarrollo. Braid se queda con git: <code>braid git import</code> trae toda la historia de un repositorio de git bit a bit: cada commit se vuelve a exportar al importarlo, y la importación se detiene si su id no sale idéntico. <code>braid git sync</code> mantiene al día GitHub, Gitea o cualquier remoto de git, y el remoto solo avanza en fast-forward. En un clon donde braid no está configurado, los agentes trabajan con git, como siempre.</li>
 </ol>
 <p class="next-link"><a href="./#story"><span data-l="en" lang="en">Watch three agents land on one main</span><span data-l="es" lang="es">Mira cómo aterrizan tres agentes en un solo main</span></a></p>
@@ -277,13 +277,13 @@
 <footer class="site-foot">
 <div class="wrap">
 <div class="foot-row">
-<a href="https://github.com/KikoCis/elffuss-braid/blob/main/LICENSE">Apache-2.0</a>
+<a href="https://github.com/utopia-ia/elffuss-braid/blob/main/LICENSE">Apache-2.0</a>
 <span class="dot" aria-hidden="true">·</span>
 <span>Copyright 2026 UtopiaIA</span>
 <span class="dot" aria-hidden="true">·</span>
 <a href="./"><span data-l="en" lang="en">Elffuss Braid home</span><span data-l="es" lang="es">Inicio de Elffuss Braid</span></a>
 <span class="dot" aria-hidden="true">·</span>
-<a href="https://github.com/KikoCis/elffuss-braid">GitHub</a>
+<a href="https://github.com/utopia-ia/elffuss-braid">GitHub</a>
 <span class="dot" aria-hidden="true">·</span>
 <a href="#top"><span data-l="en" lang="en">Back to top</span><span data-l="es" lang="es">Volver arriba</span></a>
 <span class="lang lang-foot" role="group" aria-label="Language" data-aria-en="Language" data-aria-es="Idioma" hidden><button type="button" data-set-lang="en" lang="en" aria-pressed="true" title="English">EN</button><button type="button" data-set-lang="es" lang="es" aria-pressed="false" title="Español">ES</button></span>

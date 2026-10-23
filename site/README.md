@@ -155,16 +155,16 @@ all of this is true:
 3. Every link into the repository answers from `main`. Check them against
    what `main` holds, not against github.com, which answers 200 for any path
    of an empty repository: a file answers 200 at
-   `https://raw.githubusercontent.com/KikoCis/elffuss-braid/main/<path>`,
+   `https://raw.githubusercontent.com/utopia-ia/elffuss-braid/main/<path>`,
    and a directory (`crates/sim`, `fuzz/fuzz_targets`, `bench`) is listed by
-   `gh api 'repos/KikoCis/elffuss-braid/contents/<path>?ref=main'`.
+   `gh api 'repos/utopia-ia/elffuss-braid/contents/<path>?ref=main'`.
 4. The text matches `main`. The ratios block, for one, lists the work on
    speed that came after the commit measured, and that list grows.
 5. `https://braid.elffuss.com/` answers 200 with a certificate for that
    name, `http://braid.elffuss.com/` redirects to it, and
    `https://braid.elffuss.com/og.png` answers 200 as `image/png`. Only then
    does the link go anywhere: the repository's homepage
-   (`gh repo edit KikoCis/elffuss-braid --homepage https://braid.elffuss.com`),
+   (`gh repo edit utopia-ia/elffuss-braid --homepage https://braid.elffuss.com`),
    and posts, whose link previews are fetched once and kept.
 6. `https://braid.elffuss.com/agents.md` answers 200 as
    `text/markdown; charset=utf-8` and `https://braid.elffuss.com/llms.txt`

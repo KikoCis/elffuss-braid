@@ -4,11 +4,11 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
-repository = "https://github.com/KikoCis/elffuss-braid"
+repository = "https://github.com/utopia-ia/elffuss-braid"
 homepage = "https://elffuss.com"
 publish = false
 

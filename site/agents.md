@@ -5,7 +5,7 @@ it up for agents. Read this file whole before you run anything, as it is
 written: fetch it with `curl -fsSL https://braid.elffuss.com/agents.md`
 rather than with a tool that summarises pages. Then run its commands
 exactly as they are given. The same text is part 1 of
-[AGENTS.md](https://github.com/KikoCis/elffuss-braid/blob/main/AGENTS.md)
+[AGENTS.md](https://github.com/utopia-ia/elffuss-braid/blob/main/AGENTS.md)
 in braid's repository.
 
 Braid is a version control system for repositories where many agents land
@@ -14,7 +14,7 @@ one shared store, and landing on the main branch is one short step that
 agents take in turn: no fetch, rebase and push loop. Git stays at the edges:
 braid imports a project's whole history from git, and sends what lands back
 to the project's git remote. More at <https://braid.elffuss.com>, and the
-source at <https://github.com/KikoCis/elffuss-braid>.
+source at <https://github.com/utopia-ia/elffuss-braid>. The repository moved there from github.com/KikoCis/elffuss-braid on 23 October 2026; the old address redirects.
 
 **Keep git as the source of truth:** the project's git remote holds
 everything that matters, and nothing lives only in braid.
@@ -33,7 +33,7 @@ Braid builds from source with cargo. It needs:
   or to run the command themselves.
 
 ```bash
-cargo install --locked --git https://github.com/KikoCis/elffuss-braid --tag v0.1.3 elffuss-braid-cli
+cargo install --locked --git https://github.com/utopia-ia/elffuss-braid --tag v0.1.4 elffuss-braid-cli
 ```
 
 It compiles braid and its dependencies from source, which takes a while:
@@ -50,7 +50,7 @@ command again replaces an older braid with this version.
 In the project root, on its main branch:
 
 ```bash
-braid --version     # "braid 0.1.3", or newer, once it is installed
+braid --version     # "braid 0.1.4", or newer, once it is installed
 braid cat-object "$(git branch --show-current):AGENTS.md" | grep -q '^<!-- braid:start -->' && grep -q '^name = .' .braid/config && grep -q '^email = .' .braid/config && echo "braid is set up here"
 ```
 
