@@ -621,6 +621,7 @@ too.
 - [elffuss-claw](https://github.com/utopia-ia/elffuss-claw): an agentic OS in your browser, with apps generated on demand ([Space](https://huggingface.co/spaces/KikoCis/elffuss-claw)).
 - [elffuss-engine](https://github.com/utopia-ia/elffuss-engine): an LLM runtime that runs GGUF models on WebGPU.
 - [elffuss-translator](https://github.com/utopia-ia/elffuss-translator): real-time conversation translation in the browser.
+- [elffuss-copilot](https://github.com/utopia-ia/elffuss-copilot): skills for your meetings, in the browser.
 
 ## Prior art and credits
 
